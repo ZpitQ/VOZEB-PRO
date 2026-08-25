@@ -78,4 +78,3 @@ function respondToS3Probe(request: IncomingMessage, response: ServerResponse) {
     response.writeHead(200, { "Content-Type": "application/xml" });
     response.end("<PutObjectResult/>");
 }
-

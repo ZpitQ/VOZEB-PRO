@@ -201,4 +201,3 @@ function isMissingObjectError(error: unknown) {
     const value = error as { name?: string; Code?: string; $metadata?: { httpStatusCode?: number } };
     return value.name === "NotFound" || value.Code === "NoSuchKey" || value.$metadata?.httpStatusCode === 404;
 }
-

@@ -193,4 +193,3 @@ app and worker containers -> healthy with no new object-storage errors
 ```
 
 If any deployment verification fails, restore the previously recorded image/commit through the same external-db Compose file and report the exact failing check.
-

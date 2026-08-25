@@ -36,4 +36,3 @@ After automated tests, run a live isolated OSS probe under `vozeb-pro/media/.cod
 ## Scope
 
 The change is limited to the object storage client, its regression tests, and the repository's required pending-test and changelog records. It does not alter stored media registrations, object keys, database schema, credentials, or deployment configuration.
-
