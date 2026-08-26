@@ -3,6 +3,7 @@
 ## Unreleased
 
 - [存储] 修复阿里云 OSS 批量删除缺少 Content-MD5，以及签名读取覆盖 Content-Type 导致的连接检查、缩略图、下载和删除失败。
+- [模型] 新增 GCP Agent Platform 原生文本与图片渠道，支持 ADC 或 Google Cloud API Key、流式文本、文生图和参考图编辑。
 
 ## v0.0.7
 
