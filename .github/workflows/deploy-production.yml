@@ -41,7 +41,7 @@ jobs:
         shell: bash
         working-directory: /home/VOZEB-PRO
         env:
-          VOZEB_PRO_IMAGE: ghcr.io/${{ github.repository_owner }}/vozeb-pro:${{ inputs.image_tag }}
+          VOZEB_PRO_IMAGE: ghcr.io/zpitq/vozeb-pro:${{ inputs.image_tag }}
         run: |
           compose_args=(-f docker-compose.external-db.yml)
           if [[ -f docker-compose.gcp-adc.yml ]]; then

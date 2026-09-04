@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/vozeb-pro-docs
+  IMAGE_NAME: ghcr.io/zpitq/vozeb-pro-docs
 
 jobs:
   quality:
