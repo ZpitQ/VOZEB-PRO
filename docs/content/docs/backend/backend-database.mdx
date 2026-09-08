@@ -39,7 +39,7 @@ VOZEB PRO 的 PostgreSQL 真实表名统一使用项目名前缀 `vozeb_pro_`。
 
 - `vozeb_pro_schema_migrations`：已应用的数据库结构版本。
 - `vozeb_pro_app_settings`：站点、注册、邮箱、积分、生成、支付配置、逻辑模型目录、渠道绑定和默认模型等全局设置；`logical_models` JSONB 保存用户可见模型及其能力、上游模型、渠道、启用状态和优先级，`generation_cost_control` JSONB 保存管理员配置的单任务、单用户每日和全站每日积分成本上限，三个值为 `0` 时均表示不限制；`data_lifecycle` JSONB 保存四类技术到期清理开关和单类批次大小，不承载对话、支付、审计等长期业务数据的法律保留期限。
-- `vozeb_pro_object_storage_settings`：S3 兼容外部存储单例配置，保存启用状态、Endpoint、Region、Bucket、对象前缀、path-style 模式及加密后的 Access Key/Secret Key；管理接口只返回密钥是否已配置，不回传明文。
+- `vozeb_pro_object_storage_settings`：S3 兼容外部存储单例配置，保存启用状态、Endpoint、Region、Bucket、对象前缀、CDN 地址前缀 `cdn_base_url`、path-style 模式及加密后的 Access Key/Secret Key；CDN 默认地址为 `https://design-img.so-shine.com`，显式留空时使用源站签名地址。管理接口只返回密钥是否已配置，不回传明文。
 - `vozeb_pro_system_model_channels`：系统模型渠道、分别加密保存的 API Key 与渠道生成回调密钥、模型列表和高级配置；后台不保存渠道验证记录。
 - `vozeb_pro_entitlement_plans`：商业套餐权益、每日额度、调用限制和功能标记；新用户不再通过套餐获得注册初始积分。
 - `vozeb_pro_users`：用户账号、角色、状态、头像存储键、最多 160 字的个人简介、当前套餐、积分余额和密码哈希；`admin_permissions` JSONB 保存管理员的显式职责列表，并由 CHECK 约束保证为数组，普通用户保持空数组。管理员 TOTP MFA 使用 `mfa_secret_ciphertext` 保存 AES-GCM 密文，`mfa_enabled_at` 表示已完成验证并启用，CHECK 约束禁止启用时间存在但密文缺失。公开注册还原子保存当时的服务条款版本/链接、隐私政策版本/链接和同意时间，五个留痕字段必须同时为空或同时存在。管理员代建账号不伪造用户同意记录。公开创作者接口只按用户名返回允许公开的资料字段，不暴露邮箱、内部用户 ID、职责、MFA 密文或协议留痕。
@@ -130,7 +130,7 @@ Agent Run 的状态与任务数组继续保存在 `generation_tasks.payload`，�
 
 `web/src/lib/auth/` 通过用户、Session、设置、积分、CDK、邮箱验证码和公告 Repository 读写对应关系表；文件 Provider 保留相同业务接口和进程内串行 mutation。PostgreSQL 在线路径不再把完整 `AuthDatabase` 删除重写。管理员后台业务操作按 `admin_permissions` 与当前 Session 授权，不进行逐次密码/TOTP 复核；系统渠道 API Key 与管理员 MFA Secret 在数据库中只保存密文。MFA 启用或关闭会保留当前 Session 并撤销该管理员的其他 Session，服务器恢复命令会清除 MFA 并撤销全部 Session。常规业务备份不导出 MFA Secret，导入也不能覆盖服务器当前 MFA 状态。
 
-`web/src/lib/prompts/store.ts` 以及 `web/src/lib/server/` 下的生成日志、统一创作运行时、Canvas 项目、素材库、短剧项目和审计日志 Store 已接入 PostgreSQL。对应 JSON Provider 保留为单机文件部署方式。媒体业务记录始终保存稳定站内路径；读取时按每条媒体登记的 `storage_provider` 选择本地文件或短期对象签名地址，不受当前外部存储开关影响。
+`web/src/lib/prompts/store.ts` 以及 `web/src/lib/server/` 下的生成日志、统一创作运行时、Canvas 项目、素材库、短剧项目和审计日志 Store 已接入 PostgreSQL。对应 JSON Provider 保留为单机文件部署方式。媒体业务记录始终保存稳定站内相对路径，不保存 OSS 源站、CDN 域名或临时签名；读取时按每条媒体登记的 `storage_provider` 选择本地文件，或根据当前 CDN 地址前缀与登记的对象路径动态生成读取地址，CDN 留空时使用短期对象签名地址，不受当前外部存储开关影响。
 
 按用户删除生成日志时，PostgreSQL 使用后台 `data_lifecycle.maintenanceBatchSize` 读取稳定排序批次，在事务内锁定并删除日志，每批提交后再按真实 `storageKey` 重新统计全站引用并清理媒体。管理员永久删除用户前会在同一用户行锁事务内分页锁定并快照该用户媒体登记，避免用户外键级联先删除对象存储定位信息；提交后才使用快照清理本地文件或 S3 对象。订单、邀请奖励、作品发布与治理等受保护商业记录仍遵循各自外键和运营留存规则，不能由媒体快照流程绕过。
 
