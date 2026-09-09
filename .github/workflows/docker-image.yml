@@ -240,7 +240,6 @@ jobs:
       - name: Attach signed SBOM attestation
         run: cosign attest --yes --type spdxjson --predicate vozeb-pro-sbom.spdx.json "${IMAGE_NAME}@${{ needs.merge.outputs.digest }}"
 
-
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: attest
@@ -276,3 +275,4 @@ jobs:
               --notes "主应用镜像：$IMAGE_NAME:$RELEASE_TAG" \\
               release-assets/vozeb-pro-sbom.spdx.json
           fi
+

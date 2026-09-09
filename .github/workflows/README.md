@@ -32,3 +32,4 @@ sudo /opt/actions-runner/svc.sh start
 确认 Runner 在线后，在仓库 `Settings → Environments` 创建 `production` 环境；建议启用 required reviewers。`.env`、数据库连接、`VOZEB_PRO_ENCRYPTION_KEY`、ADC JSON 等生产凭据留在服务器或 GitHub Secrets，不提交到仓库。
 
 `.github/workflows/deploy-production.yml` 只允许手动触发：输入已发布的镜像 tag 后，Runner 在 `/home/VOZEB-PRO` 执行 `docker compose pull` 和 `docker compose up -d`。如果目录中存在 `docker-compose.gcp-adc.yml`，会自动作为第二个 Compose 文件加载。
+
