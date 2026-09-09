@@ -498,6 +498,7 @@ CREATE TABLE IF NOT EXISTS object_storage_settings (
     region text NOT NULL DEFAULT 'us-east-1',
     bucket text NOT NULL DEFAULT '',
     prefix text NOT NULL DEFAULT 'vozeb-pro',
+    cdn_base_url text NOT NULL DEFAULT 'https://design-img.so-shine.com',
     access_key_id_ciphertext text NOT NULL DEFAULT '',
     secret_access_key_ciphertext text NOT NULL DEFAULT '',
     force_path_style boolean NOT NULL DEFAULT false,
@@ -505,6 +506,8 @@ CREATE TABLE IF NOT EXISTS object_storage_settings (
     updated_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT object_storage_settings_singleton CHECK (id = 'default')
 );
+
+ALTER TABLE object_storage_settings ADD COLUMN IF NOT EXISTS cdn_base_url text NOT NULL DEFAULT 'https://design-img.so-shine.com';
 
 INSERT INTO object_storage_settings (id) VALUES ('default') ON CONFLICT (id) DO NOTHING;
 

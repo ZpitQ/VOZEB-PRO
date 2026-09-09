@@ -13,6 +13,7 @@ const config: ObjectStorageRuntimeConfig = {
     region: "auto",
     bucket: "media",
     prefix: "vozeb-pro",
+    cdnBaseUrl: "",
     accessKeyId: "access",
     secretAccessKey: "secret",
     forcePathStyle: true,
