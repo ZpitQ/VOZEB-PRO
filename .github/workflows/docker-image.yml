@@ -252,17 +252,17 @@ jobs:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
         run: |
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" \\
-              --repo "$GITHUB_REPOSITORY" \\
-              --clobber \\
+            gh release upload "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
               release-assets/vozeb-pro-sbom.spdx.json
           else
-            gh release create "$RELEASE_TAG" \\
-              --repo "$GITHUB_REPOSITORY" \\
-              --verify-tag \\
-              --title "VOZEB PRO $RELEASE_TAG" \\
-              --generate-notes \\
-              --notes "主应用镜像：$IMAGE_NAME:$RELEASE_TAG" \\
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "VOZEB PRO $RELEASE_TAG" \
+              --generate-notes \
+              --notes "主应用镜像：$IMAGE_NAME:$RELEASE_TAG" \
               release-assets/vozeb-pro-sbom.spdx.json
           fi
 
