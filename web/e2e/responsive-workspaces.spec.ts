@@ -52,7 +52,7 @@ test("GCP Agent Platform channel credentials persist across desktop and mobile r
         await expect(detail.getByLabel("服务端 Endpoint")).toHaveValue("https://asia-east1-aiplatform.googleapis.com");
         await expect(detail.locator(".ant-segmented-item-selected")).toContainText("API Key");
         await detail.getByText("ADC", { exact: true }).click();
-        await expect(detail.getByLabel("鉴权")).toHaveValue("Application Default Credentials (ADC)");
+        await expect(detail.getByRole("textbox", { name: "鉴权", exact: true })).toHaveValue("Application Default Credentials (ADC)");
         await detail.locator("button.ant-drawer-close").click();
 
         await page.getByRole("button", { name: "保存模型渠道配置" }).click();
