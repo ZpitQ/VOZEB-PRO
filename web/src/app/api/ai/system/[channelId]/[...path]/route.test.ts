@@ -939,6 +939,75 @@ describe("custom protocol model routing", () => {
     });
 });
 
+describe("custom Gemini image suffix authorization", () => {
+    const model = "gemini-3.1-flash-image";
+    const variant = `${model}-4k-16x9`;
+
+    beforeEach(() => {
+        vi.restoreAllMocks();
+        mocks.consumeUserPoints.mockReset().mockResolvedValue(undefined);
+        mocks.refundUserPoints.mockReset();
+        mocks.safeUrl.mockResolvedValue(true);
+    });
+
+    function settings(protocol = "custom", models = [model], boundModel = model, createPath = "/jobs/image") {
+        return {
+            generationPointMultipliers: { imageQuality: { high: 3 } },
+            logicalModels: [logicalModel("image-tool", "image", boundModel)],
+            systemChannels: [{ id: "channel-one", enabled: true, baseUrl: "https://provider.example", apiKey: "fixture-key", apiFormat: "openai", models, advancedConfig: { protocol, createPath } }],
+        };
+    }
+
+    function submit(requestedModel = variant, path = ["jobs", "image"], quality = "high") {
+        return POST(new Request(`http://localhost/api/ai/system/channel-one/${path.join("/")}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: requestedModel, prompt: "image", quality }) }), {
+            params: Promise.resolve({ channelId: "channel-one", path }),
+        });
+    }
+
+    it("authorizes a derived suffix against its base binding and charges the requested quality", async () => {
+        mocks.getAuthSettings.mockResolvedValue(settings());
+        const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ data: [] }));
+        expect((await submit()).status).toBe(200);
+        expect(await new Response(upstream.mock.calls[0][1]?.body).json()).toMatchObject({ model: variant });
+        expect(mocks.consumeUserPoints).toHaveBeenCalledWith("user-one", "image-tool", 3, "image", expect.any(String), expect.any(String));
+    });
+
+    it("keeps automatic quality units aligned with existing refund semantics even for a 4K model suffix", async () => {
+        mocks.getAuthSettings.mockResolvedValue(settings());
+        vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ data: [] }));
+        expect((await submit(variant, ["jobs", "image"], "auto")).status).toBe(200);
+        expect(mocks.consumeUserPoints).toHaveBeenCalledWith("user-one", "image-tool", 1, "image", expect.any(String), expect.any(String));
+    });
+
+    it.each([
+        ["gemini", [model], model, variant],
+        ["openai", [model], model, variant],
+        ["custom", [], model, variant],
+        ["custom", [model], "unrelated-image", variant],
+        ["custom", [model], model, `${model}-8k`],
+        ["custom", [model], model, `${model}-4k-3x2`],
+    ])("rejects aliases without an enabled matching custom binding: %s %j %s %s", async (protocol, models, boundModel, requestedModel) => {
+        mocks.getAuthSettings.mockResolvedValue(settings(protocol, models, boundModel));
+        const upstream = vi.spyOn(globalThis, "fetch");
+        expect((await submit(requestedModel)).status).toBe(403);
+        expect(upstream).not.toHaveBeenCalled();
+        expect(mocks.consumeUserPoints).not.toHaveBeenCalled();
+    });
+
+    it("keeps an explicitly catalogued variant bound to its own logical model", async () => {
+        mocks.getAuthSettings.mockResolvedValue(settings("custom", [model, variant], variant));
+        vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ data: [] }));
+        expect((await submit()).status).toBe(200);
+    });
+
+    it("uses the declared image capability for custom Chat Completions image generation", async () => {
+        mocks.getAuthSettings.mockResolvedValue(settings("custom", [model], model, "/v1/chat/completions"));
+        vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ data: [] }));
+        expect((await submit(variant, ["v1", "chat", "completions"])).status).toBe(200);
+        expect(mocks.consumeUserPoints).toHaveBeenCalledWith("user-one", "image-tool", 3, "image", expect.any(String), expect.any(String));
+    });
+});
+
 describe("system proxy authorization", () => {
     beforeEach(() => {
         vi.restoreAllMocks();

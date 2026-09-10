@@ -2,6 +2,7 @@ import type { ImageTask } from "@/lib/server/image-task-store";
 import { GenerationSubmissionSafeFailure, GenerationSubmissionUncertainError } from "@/lib/server/generation-submission-error";
 import { buildProviderRequest, isProviderBusinessError, readProviderError, readProviderString, readProviderValue } from "@/lib/server/provider-task-config";
 import { buildYumengImageRequest, resolveYumengImageResolution } from "@/lib/yumeng-model-center";
+import { resolveCustomGeminiImageModel } from "@/lib/server/custom-gemini-image-model";
 
 import { publicImageReferenceRequestUrl } from "./image-task-openai";
 import { IMAGE_TASK_POLL_INTERVAL_MS, type ImageApiResponse, type ImageTaskResult } from "./image-task-types";
@@ -43,7 +44,7 @@ export async function runCustomImageTask(task: ImageTask, origin: string, public
     ).filter(Boolean);
     const outputCount = config.outputMode === "layers" ? undefined : 1;
     const values = {
-        model: config.model,
+        model: advanced.protocol === "custom" ? resolveCustomGeminiImageModel(config.model, config.quality, config.size) : config.model,
         prompt: withSystemPrompt(config, withImageOutputInstructions(config, task.prompt)),
         size,
         ratio: imageRequestAspectRatio(config.size || "auto"),

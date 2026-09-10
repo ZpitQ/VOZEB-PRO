@@ -26,6 +26,7 @@ import { authorizeGenerationMediaProxyRequest } from "@/lib/server/generation-me
 import { SYSTEM_PROXY_JSON_BODY_MAX_BYTES } from "@/lib/server/system-proxy-request-limits";
 import { userOwnsGenerationUpstreamTask } from "@/lib/server/generation-task-authorization";
 import { authorizeSystemAiProxyRequest } from "@/lib/server/system-ai-proxy-policy";
+import { customGeminiImageModelParts } from "@/lib/server/custom-gemini-image-model";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -93,36 +94,44 @@ async function proxySystemRequest(request: Request, context: RouteContext) {
         if (error instanceof RequestBodyTooLargeError) return NextResponse.json({ error: error.message }, { status: error.status });
         throw error;
     }
-    const upstreamModel = readRequestModel(readRequestBody(contentType, requestBody.pointsPayload)) || request.headers.get(SYSTEM_AI_UPSTREAM_MODEL_HEADER)?.trim() || readPathModel(path);
+    const requestedModel = readRequestModel(readRequestBody(contentType, requestBody.pointsPayload)) || request.headers.get(SYSTEM_AI_UPSTREAM_MODEL_HEADER)?.trim() || readPathModel(path);
+    const imageModel = customGeminiImageModelParts(requestedModel);
+    const baseModelConfig = imageModel ? resolveChannelModelConfig(channel.advancedConfig, imageModel.baseModel) : undefined;
+    const usesImageAlias = Boolean(imageModel && !channelHasModel(channel.models, requestedModel) && channelHasModel(channel.models, imageModel.baseModel) && (baseModelConfig?.protocol || channel.advancedConfig?.protocol) === "custom");
+    const upstreamModel = usesImageAlias ? imageModel!.baseModel : requestedModel;
+    // Authorize and bill the configured model while forwarding its resolution variant unchanged.
+    const pointsPayload = usesImageAlias ? { ...readRequestBody(contentType, requestBody.pointsPayload), model: upstreamModel } : requestBody.pointsPayload;
     const modelConfig = upstreamModel ? resolveChannelModelConfig(channel.advancedConfig, upstreamModel) : undefined;
     const apiFormat = modelConfig?.apiFormat || channel.apiFormat;
     const globalChannel = isGlobalAiOpcChannel(channel.advancedConfig);
     const globalPreset = resolveGlobalAiOpcPreset(channel.advancedConfig, upstreamModel) || resolveGlobalAiOpcPathPreset(channel.advancedConfig, path);
     const globalAdaptation = adaptGlobalAiOpcTextRequest(channel.advancedConfig, path, requestBody.body);
     if (globalAdaptation === "responses-unsupported") return NextResponse.json({ error: "该 GlobalAiOpc 原生文本接口不支持 Responses，已切换 Chat 兼容回退。" }, { status: 404 });
+    const configuredPointsRequest = classifyConfiguredPointsRequest(
+        request.method,
+        path,
+        contentType,
+        pointsPayload,
+        channel.id,
+        [
+            globalPreset?.createPath,
+            modelConfig?.streaming?.path,
+            modelConfig?.createPath,
+            modelConfig?.editPath,
+            modelConfig?.imageToVideoPath,
+            channel.advancedConfig?.streaming?.path,
+            channel.advancedConfig?.createPath,
+            channel.advancedConfig?.editPath,
+            channel.advancedConfig?.imageToVideoPath,
+        ],
+        upstreamModel,
+        settings.logicalModels,
+        settings.generationPointMultipliers,
+    );
     const pointsRequest =
-        classifyPointsRequest(request.method, apiFormat, path, contentType, requestBody.pointsPayload, settings.generationPointMultipliers) ||
-        classifyConfiguredPointsRequest(
-            request.method,
-            path,
-            contentType,
-            requestBody.pointsPayload,
-            channel.id,
-            [
-                globalPreset?.createPath,
-                modelConfig?.streaming?.path,
-                modelConfig?.createPath,
-                modelConfig?.editPath,
-                modelConfig?.imageToVideoPath,
-                channel.advancedConfig?.streaming?.path,
-                channel.advancedConfig?.createPath,
-                channel.advancedConfig?.editPath,
-                channel.advancedConfig?.imageToVideoPath,
-            ],
-            upstreamModel,
-            settings.logicalModels,
-            settings.generationPointMultipliers,
-        );
+        (imageModel && (modelConfig?.protocol || channel.advancedConfig?.protocol) === "custom" ? configuredPointsRequest : null) ||
+        classifyPointsRequest(request.method, apiFormat, path, contentType, pointsPayload, settings.generationPointMultipliers) ||
+        configuredPointsRequest;
     if (pointsRequest?.model && !channelHasModel(channel.models, pointsRequest.model)) return NextResponse.json({ error: "该模型未在后台渠道中启用" }, { status: 403 });
     const access = authorizeSystemAiProxyRequest({
         method: request.method,

@@ -158,6 +158,30 @@ describe("active protocols through persisted admin settings and the system proxy
         expectProxyRequests(channel, operation.editPath || operation.createPath, model, true);
     });
 
+    it.each([
+        ["high", "16:9", "gemini-3.1-flash-image-4k-16x9"],
+        ["2K", "9:16", "gemini-3.1-flash-image-2k-9x16"],
+        ["4K", "auto", "gemini-3.1-flash-image-4k"],
+        ["auto", "3840x2160", "gemini-3.1-flash-image-4k-16x9"],
+        ["auto", "1152x2048", "gemini-3.1-flash-image-2k-9x16"],
+        ["auto", "auto", "gemini-3.1-flash-image"],
+    ])("routes custom Gemini image quality %s and ratio %s as model suffixes", async (quality, size, expectedModel) => {
+        const definition = channelProtocolDefinition("custom");
+        const model = "gemini-3.1-flash-image";
+        const operation = protocolOperation(definition, "image", model);
+        const channel = await configureProxyChannel(definition, "image", model, protocolAdvancedConfig("custom", operation, model));
+        for (const edit of [false, true]) {
+            const task = imageTask(channel, edit);
+            task.config = { ...task.config, quality, size };
+            const result = await runImage(task, "custom");
+            expect(JSON.parse(fixture.requests[0]!.body.toString("utf8"))).toMatchObject({ model: expectedModel });
+            await expectImageResult(result);
+            expect(task.config.model).toBe(model);
+            expect(mocks.consumeUserPoints).toHaveBeenLastCalledWith("proxy-user", channel.logicalModelId, 1, "image", expect.any(String), expect.any(String));
+            fixture.requests.splice(0);
+        }
+    });
+
     it.each(VIDEO_PROTOCOLS)("routes $id text-to-video and image-to-video creation, polling, and media", async (definition) => {
         const model = protocolModel(definition, "video");
         const operation = protocolOperation(definition, "video", model);
