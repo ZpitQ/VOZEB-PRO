@@ -13,7 +13,12 @@ env:
   IMAGE_NAME: ghcr.io/zpitq/vozeb-pro
 
 jobs:
-  quality:
+  quality-suite:
+    name: quality / ${{ matrix.suite }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [checks, chromium, mobile-390, mobile-430]
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -33,29 +38,50 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
           version: 11.9.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --audit-level moderate
-      - run: pnpm run lint
-      - run: pnpm run typecheck
-      - run: pnpm test
-      - run: pnpm run format:check
-      - run: pnpm run build
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Dependency audit
+        if: ${{ matrix.suite == 'checks' }}
+        run: pnpm audit --audit-level moderate
+      - name: ESLint
+        if: ${{ matrix.suite == 'checks' }}
+        run: pnpm run lint
+      - name: Type check
+        if: ${{ matrix.suite == 'checks' }}
+        run: pnpm run typecheck
+      - name: Unit tests
+        if: ${{ matrix.suite == 'checks' }}
+        run: pnpm test
+      - name: Format check
+        if: ${{ matrix.suite == 'checks' }}
+        run: pnpm run format:check
+      - name: Production build
+        if: ${{ matrix.suite != 'checks' }}
+        run: pnpm run build
         env:
           NEXT_SKIP_BUILD_TYPECHECK: "1"
-      - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm run e2e
+      - name: Install Playwright Chromium
+        if: ${{ matrix.suite != 'checks' }}
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Browser E2E
+        if: ${{ matrix.suite != 'checks' }}
+        run: pnpm run e2e --project="${{ matrix.suite }}"
         env:
           VOZEB_PRO_E2E_DATABASE_URL: postgres://vozeb:vozeb-e2e-password@127.0.0.1:5432/vozeb_pro_e2e
       - name: PostgreSQL integration tests
+        if: ${{ matrix.suite == 'chromium' }}
         run: >-
           pnpm exec vitest run --no-file-parallelism
           src/lib/server/database/auth-entity-concurrency.postgres.test.ts
@@ -68,6 +94,27 @@ jobs:
           VOZEB_PRO_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           VOZEB_PRO_RUN_POSTGRES_INTEGRATION: "1"
           RUN_WORK_COMMUNITY_POSTGRES_INTEGRATION: "1"
+      - name: Upload browser artifacts
+        if: ${{ failure() && matrix.suite != 'checks' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-playwright-report-${{ matrix.suite }}
+          path: |
+            web/playwright-report
+            web/.e2e-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
+  quality:
+    name: quality
+    if: always()
+    needs: quality-suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify release quality matrix
+        env:
+          MATRIX_RESULT: ${{ needs.quality-suite.result }}
+        run: test "$MATRIX_RESULT" = "success"
 
   security:
     runs-on: ubuntu-latest

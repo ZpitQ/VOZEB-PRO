@@ -27,26 +27,54 @@ describe("release workflow contract", () => {
         expect(source).not.toMatch(/uses:\s+[^\s]+@(v\d|main|master)\b/);
     });
 
-    it("runs lint, tests, type-check, build and browser E2E in the main quality workflow", () => {
+    it("runs the complete web quality surface through isolated parallel suites", () => {
         const source = workflow("quality.yml");
+        const jobs = parseDocument(source).toJS().jobs;
 
         expect(parseDocument(source).errors).toEqual([]);
         for (const command of ["pnpm run lint", "pnpm run typecheck", "pnpm test", "pnpm run build", "pnpm run e2e"]) expect(source).toContain(command);
         expect(source).toContain("pnpm exec playwright install --with-deps chromium");
+        expect(jobs["web-suite"].strategy).toEqual({ "fail-fast": false, matrix: { suite: ["checks", "chromium", "mobile-390", "mobile-430"] } });
+        expect(jobs.web.needs).toBe("web-suite");
+        expect(jobs["web-suite"].steps.find((item) => item.name === "Browser E2E").run).toBe('pnpm run e2e --project="${{ matrix.suite }}"');
+        expect(jobs["web-suite"].steps.find((item) => item.name === "Upload browser artifacts").with.name).toBe("web-playwright-report-${{ matrix.suite }}");
         expect(source).toContain("version: 11.9.0");
         expect(source).toContain("gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7");
         expect(source).toContain("github/codeql-action/analyze@47be0dbd5113ab1b79fe2dd3f68bdf7e426cdc87");
         expect(source).not.toMatch(/uses:\s+[^\s]+@(v\d|main|master)\b/);
     });
 
+    it("does not repeat standalone Quality for release tags", () => {
+        const document = parseDocument(workflow("quality.yml"));
+        expect(document.errors).toEqual([]);
+
+        const trigger = document.toJS().on;
+        expect(trigger.push).toEqual({ branches: ["main"] });
+        expect(trigger.pull_request).toBeNull();
+        expect(trigger.workflow_dispatch).toBeNull();
+    });
+
+    it("parallelizes Docker release quality before preserving the build gate", () => {
+        const document = parseDocument(workflow("docker-image.yml"));
+        expect(document.errors).toEqual([]);
+
+        const jobs = document.toJS().jobs;
+        expect(jobs["quality-suite"].strategy).toEqual({ "fail-fast": false, matrix: { suite: ["checks", "chromium", "mobile-390", "mobile-430"] } });
+        expect(jobs.quality.needs).toBe("quality-suite");
+        expect(jobs.build.needs).toContain("quality");
+        expect(jobs["quality-suite"].steps.find((item) => item.name === "Browser E2E").run).toBe('pnpm run e2e --project="${{ matrix.suite }}"');
+        expect(jobs["quality-suite"].steps.find((item) => item.name === "Upload browser artifacts").with.name).toBe("web-playwright-report-${{ matrix.suite }}");
+    });
+
     it.each([
-        ["quality.yml", "web"],
-        ["docker-image.yml", "quality"],
+        ["quality.yml", "web-suite"],
+        ["docker-image.yml", "quality-suite"],
     ])("serializes shared PostgreSQL integration tests in %s", (file, job) => {
         const document = parseDocument(workflow(file));
         expect(document.errors).toEqual([]);
 
         const step = document.toJS().jobs[job].steps.find((item) => item.name === "PostgreSQL integration tests");
+        expect(step?.if).toBe("${{ matrix.suite == 'chromium' }}");
         expect(step?.run).toContain("pnpm exec vitest run --no-file-parallelism");
     });
 

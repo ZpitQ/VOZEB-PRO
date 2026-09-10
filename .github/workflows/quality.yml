@@ -4,7 +4,6 @@ run-name: Web 与文档质量检查 · ${{ github.ref_name }}
 on:
   push:
     branches: ["main"]
-    tags: ["v*", "VOZEB-PRO-v*"]
   pull_request:
   workflow_dispatch:
 
@@ -12,7 +11,12 @@ permissions:
   contents: read
 
 jobs:
-  web:
+  web-suite:
+    name: web / ${{ matrix.suite }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [checks, chromium, mobile-390, mobile-430]
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -47,26 +51,35 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Dependency audit
+        if: ${{ matrix.suite == 'checks' }}
         run: pnpm audit --audit-level moderate
       - name: ESLint
+        if: ${{ matrix.suite == 'checks' }}
         run: pnpm run lint
       - name: Type check
+        if: ${{ matrix.suite == 'checks' }}
         run: pnpm run typecheck
       - name: Unit tests
+        if: ${{ matrix.suite == 'checks' }}
         run: pnpm test
       - name: Format check
+        if: ${{ matrix.suite == 'checks' }}
         run: pnpm run format:check
       - name: Production build
+        if: ${{ matrix.suite != 'checks' }}
         run: pnpm run build
         env:
           NEXT_SKIP_BUILD_TYPECHECK: "1"
       - name: Install Playwright Chromium
+        if: ${{ matrix.suite != 'checks' }}
         run: pnpm exec playwright install --with-deps chromium
       - name: Browser E2E
-        run: pnpm run e2e
+        if: ${{ matrix.suite != 'checks' }}
+        run: pnpm run e2e --project="${{ matrix.suite }}"
         env:
           VOZEB_PRO_E2E_DATABASE_URL: postgres://vozeb:vozeb-e2e-password@127.0.0.1:5432/vozeb_pro_e2e
       - name: PostgreSQL integration tests
+        if: ${{ matrix.suite == 'chromium' }}
         run: >-
           pnpm exec vitest run --no-file-parallelism
           src/lib/server/database/auth-entity-concurrency.postgres.test.ts
@@ -80,15 +93,26 @@ jobs:
           VOZEB_PRO_RUN_POSTGRES_INTEGRATION: "1"
           RUN_WORK_COMMUNITY_POSTGRES_INTEGRATION: "1"
       - name: Upload browser artifacts
-        if: failure()
+        if: ${{ failure() && matrix.suite != 'checks' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: web-playwright-report
+          name: web-playwright-report-${{ matrix.suite }}
           path: |
             web/playwright-report
             web/.e2e-artifacts
           if-no-files-found: ignore
           retention-days: 7
+
+  web:
+    name: web
+    if: always()
+    needs: web-suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify web quality matrix
+        env:
+          MATRIX_RESULT: ${{ needs.web-suite.result }}
+        run: test "$MATRIX_RESULT" = "success"
 
   docs:
     runs-on: ubuntu-latest
