@@ -291,7 +291,7 @@ export function AdminExternalStorage() {
                                     <Input placeholder="vozeb-pro" />
                                 </Form.Item>
                                 <Form.Item label="CDN 地址前缀" name="cdnBaseUrl" className="!mb-5 xl:col-span-2" extra="留空使用源站签名地址。">
-                                    <Input placeholder="https://design-img.so-shine.com" allowClear />
+                                    <Input placeholder="请输入 CDN 地址前缀" allowClear />
                                 </Form.Item>
                                 <Form.Item label="Path-style 模式" name="forcePathStyle" valuePropName="checked" className="!mb-5 xl:col-span-2">
                                     <Switch size="small" aria-label="切换 Path-style 模式" />

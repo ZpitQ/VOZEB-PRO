@@ -1,8 +1,9 @@
 import { generationModelId } from "@/lib/server/generation-channel";
+import { isCustomGeminiImageModel } from "@/lib/server/custom-gemini-image-model";
 import { recordGenerationTaskLogResult } from "@/lib/server/generation-log-task-service";
 import type { ImageTask } from "@/lib/server/image-task-store";
 
-import { resolveResultSize } from "./image-task-size";
+import { parseImageDimensions, resolveResultSize } from "./image-task-size";
 
 export function stableMediaUrl(value?: string) {
     return value && !value.startsWith("data:") && !value.startsWith("blob:") ? value : "";
@@ -16,7 +17,8 @@ export async function writeImageGenerationLog(
     error?: string,
 ) {
     const results = Array.isArray(result) ? result : [result];
-    const targetSize = task.config.outputMode === "layers" ? undefined : resolveResultSize(task.config.quality, task.config.size || "auto");
+    const preserveNativeSize = task.config.advancedConfig?.protocol === "custom" && isCustomGeminiImageModel(task.config.model) && !parseImageDimensions(task.config.size || "");
+    const targetSize = task.config.outputMode === "layers" || preserveNativeSize ? undefined : resolveResultSize(task.config.quality, task.config.size || "auto");
     const assets = results.flatMap((item) => {
         const resultUrl = typeof item === "string" ? item : item.remoteUrl || item.dataUrl || "";
         return resultUrl

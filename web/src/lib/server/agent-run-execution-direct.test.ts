@@ -169,6 +169,29 @@ describe("directAgentPlan", () => {
         expect(task).toMatchObject({ type: "image", ratio: "16:9", quality: "high", count: 4 });
     });
 
+    it("统一 Agent 的横版需求保留当前 4K 精确预设尺寸", () => {
+        const plan = {
+            intent: "generation",
+            objective: "生成一张蓝色横版图片",
+            reply: "开始生成",
+            decisions: [],
+            foundation: { complexity: "simple", brief: { objective: "生成蓝色图片" }, direction: { summary: "横版构图" } },
+            deliverables: [{ id: "blue", title: "蓝色图片", type: "image", model: "image-pro", prompt: "蓝色横版图片", count: 1, ratio: "16:9", dependencies: [] }],
+        };
+        const [task] = normalizeTasks(plan as never, [], generationSettings() as never, undefined, plan.objective, "chat", [], undefined, { mode: "image", image: { size: "3840x2160", quality: "auto" } });
+
+        expect(task.ratio).toBe("3840x2160");
+    });
+
+    it("方向要求只覆盖冲突的自定义尺寸并继续优先采用文字明确尺寸", () => {
+        const base = { type: "image" as const, requestPrompt: "生成竖版图片", configuredImageSize: "2160x3840", plannedRatio: "9:16" };
+
+        expect(resolveAgentTaskRatio(base)).toBe("2160x3840");
+        expect(resolveAgentTaskRatio({ ...base, requestedImageSize: "768x1024" })).toBe("768x1024");
+        expect(resolveAgentTaskRatio({ ...base, configuredImageSize: "3840x2160" })).toBe("9:16");
+        expect(resolveAgentTaskRatio({ ...base, configuredImageSize: "3:4" })).toBe("9:16");
+    });
+
     it("统一 Agent 的智能参数使用规划结果且不回退全局 1:1", () => {
         const plan = {
             intent: "generation",

@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- [存储] 新增可配置的 CDN 地址前缀，默认使用 `https://design-img.so-shine.com`；素材保存相对路径，显示时动态生成访问地址。
+- [图片] 修复自定义协议 Gemini Flash Image 的 2K/4K 与比例模型后缀映射，并保留比例模式下的上游原图像素。
+- [存储] 新增可配置的 CDN 地址前缀；素材保存相对路径，显示时动态生成访问地址。
 - [存储] 修复阿里云 OSS 批量删除缺少 Content-MD5，以及签名读取覆盖 Content-Type 导致的连接检查、缩略图、下载和删除失败。
 - [模型] 新增 GCP Agent Platform 原生文本与图片渠道，支持 ADC 或 Google Cloud API Key、流式文本、文生图和参考图编辑。
 
