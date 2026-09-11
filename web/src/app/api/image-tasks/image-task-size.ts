@@ -10,13 +10,6 @@ export function resolveRequestSize(quality: string | undefined, size: string) {
         const dimensions = parseImageDimensions(value);
         if (dimensions) {
             validateImageDimensions(dimensions.width, dimensions.height);
-            const qualityBase = quality ? QUALITY_BASE[quality] : undefined;
-            if (qualityBase && qualityBase > Math.max(dimensions.width, dimensions.height)) {
-                const ratio = dimensions.width / dimensions.height;
-                const longSide = qualityBase;
-                const shortSide = Math.round((qualityBase / Math.max(ratio, 1 / ratio)) / IMAGE_SIZE_STEP) * IMAGE_SIZE_STEP;
-                return ratio >= 1 ? `${longSide}x${shortSide}` : `${shortSide}x${longSide}`;
-            }
             return upstreamImageSize(dimensions.width, dimensions.height);
         }
         if (value.includes(":")) return resolveSize(quality, value);
