@@ -27,17 +27,21 @@ describe("release workflow contract", () => {
         expect(source).not.toMatch(/uses:\s+[^\s]+@(v\d|main|master)\b/);
     });
 
-    it("runs the complete web quality surface through isolated parallel suites", () => {
+    it("runs static, unit, and sharded Chromium quality jobs in parallel", () => {
         const source = workflow("quality.yml");
         const jobs = parseDocument(source).toJS().jobs;
 
         expect(parseDocument(source).errors).toEqual([]);
         for (const command of ["pnpm run lint", "pnpm run typecheck", "pnpm test", "pnpm run build", "pnpm run e2e"]) expect(source).toContain(command);
         expect(source).toContain("pnpm exec playwright install --with-deps chromium");
-        expect(jobs["web-suite"].strategy).toEqual({ "fail-fast": false, matrix: { suite: ["checks", "chromium", "mobile-390", "mobile-430"] } });
-        expect(jobs.web.needs).toBe("web-suite");
-        expect(jobs["web-suite"].steps.find((item) => item.name === "Browser E2E").run).toBe('pnpm run e2e --project="${{ matrix.suite }}"');
-        expect(jobs["web-suite"].steps.find((item) => item.name === "Upload browser artifacts").with.name).toBe("web-playwright-report-${{ matrix.suite }}");
+        expect(jobs["web-chromium"].strategy).toEqual({ "fail-fast": false, matrix: { shard: [1, 2] } });
+        expect(jobs.web.needs).toEqual(["web-checks", "web-unit", "web-chromium"]);
+        expect(jobs["web-checks"].services).toBeUndefined();
+        expect(jobs["web-unit"].services).toBeUndefined();
+        expect(jobs["web-chromium"].steps.find((item) => item.name === "Browser E2E").run).toBe('pnpm run e2e --project=chromium --shard="${{ matrix.shard }}/2"');
+        expect(jobs["web-chromium"].steps.find((item) => item.name === "Upload browser artifacts").with.name).toBe("web-playwright-report-chromium-${{ matrix.shard }}");
+        expect(source).not.toContain("mobile-390");
+        expect(source).not.toContain("mobile-430");
         expect(source).toContain("version: 11.9.0");
         expect(source).toContain("gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7");
         expect(source).toContain("github/codeql-action/analyze@47be0dbd5113ab1b79fe2dd3f68bdf7e426cdc87");
@@ -59,22 +63,26 @@ describe("release workflow contract", () => {
         expect(document.errors).toEqual([]);
 
         const jobs = document.toJS().jobs;
-        expect(jobs["quality-suite"].strategy).toEqual({ "fail-fast": false, matrix: { suite: ["checks", "chromium", "mobile-390", "mobile-430"] } });
-        expect(jobs.quality.needs).toBe("quality-suite");
+        expect(jobs["quality-chromium"].strategy).toEqual({ "fail-fast": false, matrix: { shard: [1, 2] } });
+        expect(jobs.quality.needs).toEqual(["quality-checks", "quality-unit", "quality-chromium"]);
+        expect(jobs["quality-checks"].services).toBeUndefined();
+        expect(jobs["quality-unit"].services).toBeUndefined();
         expect(jobs.build.needs).toContain("quality");
-        expect(jobs["quality-suite"].steps.find((item) => item.name === "Browser E2E").run).toBe('pnpm run e2e --project="${{ matrix.suite }}"');
-        expect(jobs["quality-suite"].steps.find((item) => item.name === "Upload browser artifacts").with.name).toBe("web-playwright-report-${{ matrix.suite }}");
+        expect(jobs["quality-chromium"].steps.find((item) => item.name === "Browser E2E").run).toBe('pnpm run e2e --project=chromium --shard="${{ matrix.shard }}/2"');
+        expect(jobs["quality-chromium"].steps.find((item) => item.name === "Upload browser artifacts").with.name).toBe("web-playwright-report-chromium-${{ matrix.shard }}");
+        expect(document.toString()).not.toContain("mobile-390");
+        expect(document.toString()).not.toContain("mobile-430");
     });
 
     it.each([
-        ["quality.yml", "web-suite"],
-        ["docker-image.yml", "quality-suite"],
+        ["quality.yml", "web-chromium"],
+        ["docker-image.yml", "quality-chromium"],
     ])("serializes shared PostgreSQL integration tests in %s", (file, job) => {
         const document = parseDocument(workflow(file));
         expect(document.errors).toEqual([]);
 
         const step = document.toJS().jobs[job].steps.find((item) => item.name === "PostgreSQL integration tests");
-        expect(step?.if).toBe("${{ matrix.suite == 'chromium' }}");
+        expect(step?.if).toBe("${{ matrix.shard == 1 }}");
         expect(step?.run).toContain("pnpm exec vitest run --no-file-parallelism");
     });
 
