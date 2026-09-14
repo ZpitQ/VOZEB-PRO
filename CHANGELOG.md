@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.0.16
+
+- [图片] 修复 gcli2api Gemini 4K/比例模型别名在系统代理授权层被误判为未启用，图生图现在可以完整通过生产代理。
+
 ## v0.0.15
 
 - [图片] 修复 gcli2api 自定义 Gemini 图生图被错误判定为不支持参考素材的问题；原生 `generateContent` 路径现在保留参考图 inlineData，并按用户画质和比例选择 4K 模型别名。
