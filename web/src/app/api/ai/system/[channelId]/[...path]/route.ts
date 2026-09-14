@@ -94,11 +94,20 @@ async function proxySystemRequest(request: Request, context: RouteContext) {
         if (error instanceof RequestBodyTooLargeError) return NextResponse.json({ error: error.message }, { status: error.status });
         throw error;
     }
-    const requestedModel = readRequestModel(readRequestBody(contentType, requestBody.pointsPayload)) || request.headers.get(SYSTEM_AI_UPSTREAM_MODEL_HEADER)?.trim() || readPathModel(path);
-    const imageModel = customGeminiImageModelParts(requestedModel);
-    const baseModelConfig = imageModel ? resolveChannelModelConfig(channel.advancedConfig, imageModel.baseModel) : undefined;
-    const usesImageAlias = Boolean(imageModel && !channelHasModel(channel.models, requestedModel) && channelHasModel(channel.models, imageModel.baseModel) && (baseModelConfig?.protocol || channel.advancedConfig?.protocol) === "custom");
-    const upstreamModel = usesImageAlias ? imageModel!.baseModel : requestedModel;
+    const requestBodyModel = readRequestModel(readRequestBody(contentType, requestBody.pointsPayload));
+    const headerModel = request.headers.get(SYSTEM_AI_UPSTREAM_MODEL_HEADER)?.trim() || "";
+    const pathModel = readPathModel(path);
+    const rawRequestedModel = requestBodyModel || headerModel || pathModel;
+    const requestImageModel = customGeminiImageModelParts(rawRequestedModel);
+    const pathImageModel = customGeminiImageModelParts(pathModel);
+    const requestIsImageVariant = Boolean(requestImageModel?.resolution || requestImageModel?.ratio);
+    const pathIsImageVariant = Boolean(pathImageModel?.resolution || pathImageModel?.ratio);
+    const imageModel = requestIsImageVariant ? requestImageModel : pathIsImageVariant ? pathImageModel : requestImageModel;
+    const imageAliasModel = requestIsImageVariant ? rawRequestedModel : pathIsImageVariant ? pathModel : "";
+    const baseModel = imageModel?.baseModel || "";
+    const baseModelConfig = baseModel ? resolveChannelModelConfig(channel.advancedConfig, baseModel) : undefined;
+    const usesImageAlias = Boolean(imageAliasModel && baseModel && !channelHasModel(channel.models, imageAliasModel) && channelHasModel(channel.models, baseModel) && (baseModelConfig?.protocol || channel.advancedConfig?.protocol) === "custom");
+    const upstreamModel = usesImageAlias ? baseModel : rawRequestedModel;
     // Authorize and bill the configured model while forwarding its resolution variant unchanged.
     const pointsPayload = usesImageAlias ? { ...readRequestBody(contentType, requestBody.pointsPayload), model: upstreamModel } : requestBody.pointsPayload;
     const modelConfig = upstreamModel ? resolveChannelModelConfig(channel.advancedConfig, upstreamModel) : undefined;
@@ -525,11 +534,12 @@ function classifyConfiguredPointsRequest(
     multipliers?: GenerationPointMultipliers,
 ): PointsRequest | null {
     if (method.toUpperCase() !== "POST") return null;
-    const cleanPath = normalizedConfiguredProxyPath(`/${path.join("/")}`);
-    if (!createPaths.some((createPath) => createPath && cleanPath === normalizedConfiguredProxyPath(createPath))) return null;
     const payload = readRequestBody(contentType, body);
     const model = readRequestModel(payload) || modelHint;
     if (!model) return null;
+    const cleanPath = normalizedConfiguredProxyPath(`/${path.join("/")}`);
+    const normalizedModelPath = normalizedCustomGeminiImagePath(cleanPath, model);
+    if (!createPaths.some((createPath) => createPath && [cleanPath, normalizedModelPath].includes(normalizedConfiguredProxyPath(createPath)))) return null;
     const capability = logicalModels.find((logical) => logical.enabled && logical.bindings.some((binding) => binding.enabled && binding.channelId === channelId && sameModel(binding.upstreamModel, model)))?.capability;
     if (capability === "image") return { model, amount: readRequestCount(payload) * imageQualityMultiplier(payload, multipliers), usageKind: "image" };
     if (capability === "video") return { model, amount: videoParameterMultiplier(payload, multipliers), usageKind: "video" };
@@ -543,6 +553,16 @@ function normalizedConfiguredProxyPath(value: string) {
         .replace(/^\/+/, "")
         .replace(/^(?:v1|v1beta)\//i, "")
         .replace(/\/+$/, "")}`.toLowerCase();
+}
+
+function normalizedCustomGeminiImagePath(candidate: string, model: string) {
+    const baseModel = customGeminiImageModelParts(model)?.baseModel;
+    if (!baseModel) return candidate;
+
+    return candidate.replace(/(\/models\/)([^/:?#]+)(:generateContent(?:$|[/?#]))/i, (match, prefix: string, requestedModel: string, suffix: string) => {
+        const requested = customGeminiImageModelParts(requestedModel);
+        return requested?.baseModel?.toLowerCase() === baseModel.toLowerCase() ? `${prefix}${baseModel}${suffix}` : match;
+    });
 }
 
 function sameModel(left: string, right: string) {

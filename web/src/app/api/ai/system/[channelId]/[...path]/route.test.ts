@@ -482,6 +482,57 @@ describe("Agnes video polling proxy", () => {
     });
 });
 
+describe("Gemini native image alias proxy", () => {
+    beforeEach(() => {
+        vi.restoreAllMocks();
+        mocks.consumeUserPoints.mockReset().mockResolvedValue(undefined);
+        mocks.refundUserPoints.mockReset();
+        mocks.safeUrl.mockReset().mockResolvedValue(true);
+    });
+
+    it("authorizes a resolution alias without requiring it in the channel model list", async () => {
+        mocks.getAuthSettings.mockResolvedValue({
+            generationPointMultipliers: {},
+            logicalModels: [logicalModel("gemini-image", "image", "gemini-3.1-flash-image")],
+            systemChannels: [
+                {
+                    id: "channel-one",
+                    enabled: true,
+                    baseUrl: "https://gcli.example/antigravity",
+                    apiKey: "secret",
+                    apiFormat: "openai",
+                    models: ["gemini-3.1-flash-image"],
+                    advancedConfig: {
+                        protocol: "custom",
+                        modelConfigs: {
+                            "gemini-3.1-flash-image": {
+                                capability: "image",
+                                protocol: "custom",
+                                apiFormat: "gemini",
+                                createPath: "/v1/models/gemini-3.1-flash-image:generateContent",
+                                editPath: "/v1/models/gemini-3.1-flash-image:generateContent",
+                            },
+                        },
+                    },
+                },
+            ],
+        });
+        const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ candidates: [{ content: { parts: [{ text: "OK" }] } }] }));
+
+        const response = await POST(
+            new Request("http://localhost/api/ai/system/channel-one/v1/models/gemini-3.1-flash-image-4k-16x9:generateContent", {
+                method: "POST",
+                headers: { "content-type": "application/json", ...systemModelHeaders("gemini-image", "gemini-3.1-flash-image") },
+                body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "test" }] }], generationConfig: { responseModalities: ["TEXT", "IMAGE"] } }),
+            }),
+            { params: Promise.resolve({ channelId: "channel-one", path: ["v1", "models", "gemini-3.1-flash-image-4k-16x9:generateContent"] }) },
+        );
+
+        expect(response.status).toBe(200);
+        expect(fetchMock.mock.calls[0]?.[0]).toBe("https://gcli.example/antigravity/v1/models/gemini-3.1-flash-image-4k-16x9:generateContent");
+    });
+});
+
 describe("Stable Diffusion proxy", () => {
     beforeEach(() => {
         vi.restoreAllMocks();
