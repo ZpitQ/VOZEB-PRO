@@ -121,6 +121,7 @@ import {
     parseImageDimensions,
     validateImageSize,
 } from "./image-task-support";
+import { customGeminiImageTaskPath } from "./image-task-gemini-config";
 
 export async function runGeminiImageTask(task: ImageTask, origin: string, cookie: string): Promise<ImageTaskRunResult> {
     const config = task.config;
@@ -132,7 +133,9 @@ export async function runGeminiImageTask(task: ImageTask, origin: string, cookie
     ]);
     referenceDataUrls.forEach((dataUrl, index) => parts.push(toGeminiImagePart(dataUrl, task.references[index]?.type)));
     if (maskDataUrl) parts.push(toGeminiImagePart(maskDataUrl, task.mask?.type));
-    const response = await imageSubmissionFetch(config, `${geminiApiUrl(config, "generateContent", origin)}`, {
+    const configuredPath = customGeminiImageTaskPath(config, task.kind);
+    const url = configuredPath ? taskUrl(config, configuredPath, origin) : geminiApiUrl(config, "generateContent", origin);
+    const response = await imageSubmissionFetch(config, url, {
         method: "POST",
         headers: geminiHeaders(config, cookie, imagePointsIdempotencyKey(task)),
         body: JSON.stringify({

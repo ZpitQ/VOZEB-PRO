@@ -112,6 +112,64 @@ describe("image task route", () => {
         expect(mocks.withGenerationConcurrencyLimit).toHaveBeenCalledOnce();
     });
 
+    it("accepts reference images for a native Gemini custom route", async () => {
+        mocks.withGenerationConcurrencyLimit.mockImplementation(async (_userId, _type, _staleMs, _limit, handler) => handler());
+        mocks.getAuthSettings.mockResolvedValue({
+            generationConcurrency: { image: 1 },
+            generationDefaults: { imageSize: "1:1", imageQuality: "high" },
+            systemChannels: [
+                {
+                    id: "gcli-channel",
+                    name: "gcli2api",
+                    enabled: true,
+                    baseUrl: "https://gcli.example/antigravity",
+                    apiKey: "secret",
+                    apiFormat: "openai",
+                    models: ["gemini-3.1-flash-image"],
+                    advancedConfig: {
+                        protocol: "custom",
+                        supportsReferenceImage: true,
+                        modelConfigs: {
+                            "gemini-3.1-flash-image": {
+                                capability: "image",
+                                protocol: "custom",
+                                apiFormat: "gemini",
+                                createPath: "/v1/models/gemini-3.1-flash-image:generateContent",
+                                editPath: "/v1/models/gemini-3.1-flash-image:generateContent",
+                                requestTemplate: '{"contents":[{"role":"user","parts":[{"text":"{{prompt}}"}]}],"size":"{{size}}"}',
+                                resultField: "candidates[0].content.parts[0].inlineData",
+                                supportsReferenceImage: false,
+                            },
+                        },
+                    },
+                },
+            ],
+            logicalModels: [
+                {
+                    id: "gemini-image",
+                    name: "Gemini image",
+                    capability: "image",
+                    enabled: true,
+                    bindings: [{ id: "binding", channelId: "gcli-channel", upstreamModel: "gemini-3.1-flash-image", enabled: true, priority: 1 }],
+                },
+            ],
+            defaultModels: { imageModel: "gemini-image" },
+        });
+        mocks.createImageTask.mockImplementation(async (input) => ({ ...input, id: "gemini-edit", status: "pending" }));
+
+        const response = await POST(
+            imageRequest({
+                kind: "edit",
+                config: { model: "gemini-image", size: "16:9", quality: "high" },
+                prompt: "改成黑白色",
+                references: [{ name: "reference.png", type: "image/png", dataUrl: "data:image/png;base64,AA==" }],
+            }),
+        );
+
+        expect(response.status).toBe(200);
+        expect(mocks.createImageTask).toHaveBeenCalledOnce();
+    });
+
     it("lets a verified Canvas layer task bypass ordinary image capacity and persists its class", async () => {
         vi.stubEnv("VOZEB_PRO_ENCRYPTION_KEY", "22".repeat(32));
         const source = "/api/reference-assets/source.png";

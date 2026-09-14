@@ -139,6 +139,33 @@ describe("image task runtime submission safety", () => {
         expect(mocks.runGemini).not.toHaveBeenCalled();
     });
 
+    it("routes a native Gemini custom image edit through the inlineData runtime", async () => {
+        state.kind = "edit";
+        state.references = [{ name: "reference.png", type: "image/png", dataUrl: "data:image/png;base64,AA==" }];
+        state.config = {
+            ...state.config,
+            apiFormat: "gemini",
+            model: "gemini-3.1-flash-image",
+            size: "16:9",
+            quality: "high",
+            advancedConfig: {
+                ...emptyAdvancedConfig(),
+                protocol: "custom",
+                createPath: "/v1/models/gemini-3.1-flash-image:generateContent",
+                editPath: "/v1/models/gemini-3.1-flash-image:generateContent",
+                requestTemplate: '{"contents":[{"role":"user","parts":[{"text":"{{prompt}}"}]}],"size":"{{size}}"}',
+                resultField: "candidates[0].content.parts[0].inlineData",
+            },
+        };
+        state.candidateConfigs = [];
+        mocks.runGemini.mockResolvedValueOnce({ dataUrl: "data:image/png;base64,c2FmZQ==" });
+
+        await createImageTaskUpstreamStep(state, "http://internal", "https://public.example");
+
+        expect(mocks.runGemini).toHaveBeenCalledOnce();
+        expect(mocks.runCustom).not.toHaveBeenCalled();
+    });
+
     it("keeps declarative media resolution separate from system-proxy polling", async () => {
         state.config = { ...state.config, baseUrl: "/api/ai/system/channel-one", advancedConfig: { ...emptyAdvancedConfig(), protocol: "custom", queryPath: "/jobs/:task_id" } };
         state.upstream = {

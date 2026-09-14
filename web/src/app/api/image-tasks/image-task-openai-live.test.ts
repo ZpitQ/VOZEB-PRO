@@ -469,6 +469,46 @@ describe("OpenAI image provider over a live compatible fixture", () => {
         }
     });
 
+    it("uses the configured gcli2api path and 4K ratio alias for a Gemini image edit", async () => {
+        const fixture = createProtocolFixtureServer();
+        await new Promise<void>((resolve) => fixture.server.listen(0, "127.0.0.1", resolve));
+        const address = fixture.server.address();
+        if (!address || typeof address === "string") throw new Error("Protocol fixture did not bind a TCP port");
+        const origin = `http://127.0.0.1:${address.port}`;
+        const task = liveImageTask(origin, {
+            id: "image-gcli-edit-live",
+            kind: "edit",
+            references: [{ name: "reference.png", type: "image/png", dataUrl: PNG_DATA_URL }],
+            config: {
+                baseUrl: origin,
+                apiKey: "fixture-key",
+                apiFormat: "gemini",
+                model: "gemini-3.1-flash-image",
+                channelId: "fixture-gcli",
+                size: "16:9",
+                quality: "high",
+                advancedConfig: {
+                    ...emptyAdvancedConfig(),
+                    protocol: "custom",
+                    createPath: "/antigravity/v1/models/gemini-3.1-flash-image:generateContent",
+                    editPath: "/antigravity/v1/models/gemini-3.1-flash-image:generateContent",
+                    requestTemplate: '{"contents":[{"role":"user","parts":[{"text":"{{prompt}}"}]}],"size":"{{size}}"}',
+                    resultField: "candidates[0].content.parts[0].inlineData",
+                },
+            },
+        });
+
+        try {
+            await expect(runGeminiImageTask(task, origin, "")).resolves.toMatchObject({ dataUrl: expect.stringMatching(/^data:image\/png;base64,/) });
+            expect(fixture.requests).toHaveLength(1);
+            expect(fixture.requests[0]?.path).toBe("/antigravity/v1/models/gemini-3.1-flash-image-4k-16x9:generateContent");
+            const body = JSON.parse(fixture.requests[0]?.body.toString("utf8") || "{}");
+            expect(body.contents[0].parts[1]).toEqual({ inlineData: { mimeType: "image/png", data: PNG_BASE64 } });
+        } finally {
+            await new Promise<void>((resolve, reject) => fixture.server.close((error?: Error) => (error ? reject(error) : resolve())));
+        }
+    });
+
     it.each([
         ["Stable Diffusion", "stable-diffusion", "/sdapi/v1/txt2img", '{"prompt":"{{prompt}}","width":"{{width}}","height":"{{height}}","override_settings":{"sd_model_checkpoint":"{{model}}"}}', "images[0]"],
         ["custom", "custom", "/custom/images", '{"deployment":"{{model}}","input":"{{prompt}}","dimensions":"{{size}}"}', "data.image_url"],

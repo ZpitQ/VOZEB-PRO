@@ -1,4 +1,5 @@
 import { runCustomImageTask, pollCustomImageTask } from "@/app/api/image-tasks/image-task-custom";
+import { customGeminiImageTaskPath } from "@/app/api/image-tasks/image-task-gemini-config";
 import { runGeminiImageTask } from "@/app/api/image-tasks/image-task-gemini";
 import { runOpenAiImageTask } from "@/app/api/image-tasks/image-task-openai";
 import { imageUnits, ImageQueryContractError, ImageUpstreamTerminalError, pollOpenAiImageTask } from "@/app/api/image-tasks/image-task-support";
@@ -49,11 +50,13 @@ export async function createImageTaskUpstreamStep(task: ImageTask, origin: strin
         lastUpstreamStatus: "submitting",
     });
     try {
-        const result = usesDeclarativeImageProtocol(config.advancedConfig?.protocol)
-            ? await runCustomImageTask(candidate, origin, publicOrigin, authContext, true)
-            : config.apiFormat === "gemini"
-              ? await runGeminiImageTask(candidate, origin, authContext)
-              : await runOpenAiImageTask(candidate, origin, publicOrigin, authContext, true);
+        const result = customGeminiImageTaskPath(config, candidate.kind)
+            ? await runGeminiImageTask(candidate, origin, authContext)
+            : usesDeclarativeImageProtocol(config.advancedConfig?.protocol)
+              ? await runCustomImageTask(candidate, origin, publicOrigin, authContext, true)
+              : config.apiFormat === "gemini"
+                ? await runGeminiImageTask(candidate, origin, authContext)
+                : await runOpenAiImageTask(candidate, origin, publicOrigin, authContext, true);
         return await handleImageProviderResult(candidate, result, origin, authContext);
     } catch (error) {
         if (error instanceof ImageUpstreamTerminalError) return { state: "failed", error: error.message || "图片生成失败", status: "failed", retryReason: "upstream_failed" };
