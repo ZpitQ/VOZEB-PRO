@@ -1,4 +1,5 @@
 import { requestPublicOrigin } from "./image-task-reference-urls";
+import { customGeminiImageTaskPath } from "./image-task-gemini-config";
 import { after, NextResponse } from "next/server";
 
 import { readJsonBody } from "@/lib/auth/request";
@@ -182,7 +183,7 @@ export async function POST(request: Request) {
         });
         const compatibleConfigs = constrainedConfigs.filter((config) => {
             try {
-                assertReferenceCapabilities(config.advancedConfig, [...references.map(() => ({ type: "image" })), ...(resolvedBody.mask ? [{ type: "image" }] : [])]);
+                if (!customGeminiImageTaskPath(config, kind)) assertReferenceCapabilities(config.advancedConfig, [...references.map(() => ({ type: "image" })), ...(resolvedBody.mask ? [{ type: "image" }] : [])]);
                 return true;
             } catch {
                 return false;

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.0.15
+
+- [图片] 修复 gcli2api 自定义 Gemini 图生图被错误判定为不支持参考素材的问题；原生 `generateContent` 路径现在保留参考图 inlineData，并按用户画质和比例选择 4K 模型别名。
+
 ## v0.0.14
 
 - [工程] 移除 GitHub Actions 移动端浏览器门禁，将桌面 Chromium 拆为两个独立分片，并行执行静态检查与单元测试以缩短发布等待时间。
