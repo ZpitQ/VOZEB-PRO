@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.0.19
+
+- [Canvas] 修复对象存储重定向或外域图片在放大时污染 Canvas、导致 `toDataURL` 在请求提交前失败的问题；4K 原件现在可以正常生成。
+
 ## v0.0.18
 
 - [Canvas] Accept base64-expanded reference images that previously exceeded the text-task API's 4 MiB request limit.
