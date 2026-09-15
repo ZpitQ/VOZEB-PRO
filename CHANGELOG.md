@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.0.18
+
 - [Canvas] Accept base64-expanded reference images that previously exceeded the text-task API's 4 MiB request limit.
 - [Deployment] Default released Compose profiles to the latest image and pull it on startup.
 
