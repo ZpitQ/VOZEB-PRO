@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- [Canvas] Accept base64-expanded reference images that previously exceeded the text-task API's 4 MiB request limit.
+- [Deployment] Default released Compose profiles to the latest image and pull it on startup.
+
 ## v0.0.17
 
 - [图片] 修复自定义 Gemini 原生图生图的 2K/4K 比例别名在可信模型头与路径组合下无法通过代理授权的问题；别名继续原样转发，上游模型授权和计费使用已启用的基础模型。
