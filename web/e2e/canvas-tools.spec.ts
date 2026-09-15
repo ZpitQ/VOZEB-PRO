@@ -7,6 +7,7 @@ import sharp from "sharp";
 
 import { normalizeImagePreviewWidth } from "../src/lib/media-image-variant";
 import { createCanvasProject, deleteCanvasProject, expectCanvasSaved, expectNoHorizontalOverflow, node, readCanvasProject } from "./canvas-e2e-helpers";
+import { E2E_PROTOCOL_ORIGIN } from "./support";
 
 test.describe.configure({ mode: "serial" });
 
@@ -449,6 +450,53 @@ test("canvas box selection downloads selected images and videos as a browser ZIP
             if (project) await deleteCanvasProject(request, project.id);
         } finally {
             const cleanup = await request.delete("/api/media-assets", { data: { storageKeys: [imageAsset.key, videoAsset.key] } });
+            expect(cleanup.ok(), await cleanup.text()).toBe(true);
+        }
+    }
+});
+
+test("canvas upscale exports a cross-origin image through the media proxy", async ({ page, request }) => {
+    const sourceUrl = `${E2E_PROTOCOL_ORIGIN}/media/fixture.png`;
+    const project = await createCanvasProject(request, {
+        title: `Canvas 跨域放大 ${randomUUID().slice(0, 8)}`,
+        viewport: { x: 120, y: 100, k: 1 },
+        nodes: [node("source-image", "image", 120, 100, 320, 320, { content: sourceUrl, remoteUrl: sourceUrl })],
+        connections: [],
+    });
+    let generatedStorageKey = "";
+    let mediaProxyRequests = 0;
+    page.on("request", (current) => {
+        if (new URL(current.url()).pathname === "/api/media-proxy") mediaProxyRequests += 1;
+    });
+
+    try {
+        await page.goto(`/canvas/${project.id}`, { waitUntil: "domcontentloaded" });
+        await expect(page.locator("[data-canvas-surface]")).toBeVisible({ timeout: 20_000 });
+        await page.locator('[data-node-id="source-image"]').click();
+        await page.getByRole("button", { name: "放大图片分辨率", exact: true }).click();
+        const dialog = page.getByRole("dialog");
+        await expect(dialog.getByText("图片放大", { exact: true })).toBeVisible();
+        await dialog.getByText("4K · 4096px", { exact: true }).click();
+        await dialog.getByRole("button", { name: "生成放大图" }).click();
+
+        await expect.poll(async () => (await readCanvasProject(request, `/api/canvas/projects/${project.id}`)).nodes.length, { timeout: 30_000 }).toBe(2);
+        await expectCanvasSaved(page);
+        const saved = await readCanvasProject(request, `/api/canvas/projects/${project.id}`);
+        const generated = saved.nodes.find((item) => item.id !== "source-image");
+        generatedStorageKey = String(generated?.metadata?.storageKey || "");
+        expect(generatedStorageKey).toBeTruthy();
+        const generatedUrl = String(generated?.metadata?.content || "");
+        expect(generatedUrl).toBeTruthy();
+        const original = await request.get(`${generatedUrl}${generatedUrl.includes("?") ? "&" : "?"}download=original`);
+        expect(original.ok()).toBe(true);
+        const originalMetadata = await sharp(await original.body()).metadata();
+        expect(Math.max(originalMetadata.width || 0, originalMetadata.height || 0)).toBe(4096);
+        expect(mediaProxyRequests).toBeGreaterThan(0);
+        await expect(page.getByText(/Tainted canvases may not be exported/)).toHaveCount(0);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+        if (generatedStorageKey) {
+            const cleanup = await request.delete("/api/media-assets", { data: { storageKeys: [generatedStorageKey] } });
             expect(cleanup.ok(), await cleanup.text()).toBe(true);
         }
     }
