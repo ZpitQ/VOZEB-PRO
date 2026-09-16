@@ -40,10 +40,10 @@ describe("Canvas native mask edit output", () => {
         expect(resolveCanvasMaskEditSize({}, "16:9")).toBe("16:9");
     });
 
-    it("uses the complete native sub2api edit instead of clipping it with the local mask", () => {
+    it("uses the complete native sub2api edit with the public session channel shape", () => {
         const config = {
-            model: "gpt-image-2.5-sunburst",
-            imageModel: "gpt-image-2.5-sunburst",
+            model: "sunburst-image",
+            imageModel: "sunburst-image",
             channels: [
                 {
                     id: "sub2api",
@@ -52,13 +52,19 @@ describe("Canvas native mask edit output", () => {
                     apiKey: "system",
                     apiFormat: "openai",
                     models: ["gpt-image-2.5-sunburst"],
-                    advancedConfig: {
-                        protocol: "sub2api",
-                        modelConfigs: { "gpt-image-2.5-sunburst": { capability: "image", protocol: "sub2api" } },
-                    },
+                    protocol: "sub2api",
+                    modelProtocols: { "gpt-image-2.5-sunburst": "sub2api" },
                 },
             ],
-            logicalModels: [],
+            logicalModels: [
+                {
+                    id: "sunburst-image",
+                    name: "GPT-Image-2.5 Sunburst",
+                    capability: "image",
+                    enabled: true,
+                    bindings: [{ id: "sunburst-binding", channelId: "sub2api", upstreamModel: "gpt-image-2.5-sunburst", enabled: true, priority: 1 }],
+                },
+            ],
         } as never;
 
         expect(shouldCompositeCanvasMaskEdit(config)).toBe(false);
