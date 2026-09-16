@@ -134,7 +134,58 @@ describe("OpenAI image provider over a live compatible fixture", () => {
             const body = JSON.parse(fixture.requests[0]?.body.toString("utf8") || "{}");
             expect(body.image_urls).toEqual(["https://cdn.example.com/reference.png"]);
             expect(body.images).toBeUndefined();
+            expect(body.prompt).toContain("primary identity and character reference");
+            expect(body.prompt).not.toContain("binary edit mask");
             expect(fixture.requests[0]?.headers["idempotency-key"]).toBe("image-task:image-sub2api-live:attempt:1");
+        } finally {
+            await new Promise<void>((resolve, reject) => fixture.server.close((error?: Error) => (error ? reject(error) : resolve())));
+        }
+    });
+
+    it("sends sub2api masks as the final visual input with normalized edit coordinates", async () => {
+        const fixture = createProtocolFixtureServer();
+        await new Promise<void>((resolve) => fixture.server.listen(0, "127.0.0.1", resolve));
+        const address = fixture.server.address();
+        if (!address || typeof address === "string") throw new Error("Protocol fixture did not bind a TCP port");
+        const origin = "http://127.0.0.1:" + address.port;
+        const task = liveImageTask(origin, {
+            id: "image-sub2api-mask-live",
+            kind: "edit",
+            prompt: "place a complete green potted plant in the selected region",
+            references: [{ type: "image/png", dataUrl: "https://cdn.example.com/source.png" }],
+            mask: {
+                type: "image/png",
+                dataUrl: "https://cdn.example.com/mask.png",
+                editRegion: {
+                    left: 0.42,
+                    top: 0.6477,
+                    right: 0.7563,
+                    bottom: 0.7686,
+                    centerX: 0.5881,
+                    centerY: 0.7082,
+                },
+            },
+            config: {
+                baseUrl: origin,
+                apiKey: "fixture-key",
+                apiFormat: "openai",
+                model: "gpt-image-2.5-sunburst",
+                channelId: "fixture-sub2api-mask",
+                advancedConfig: { ...emptyAdvancedConfig(), protocol: "sub2api", createPath: "/images/generations", editPath: "/images/generations", supportsReferenceImage: true },
+            },
+        });
+
+        try {
+            await expect(runOpenAiImageTask(task, "", "", "", true)).resolves.toMatchObject({ dataUrl: expect.stringMatching(/^data:image\/png;base64,/) });
+            const body = JSON.parse(fixture.requests[0]?.body.toString("utf8") || "{}");
+            expect(body.image_urls).toEqual(["https://cdn.example.com/source.png", "https://cdn.example.com/mask.png"]);
+            expect(body.prompt).toContain("final image_urls item is a binary edit mask");
+            expect(body.prompt).toContain("Transparent pixels are the editable region; opaque pixels must be preserved");
+            expect(body.prompt).toContain("left=0.4200, top=0.6477, right=0.7563, bottom=0.7686");
+            expect(body.prompt).toContain("centerX=0.5881, centerY=0.7082");
+            expect(body.prompt).toContain("complete requested object inside the editable region");
+            expect(body.prompt).toContain("unrelated people, animals, furniture, or objects");
+            expect(body.prompt).not.toMatch(/identity|character reference/i);
         } finally {
             await new Promise<void>((resolve, reject) => fixture.server.close((error?: Error) => (error ? reject(error) : resolve())));
         }

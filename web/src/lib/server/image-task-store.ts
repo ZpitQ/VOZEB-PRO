@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 
 import type { LogicalModelCapabilityProfile, SystemChannelAdvancedConfig } from "@/lib/auth/store";
+import type { ImageEditRegion } from "@/lib/image-edit-region";
 import type { GenerationAttempt } from "@/lib/server/generation-attempt";
 import type { GenerationLogSource } from "@/lib/server/generation-log-store";
 import { countActiveStoredGenerationTasks, createStoredGenerationTask, getStoredGenerationTask, mutateStoredGenerationTask, touchStoredGenerationTask, transitionStoredGenerationTask, type GenerationTaskContext } from "@/lib/server/generation-task-store";
@@ -34,6 +35,7 @@ export type ImageTaskReference = {
     url?: string;
     remoteUrl?: string;
     serverUrl?: string;
+    editRegion?: ImageEditRegion;
 };
 
 export type StoredImageTaskMediaResult = {

@@ -205,12 +205,18 @@ describe("Canvas media replacement", () => {
     });
 
     it("restores a persisted image edit mask for stable retries", async () => {
-        await expect(resolveMetadataImageEditMask({ imageEditMask: { storageKey: "mask.png", serverUrl: "/api/reference-assets/mask.png", mimeType: "image/png", width: 512, height: 512 } })).resolves.toMatchObject({
+        const editRegion = { left: 0.2, top: 0.3, right: 0.6, bottom: 0.7, centerX: 0.4, centerY: 0.5 };
+        await expect(
+            resolveMetadataImageEditMask({
+                imageEditMask: { storageKey: "mask.png", serverUrl: "/api/reference-assets/mask.png", mimeType: "image/png", width: 512, height: 512, editRegion },
+            }),
+        ).resolves.toMatchObject({
             id: "mask-mask.png",
             dataUrl: "/api/reference-assets/mask.png",
             storageKey: "mask.png",
             width: 512,
             height: 512,
+            editRegion,
         });
     });
 
