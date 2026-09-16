@@ -170,6 +170,25 @@ describe("image task route", () => {
         expect(mocks.createImageTask).toHaveBeenCalledOnce();
     });
 
+    it("uses the source image ratio for masked edits while keeping the requested quality", async () => {
+        mocks.withGenerationConcurrencyLimit.mockImplementation(async (_userId, _type, _staleMs, _limit, handler) => handler());
+        mocks.getAuthSettings.mockResolvedValue(imageSettings());
+        mocks.createImageTask.mockImplementation(async (input) => ({ ...input, id: "masked-edit", status: "pending" }));
+
+        const response = await POST(
+            imageRequest({
+                kind: "edit",
+                config: { model: "image", size: "16:9", quality: "high" },
+                prompt: "在选中区域放置一盆绿植",
+                references: [{ type: "image/png", dataUrl: "data:image/png;base64,AA==", width: 1692, height: 3008 }],
+                mask: { type: "image/png", dataUrl: "data:image/png;base64,AA==", width: 1600, height: 2844 },
+            }),
+        );
+
+        expect(response.status).toBe(200);
+        expect(mocks.createImageTask).toHaveBeenCalledWith(expect.objectContaining({ config: expect.objectContaining({ size: "9:16", quality: "high" }) }));
+    });
+
     it("lets a verified Canvas layer task bypass ordinary image capacity and persists its class", async () => {
         vi.stubEnv("VOZEB_PRO_ENCRYPTION_KEY", "22".repeat(32));
         const source = "/api/reference-assets/source.png";

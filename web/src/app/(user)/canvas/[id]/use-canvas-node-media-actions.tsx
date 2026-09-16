@@ -33,6 +33,7 @@ import {
     canvasNodeReferenceImage,
     imageMetadata,
     isGenerationCanceled,
+    resolveCanvasMaskEditSize,
     shouldCompositeCanvasMaskEdit,
     uploadCanvasImage,
 } from "./canvas-page-utils";
@@ -377,7 +378,12 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
     const maskEditImageNode = useCallback(
         async (node: CanvasNodeData, payload: CanvasImageMaskEditPayload) => {
             if (!node.metadata?.content) return;
-            const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1", size: node.metadata?.size || "auto" };
+            const source = canvasNodeReferenceImage(node);
+            const generationConfig = {
+                ...buildGenerationConfig(effectiveConfig, node, "image"),
+                count: "1",
+                size: resolveCanvasMaskEditSize(source, node.metadata?.size || "auto"),
+            };
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
                 return;
@@ -386,7 +392,6 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
             const prompt = `只修改蒙版透明区域，其他区域保持不变。${userPrompt}`;
             const preserveUnmaskedPixels = shouldCompositeCanvasMaskEdit(generationConfig);
             const childId = nanoid();
-            const source = canvasNodeReferenceImage(node);
             const storedMask = await uploadCanvasImage(payload.maskDataUrl);
             const maskUrl = storedMask.serverUrl || storedMask.url;
             const mask = {

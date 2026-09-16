@@ -116,7 +116,7 @@ describe("OpenAI image provider over a live compatible fixture", () => {
         const task = liveImageTask(origin, {
             id: "image-sub2api-live",
             kind: "edit",
-            references: [{ type: "image/png", dataUrl: "https://cdn.example.com/reference.png" }],
+            references: [{ type: "image/png", dataUrl: PNG_DATA_URL }],
             config: {
                 baseUrl: origin,
                 apiKey: "fixture-key",
@@ -132,7 +132,7 @@ describe("OpenAI image provider over a live compatible fixture", () => {
             expect(fixture.requests).toHaveLength(1);
             expect(fixture.requests[0]?.path).toBe("/v1/images/edits");
             const body = JSON.parse(fixture.requests[0]?.body.toString("utf8") || "{}");
-            expect(body.images).toEqual([{ image_url: "https://cdn.example.com/reference.png" }]);
+            expect(body.images).toEqual([{ image_url: PNG_DATA_URL }]);
             expect(body.image_urls).toBeUndefined();
             expect(body.input_fidelity).toBe("high");
             expect(body.prompt).toContain("source image");
@@ -153,10 +153,10 @@ describe("OpenAI image provider over a live compatible fixture", () => {
             id: "image-sub2api-mask-live",
             kind: "edit",
             prompt: "place a complete green potted plant in the selected region",
-            references: [{ type: "image/png", dataUrl: "https://cdn.example.com/source.png" }],
+            references: [{ type: "image/png", dataUrl: PNG_DATA_URL }],
             mask: {
                 type: "image/png",
-                dataUrl: "https://cdn.example.com/mask.png",
+                dataUrl: PNG_DATA_URL,
                 editRegion: {
                     left: 0.42,
                     top: 0.6477,
@@ -181,8 +181,8 @@ describe("OpenAI image provider over a live compatible fixture", () => {
             const body = JSON.parse(fixture.requests[0]?.body.toString("utf8") || "{}");
             expect(fixture.requests).toHaveLength(1);
             expect(fixture.requests[0]?.path).toBe("/v1/images/edits");
-            expect(body.images).toEqual([{ image_url: "https://cdn.example.com/source.png" }]);
-            expect(body.mask).toEqual({ image_url: "https://cdn.example.com/mask.png" });
+            expect(body.images).toEqual([{ image_url: PNG_DATA_URL }]);
+            expect(body.mask).toEqual({ image_url: PNG_DATA_URL });
             expect(body.image_urls).toBeUndefined();
             expect(body.input_fidelity).toBe("high");
             expect(body.prompt).toContain("mask field is a binary edit mask");
@@ -206,7 +206,7 @@ describe("OpenAI image provider over a live compatible fixture", () => {
             mask: { dataUrl: "https://cdn.example.com/mask.png" },
             config: { baseUrl: "https://provider.example/v1", apiKey: "fixture-key", apiFormat: "openai", model: "legacy-image", advancedConfig: { ...emptyAdvancedConfig(), protocol: "auto", requestTemplate: '{"image_urls":"{{images}}"}' } },
         });
-        const [body] = await buildJsonImageEditBodies(task, "high", "1024x1024", "url", "", "", true, true, false);
+        const [body] = await buildJsonImageEditBodies(task, "high", "1024x1024", "url", "", "", "", true, true, false);
         expect(body).toMatchObject({ image_urls: ["https://cdn.example.com/source.png", "https://cdn.example.com/mask.png"], mask: "https://cdn.example.com/mask.png" });
         expect(body).not.toHaveProperty("images");
         expect(body).not.toHaveProperty("input_fidelity");

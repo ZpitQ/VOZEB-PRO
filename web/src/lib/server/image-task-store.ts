@@ -35,6 +35,8 @@ export type ImageTaskReference = {
     url?: string;
     remoteUrl?: string;
     serverUrl?: string;
+    width?: number;
+    height?: number;
     editRegion?: ImageEditRegion;
 };
 
