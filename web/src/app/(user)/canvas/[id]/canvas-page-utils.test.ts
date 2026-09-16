@@ -29,8 +29,46 @@ import {
     resolveMetadataImageEditMask,
     resolveMetadataImageEditValidationMask,
     resolveMetadataReferences,
+    shouldCompositeCanvasMaskEdit,
     uploadGeneratedCanvasImage,
 } from "./canvas-page-utils";
+
+describe("Canvas native mask edit output", () => {
+    it("uses the complete native sub2api edit instead of clipping it with the local mask", () => {
+        const config = {
+            model: "gpt-image-2.5-sunburst",
+            imageModel: "gpt-image-2.5-sunburst",
+            channels: [
+                {
+                    id: "sub2api",
+                    name: "sub2api",
+                    baseUrl: "/api/ai/system/sub2api",
+                    apiKey: "system",
+                    apiFormat: "openai",
+                    models: ["gpt-image-2.5-sunburst"],
+                    advancedConfig: {
+                        protocol: "sub2api",
+                        modelConfigs: { "gpt-image-2.5-sunburst": { capability: "image", protocol: "sub2api" } },
+                    },
+                },
+            ],
+            logicalModels: [],
+        } as never;
+
+        expect(shouldCompositeCanvasMaskEdit(config)).toBe(false);
+    });
+
+    it("keeps local pixel protection for non-native image edit protocols", () => {
+        const config = {
+            model: "legacy-image",
+            imageModel: "legacy-image",
+            channels: [{ id: "legacy", name: "legacy", baseUrl: "/api/ai/system/legacy", apiKey: "system", apiFormat: "openai", models: ["legacy-image"], advancedConfig: { protocol: "auto" } }],
+            logicalModels: [],
+        } as never;
+
+        expect(shouldCompositeCanvasMaskEdit(config)).toBe(true);
+    });
+});
 
 describe("Canvas project hydration", () => {
     beforeEach(() => {

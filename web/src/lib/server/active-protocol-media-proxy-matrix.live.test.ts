@@ -182,6 +182,26 @@ describe("active protocols through persisted admin settings and the system proxy
         }
     });
 
+    it("preserves native sub2api source and mask objects through persisted model config and the system proxy", async () => {
+        const definition = channelProtocolDefinition("sub2api");
+        const model = protocolModel(definition, "image");
+        const operation = { ...definition.operations.image!, capability: "image" as const, protocol: "sub2api" as const };
+        const channel = await configureProxyChannel(definition, "image", model, protocolAdvancedConfig("sub2api", operation, model));
+        const task = imageTask(channel, true);
+        task.source = "canvas";
+        task.mask = { type: "image/png", dataUrl: "https://cdn.example.com/mask.png" };
+
+        await expectImageResult(await runImage(task, "sub2api"));
+        expectProxyRequests(channel, "/images/edits", model, true);
+        expect(fixture.requests).toHaveLength(1);
+        expect(JSON.parse(fixture.requests[0]!.body.toString("utf8"))).toMatchObject({
+            images: [{ image_url: "https://cdn.example.com/reference.png" }],
+            mask: { image_url: "https://cdn.example.com/mask.png" },
+            input_fidelity: "high",
+        });
+        expect(mocks.consumeUserPoints).toHaveBeenCalledTimes(1);
+    });
+
     it.each(VIDEO_PROTOCOLS)("routes $id text-to-video and image-to-video creation, polling, and media", async (definition) => {
         const model = protocolModel(definition, "video");
         const operation = protocolOperation(definition, "video", model);

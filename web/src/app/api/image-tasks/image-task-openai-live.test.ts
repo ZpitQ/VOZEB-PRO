@@ -107,8 +107,8 @@ describe("OpenAI image provider over a live compatible fixture", () => {
         }
     });
 
-    it("sends sub2api edits as one JSON request with an image_urls string array", async () => {
-        const fixture = createProtocolFixtureServer();
+    it("sends sub2api edits to the native edits endpoint with image_url objects", async () => {
+        const fixture = createProtocolFixtureServer({ sub2apiImageEdits: true });
         await new Promise<void>((resolve) => fixture.server.listen(0, "127.0.0.1", resolve));
         const address = fixture.server.address();
         if (!address || typeof address === "string") throw new Error("Protocol fixture did not bind a TCP port");
@@ -123,18 +123,19 @@ describe("OpenAI image provider over a live compatible fixture", () => {
                 apiFormat: "openai",
                 model: "gpt-image-1",
                 channelId: "fixture-sub2api",
-                advancedConfig: { ...emptyAdvancedConfig(), protocol: "sub2api", createPath: "/images/generations", editPath: "/images/generations", supportsReferenceImage: true },
+                advancedConfig: { ...emptyAdvancedConfig(), protocol: "sub2api", createPath: "/images/generations", supportsReferenceImage: true },
             },
         });
 
         try {
             await expect(runOpenAiImageTask(task, "", "", "", true)).resolves.toMatchObject({ dataUrl: expect.stringMatching(/^data:image\/png;base64,/) });
             expect(fixture.requests).toHaveLength(1);
-            expect(fixture.requests[0]?.path).toBe("/v1/images/generations");
+            expect(fixture.requests[0]?.path).toBe("/v1/images/edits");
             const body = JSON.parse(fixture.requests[0]?.body.toString("utf8") || "{}");
-            expect(body.image_urls).toEqual(["https://cdn.example.com/reference.png"]);
-            expect(body.images).toBeUndefined();
-            expect(body.prompt).toContain("primary identity and character reference");
+            expect(body.images).toEqual([{ image_url: "https://cdn.example.com/reference.png" }]);
+            expect(body.image_urls).toBeUndefined();
+            expect(body.input_fidelity).toBe("high");
+            expect(body.prompt).toContain("source image");
             expect(body.prompt).not.toContain("binary edit mask");
             expect(fixture.requests[0]?.headers["idempotency-key"]).toBe("image-task:image-sub2api-live:attempt:1");
         } finally {
@@ -142,8 +143,8 @@ describe("OpenAI image provider over a live compatible fixture", () => {
         }
     });
 
-    it("sends sub2api masks as the final visual input with normalized edit coordinates", async () => {
-        const fixture = createProtocolFixtureServer();
+    it("sends sub2api masks separately from scene references using the native mask object", async () => {
+        const fixture = createProtocolFixtureServer({ sub2apiImageEdits: true });
         await new Promise<void>((resolve) => fixture.server.listen(0, "127.0.0.1", resolve));
         const address = fixture.server.address();
         if (!address || typeof address === "string") throw new Error("Protocol fixture did not bind a TCP port");
@@ -171,24 +172,44 @@ describe("OpenAI image provider over a live compatible fixture", () => {
                 apiFormat: "openai",
                 model: "gpt-image-2.5-sunburst",
                 channelId: "fixture-sub2api-mask",
-                advancedConfig: { ...emptyAdvancedConfig(), protocol: "sub2api", createPath: "/images/generations", editPath: "/images/generations", supportsReferenceImage: true },
+                advancedConfig: { ...emptyAdvancedConfig(), protocol: "sub2api", createPath: "/images/generations", editPath: "/images/edits", supportsReferenceImage: true },
             },
         });
 
         try {
             await expect(runOpenAiImageTask(task, "", "", "", true)).resolves.toMatchObject({ dataUrl: expect.stringMatching(/^data:image\/png;base64,/) });
             const body = JSON.parse(fixture.requests[0]?.body.toString("utf8") || "{}");
-            expect(body.image_urls).toEqual(["https://cdn.example.com/source.png", "https://cdn.example.com/mask.png"]);
-            expect(body.prompt).toContain("final image_urls item is a binary edit mask");
+            expect(fixture.requests).toHaveLength(1);
+            expect(fixture.requests[0]?.path).toBe("/v1/images/edits");
+            expect(body.images).toEqual([{ image_url: "https://cdn.example.com/source.png" }]);
+            expect(body.mask).toEqual({ image_url: "https://cdn.example.com/mask.png" });
+            expect(body.image_urls).toBeUndefined();
+            expect(body.input_fidelity).toBe("high");
+            expect(body.prompt).toContain("mask field is a binary edit mask");
             expect(body.prompt).toContain("Transparent pixels are the editable region; opaque pixels must be preserved");
             expect(body.prompt).toContain("left=0.4200, top=0.6477, right=0.7563, bottom=0.7686");
             expect(body.prompt).toContain("centerX=0.5881, centerY=0.7082");
             expect(body.prompt).toContain("complete requested object inside the editable region");
             expect(body.prompt).toContain("unrelated people, animals, furniture, or objects");
+            expect(body.prompt).toContain("artistic style, color palette, materials, texture, and realism");
+            expect(body.prompt).toContain("light direction, warmth, exposure, shadows, scale, and perspective");
             expect(body.prompt).not.toMatch(/identity|character reference/i);
         } finally {
             await new Promise<void>((resolve, reject) => fixture.server.close((error?: Error) => (error ? reject(error) : resolve())));
         }
+    });
+
+    it("keeps image_urls string arrays for automatic legacy providers", async () => {
+        const task = liveImageTask("https://provider.example/v1", {
+            kind: "edit",
+            references: [{ dataUrl: "https://cdn.example.com/source.png" }],
+            mask: { dataUrl: "https://cdn.example.com/mask.png" },
+            config: { baseUrl: "https://provider.example/v1", apiKey: "fixture-key", apiFormat: "openai", model: "legacy-image", advancedConfig: { ...emptyAdvancedConfig(), protocol: "auto", requestTemplate: '{"image_urls":"{{images}}"}' } },
+        });
+        const [body] = await buildJsonImageEditBodies(task, "high", "1024x1024", "url", "", "", true, true, false);
+        expect(body).toMatchObject({ image_urls: ["https://cdn.example.com/source.png", "https://cdn.example.com/mask.png"], mask: "https://cdn.example.com/mask.png" });
+        expect(body).not.toHaveProperty("images");
+        expect(body).not.toHaveProperty("input_fidelity");
     });
 
     it("sends standard OpenAI edits as multipart with the reference image file", async () => {

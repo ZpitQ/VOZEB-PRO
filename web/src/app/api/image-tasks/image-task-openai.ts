@@ -63,6 +63,7 @@ import {
     resolveConfiguredApiBaseUrl,
     readSystemChannelId,
     shouldUseSub2ApiImageEdit,
+    isNativeSub2ApiImageEdit,
     isCode2AlitaApiBase,
     matchesApiHost,
     taskUrl,
@@ -393,7 +394,8 @@ export async function buildJsonImageEditBodies(
         await Promise.all(task.references.map((reference) => (publicUrlReferenceMode ? publicImageReferenceRequestUrl(reference, origin, publicOrigin, referenceContext) : Promise.resolve(jsonImageReferenceRequestUrl(reference, origin)))))
     ).filter(Boolean);
     const mask = task.mask ? (publicUrlReferenceMode ? await publicImageReferenceRequestUrl(task.mask, origin, publicOrigin, referenceContext) : jsonImageReferenceRequestUrl(task.mask, origin)) : "";
-    const prompt = withImageOutputInstructions(task.config, imageUrlObjectOnlyMode ? buildSub2ApiImageEditPrompt(task.prompt, task.references, task.mask) : buildImageReferencePromptText(task.prompt, task.references));
+    const nativeSub2Api = isNativeSub2ApiImageEdit(task.config);
+    const prompt = withImageOutputInstructions(task.config, imageUrlObjectOnlyMode || nativeSub2Api ? buildSub2ApiImageEditPrompt(task.prompt, task.references, task.mask, nativeSub2Api) : buildImageReferencePromptText(task.prompt, task.references));
     const base = {
         model: task.config.model,
         prompt: withSystemPrompt(task.config, prompt),
@@ -404,6 +406,7 @@ export async function buildJsonImageEditBodies(
         ...(task.config.outputBackground === "transparent" ? { background: "transparent" } : {}),
         ...(mask ? { mask } : {}),
     };
+    if (nativeSub2Api) return [{ ...base, images: images.map((image_url) => ({ image_url })), ...(mask ? { mask: { image_url: mask } } : {}), input_fidelity: "high" }];
     if (!images.length) return [base];
     const first = images[0];
     const imageUrlObjects = images.map((item) => ({ image_url: item }));
@@ -433,7 +436,7 @@ export async function buildJsonImageEditBodies(
     ];
 }
 
-export function buildSub2ApiImageEditPrompt(prompt: string, references: readonly unknown[], mask?: Pick<ImageTaskReference, "editRegion">) {
+export function buildSub2ApiImageEditPrompt(prompt: string, references: readonly unknown[], mask?: Pick<ImageTaskReference, "editRegion">, nativeSub2Api = false) {
     const text = prompt.trim();
     if (!references.length) return text;
     if (mask) {
@@ -445,17 +448,26 @@ export function buildSub2ApiImageEditPrompt(prompt: string, references: readonly
               ]
             : [];
         return [
-            "Use image_urls[0] as the source scene that must be edited in place.",
-            `The final image_urls item is a binary edit mask (image_urls[${references.length}]).`,
+            nativeSub2Api ? "Use the first source image in images as the source scene that must be edited in place." : "Use image_urls[0] as the source scene that must be edited in place.",
+            nativeSub2Api ? "The separate mask field is a binary edit mask, not a scene reference." : `The final image_urls item is a binary edit mask (image_urls[${references.length}]).`,
             "Transparent pixels are the editable region; opaque pixels must be preserved.",
             ...location,
             "Apply the user request only inside the editable region and place the complete requested object inside the editable region.",
             "Preserve the source scene, composition, subjects, lighting, and perspective. Do not replace or redesign the whole scene.",
+            "Match the source image's artistic style, color palette, materials, texture, and realism for all edited content.",
+            "Match the source light direction, warmth, exposure, shadows, scale, and perspective so the edit belongs naturally in the original scene.",
             "Do not introduce unrelated people, animals, furniture, or objects. Generate only content required by the user request.",
             "",
             `User request: ${text}`,
         ].join("\n");
     }
+    if (nativeSub2Api)
+        return [
+            "Edit the first source image in place, using any additional images only as references for the requested edit.",
+            "Preserve the source scene, composition, subjects, artistic style, color palette, materials, lighting, and perspective unless the user explicitly requests a change.",
+            "",
+            `User request: ${text}`,
+        ].join("\n");
     const fieldHint = references.length === 1 ? "image_urls[0]" : "image_urls";
     return [
         `Use the actual reference image supplied in the JSON field ${fieldHint} as visual input, not as a text-only hint.`,

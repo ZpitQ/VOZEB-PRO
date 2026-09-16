@@ -1,52 +1,32 @@
-# Canvas Mask Semantic Edit Implementation Plan
+# Canvas Native Mask Edit Implementation Plan
 
-**Goal:** Make sub2api Canvas mask edits follow the requested content within the selected region without changing unselected pixels.
+**Goal:** Place the complete requested plant at the selected location with the original room's visual style, keeping the complete native sub2api result instead of hard-clipping it locally.
 
-**Architecture:** Compute normalized selection geometry in the mask dialog, persist it with the mask reference and Canvas task snapshot, and specialize the sub2api masked-edit request so the upstream receives the mask as visual input plus explicit spatial instructions. Keep local compositing as the final pixel boundary.
+**Workspace:** 192.168.11.160, /home/github/VOZEB-PRO. Production: /home/VOZEB-PRO/docker-compose.external-db.yml with latest.
 
-**Tech Stack:** Next.js, React, TypeScript, Vitest, Playwright, Docker, GitHub Actions.
+## Investigation and Existing Evidence
 
-## Constraints
+- [x] Reproduce incorrect Sunburst result after accounts became available.
+- [x] Confirm deployed sub2api revision and trace its real image parser and Responses bridge.
+- [x] Confirm production model and operation configs still override edits with /images/generations.
+- [x] Retain already verified selection metadata, task recovery, and outside-mask compositor.
+- [x] Add native-contract TCP failures; observe 4 expected failures and then 61 passing related tests.
+- [x] Correct native endpoint, source objects, separate mask object, and style-preserving prompt.
+- [x] Compare mismatched mask, aligned mask, and strict placement prompt against the real API; confirm all native full results preserve style while local Alpha composition hard-clips the plant.
+- [x] Keep complete native sub2api results and retain local compositing for legacy providers, including persisted retry/recovery behavior.
+- [x] TypeScript check passes.
 
-- Preserve existing behavior for unmasked sub2api edits and all other providers.
-- Keep source/reference images before the mask in `image_urls`.
-- Preserve normalized region metadata across task recovery and Canvas retries.
-- Publish production only from the merged `main` commit tagged `v0.0.21`.
-- Keep deployment Compose defaults on `ghcr.io/zpitq/vozeb-pro:latest`.
+## Remaining Validation
 
-### Task 1: Lock the request contract with failing tests
+- [x] Add persisted model/system proxy native mask regression and legacy adapter coverage.
+- [x] Verify native Sunburst portrait output, style consistency, complete plant, and source/mask alignment behavior.
+- [x] Run required tests, lint, format, release checks, UTF-8 validation, build, and Chromium gates.
+- [ ] Correct production saved image operation/model configuration through authenticated admin settings.
+- [ ] Verify complete plant, original room/style/lighting, selection alignment, and scene continuity without hard clipping.
 
-**Files:**
+## Release
 
-- Modify: `web/src/app/api/image-tasks/image-task-openai-live.test.ts`
-
-- [x] Add a masked sub2api fixture case with source, mask, and normalized edit region.
-- [x] Assert the mask URL is the final `image_urls` item.
-- [x] Assert the prompt explains mask alpha semantics, bounds, center, containment, and scene preservation.
-- [x] Assert masked prompts exclude person and character identity wording.
-- [x] Confirm the new test fails before implementation.
-
-### Task 2: Carry selection geometry through Canvas and image tasks
-
-**Files:**
-
-- Modify: `web/src/types/image.ts`
-- Modify: `web/src/lib/server/image-task-store.ts`
-- Modify: `web/src/services/api/image.ts`
-- Modify: `web/src/app/(user)/canvas/types.ts`
-- Modify: `web/src/app/(user)/canvas/components/canvas-node-mask-edit-dialog.tsx`
-- Modify: `web/src/app/(user)/canvas/[id]/canvas-page-utils.ts`
-- Modify: `web/src/app/(user)/canvas/[id]/use-canvas-node-media-actions.tsx`
-
-- [x] Calculate normalized bounds and center from painted selection pixels.
-- [x] Attach the region to the uploaded mask and persisted Canvas metadata.
-- [x] Preserve the region through request serialization, task storage, recovery, and retry.
-
-### Task 3: Build the masked sub2api request
-
-**Files:**
-
-- Modify: `web/src/app/api/image-tasks/image-task-openai.ts`
-
-- [x] Append the mask URL after ordinary source/reference URLs only for sub2api masked edits.
-- [x] Generate mask-specific spatial instructions from validated normalized geometry.
+- [ ] Commit and create PR; wait for successful Actions and merge into main.
+- [ ] Tag merged main v0.0.22 and verify version/latest image publication.
+- [ ] Deploy latest and verify app plus generation-worker health and matching image.
+- [ ] Perform real production Canvas acceptance and record remaining gaps.

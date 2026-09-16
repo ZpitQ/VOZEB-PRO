@@ -5,7 +5,7 @@ import { readImageMeta } from "@/lib/image-utils";
 import { resolveStoredImageDataUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
 import { resolveMediaUrl, type UploadedFile } from "@/services/file-storage";
 import { parseServerMediaUrl, serverMediaUrl } from "@/services/server-media-storage";
-import { defaultConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import { CANVAS_CONFIG_NODE_HEIGHT, NODE_DEFAULT_SIZE } from "../constants";
 import type { CanvasImageAngleParams } from "../components/canvas-node-angle-dialog";
@@ -431,6 +431,10 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         audioInstructions: node?.metadata?.audioInstructions || defaultConfig.audioInstructions,
         count: String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
     };
+}
+
+export function shouldCompositeCanvasMaskEdit(config: AiConfig) {
+    return resolveModelRequestConfig(config, config.model || config.imageModel).advancedConfig?.protocol !== "sub2api";
 }
 
 export function isGenerationCanceled(error: unknown) {

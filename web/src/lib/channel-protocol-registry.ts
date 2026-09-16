@@ -224,7 +224,7 @@ export const registeredChannelProtocolDefinitions: ChannelProtocolDefinition[] =
     {
         id: "sub2api",
         label: "sub2api",
-        description: "sub2api 聚合接口；文本沿用 OpenAI，图生图严格使用 image_urls 字符串数组。",
+        description: "sub2api 聚合接口；文本沿用 OpenAI，图生图使用原生 JSON edits 与独立蒙版。",
         apiFormat: "openai",
         authMode: "bearer",
         modelCatalogPaths: ["/v1/models"],
@@ -233,9 +233,8 @@ export const registeredChannelProtocolDefinitions: ChannelProtocolDefinition[] =
             ...openAiOperations,
             image: {
                 ...openAiOperations.image!,
-                editPath: "/images/generations",
-                requestTemplate: '{"model":"{{model}}","prompt":"{{prompt}}","image_urls":"{{images}}","size":"{{size}}"}',
-                referenceRule: "图生图使用 JSON 请求体，参考图字段必须是 image_urls 字符串数组。",
+                editPath: "/images/edits",
+                referenceRule: "图生图使用 JSON /images/edits；原图使用 images[].image_url，蒙版使用独立 mask.image_url，input_fidelity=high。",
             },
         },
         strict: true,

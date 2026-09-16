@@ -11,7 +11,7 @@ describe("Canvas layer output persistence", () => {
         expect(validation).not.toContain("uploadCanvasImage");
     });
 
-    it("composites masked edits with the source image before saving the result", async () => {
+    it("uses native sub2api mask output while retaining local compositing for legacy providers", async () => {
         const actions = await readFile(resolve(process.cwd(), "src/app/(user)/canvas/[id]/use-canvas-node-media-actions.tsx"), "utf8");
         const runtime = await readFile(resolve(process.cwd(), "src/app/(user)/canvas/[id]/use-canvas-task-runtime.tsx"), "utf8");
         const maskedEdit = actions.slice(actions.indexOf("const maskEditImageNode"), actions.indexOf("const emotionEditImageNode"));
@@ -19,8 +19,8 @@ describe("Canvas layer output persistence", () => {
 
         expect(maskedEdit).toContain("const storedMask = await uploadCanvasImage(payload.maskDataUrl)");
         expect(maskedEdit).toContain("imageEditMask:");
-        expect(maskedEdit).toContain("preserveUnmaskedPixels: true");
-        expect(maskedEdit).toContain("preserveUnmaskedPixels: { source, mask }");
+        expect(maskedEdit).toContain("shouldCompositeCanvasMaskEdit(generationConfig)");
+        expect(maskedEdit).toContain("...(preserveUnmaskedPixels ? { preserveUnmaskedPixels: { source, mask } } : {})");
         expect(completion).toContain("compositeCanvasImageEditResult(");
         expect(completion).toContain("preserveUnmaskedPixels.source.dataUrl");
         expect(completion).toContain("preserveUnmaskedPixels.mask.dataUrl");
