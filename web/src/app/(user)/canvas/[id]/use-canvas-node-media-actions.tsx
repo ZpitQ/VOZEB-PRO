@@ -387,6 +387,7 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
                 storageKey: storedMask.storageKey,
                 width: storedMask.width,
                 height: storedMask.height,
+                editRegion: payload.editRegion,
             };
             const generationMetadata = {
                 ...buildImageGenerationMetadata("edit", generationConfig, 1, [source]),
@@ -396,6 +397,7 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
                     mimeType: storedMask.mimeType,
                     width: storedMask.width,
                     height: storedMask.height,
+                    editRegion: payload.editRegion,
                 },
                 preserveUnmaskedPixels: true,
             };

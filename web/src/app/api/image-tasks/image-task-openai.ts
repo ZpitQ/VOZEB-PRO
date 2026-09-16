@@ -2,6 +2,7 @@ import { after, NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth/session";
 import { getAuthSettings, refundUserPoints } from "@/lib/auth/store";
+import { normalizeImageEditRegion } from "@/lib/image-edit-region";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { configureServerProxyDispatcher } from "@/lib/server/proxy-dispatcher";
 import { fetchInternalApi, isInternalApiBaseUrl, resolveInternalOrigin } from "@/lib/server/internal-origin";
@@ -392,7 +393,7 @@ export async function buildJsonImageEditBodies(
         await Promise.all(task.references.map((reference) => (publicUrlReferenceMode ? publicImageReferenceRequestUrl(reference, origin, publicOrigin, referenceContext) : Promise.resolve(jsonImageReferenceRequestUrl(reference, origin)))))
     ).filter(Boolean);
     const mask = task.mask ? (publicUrlReferenceMode ? await publicImageReferenceRequestUrl(task.mask, origin, publicOrigin, referenceContext) : jsonImageReferenceRequestUrl(task.mask, origin)) : "";
-    const prompt = withImageOutputInstructions(task.config, imageUrlObjectOnlyMode ? buildSub2ApiImageEditPrompt(task.prompt, task.references) : buildImageReferencePromptText(task.prompt, task.references));
+    const prompt = withImageOutputInstructions(task.config, imageUrlObjectOnlyMode ? buildSub2ApiImageEditPrompt(task.prompt, task.references, task.mask) : buildImageReferencePromptText(task.prompt, task.references));
     const base = {
         model: task.config.model,
         prompt: withSystemPrompt(task.config, prompt),
@@ -408,6 +409,7 @@ export async function buildJsonImageEditBodies(
     const imageUrlObjects = images.map((item) => ({ image_url: item }));
     const imageObjects = images.map((item) => ({ url: item }));
     if (imageUrlObjectOnlyMode) {
+        const imageUrls = mask ? [...images, mask] : images;
         return [
             {
                 model: task.config.model,
@@ -417,7 +419,7 @@ export async function buildJsonImageEditBodies(
                 ...(requestSize ? { size: requestSize } : {}),
                 ...(task.config.outputBackground === "transparent" ? { background: "transparent", output_format: IMAGE_OUTPUT_FORMAT } : {}),
                 ...(mask ? { mask } : {}),
-                image_urls: images,
+                image_urls: imageUrls,
             },
         ];
     }
@@ -431,9 +433,29 @@ export async function buildJsonImageEditBodies(
     ];
 }
 
-export function buildSub2ApiImageEditPrompt(prompt: string, references: readonly unknown[]) {
+export function buildSub2ApiImageEditPrompt(prompt: string, references: readonly unknown[], mask?: Pick<ImageTaskReference, "editRegion">) {
     const text = prompt.trim();
     if (!references.length) return text;
+    if (mask) {
+        const region = normalizeImageEditRegion(mask.editRegion);
+        const location = region
+            ? [
+                  `Editable region normalized bounds (0 to 1): left=${region.left.toFixed(4)}, top=${region.top.toFixed(4)}, right=${region.right.toFixed(4)}, bottom=${region.bottom.toFixed(4)}.`,
+                  `Editable region normalized center (0 to 1): centerX=${region.centerX.toFixed(4)}, centerY=${region.centerY.toFixed(4)}.`,
+              ]
+            : [];
+        return [
+            "Use image_urls[0] as the source scene that must be edited in place.",
+            `The final image_urls item is a binary edit mask (image_urls[${references.length}]).`,
+            "Transparent pixels are the editable region; opaque pixels must be preserved.",
+            ...location,
+            "Apply the user request only inside the editable region and place the complete requested object inside the editable region.",
+            "Preserve the source scene, composition, subjects, lighting, and perspective. Do not replace or redesign the whole scene.",
+            "Do not introduce unrelated people, animals, furniture, or objects. Generate only content required by the user request.",
+            "",
+            `User request: ${text}`,
+        ].join("\n");
+    }
     const fieldHint = references.length === 1 ? "image_urls[0]" : "image_urls";
     return [
         `Use the actual reference image supplied in the JSON field ${fieldHint} as visual input, not as a text-only hint.`,

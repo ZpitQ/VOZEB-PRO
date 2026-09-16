@@ -243,6 +243,7 @@ export async function resolveMetadataImageEditMask(metadata: CanvasNodeMetadata)
         serverUrl: mask.serverUrl,
         width: mask.width,
         height: mask.height,
+        editRegion: mask.editRegion,
     };
 }
 
