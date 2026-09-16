@@ -229,7 +229,7 @@ function hasVisibleTransparency(data: Uint8ClampedArray) {
     return visible && transparent;
 }
 
-export async function compositeCanvasImageEditResult(sourceUrl: string, generatedUrl: string, editMaskUrl: string, validationMaskUrl?: string) {
+export async function compositeCanvasImageEditResult(sourceUrl: string, generatedUrl: string, editMaskUrl: string, validationMaskUrl?: string, validateChange = true) {
     const [sourceImage, generatedImage, maskImage, validationMaskImage] = await Promise.all([loadImage(sourceUrl), loadImage(generatedUrl), loadImage(editMaskUrl), validationMaskUrl ? loadImage(validationMaskUrl) : undefined]);
     const width = sourceImage.width;
     const height = sourceImage.height;
@@ -237,7 +237,7 @@ export async function compositeCanvasImageEditResult(sourceUrl: string, generate
     const generated = drawImageData(generatedImage, width, height);
     const mask = drawImageData(maskImage, width, height);
     const validationMask = validationMaskImage ? drawImageData(validationMaskImage, width, height) : mask;
-    assertCanvasImageEditChanged(source, generated, validationMask);
+    if (validateChange) assertCanvasImageEditChanged(source, generated, validationMask);
     const composite = compositeImageDataWithinMask(source, generated, mask);
     return imageDataBlob(composite.data, width, height);
 }

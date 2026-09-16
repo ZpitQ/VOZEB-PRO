@@ -375,7 +375,30 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
             const prompt = `只修改蒙版透明区域，其他区域保持不变。${userPrompt}`;
             const childId = nanoid();
             const source = canvasNodeReferenceImage(node);
-            const generationMetadata = buildImageGenerationMetadata("edit", generationConfig, 1, [source]);
+            const storedMask = await uploadCanvasImage(payload.maskDataUrl);
+            const maskUrl = storedMask.serverUrl || storedMask.url;
+            const mask = {
+                id: `${node.id}-mask`,
+                name: "mask.png",
+                type: storedMask.mimeType || "image/png",
+                dataUrl: maskUrl,
+                url: maskUrl,
+                serverUrl: maskUrl,
+                storageKey: storedMask.storageKey,
+                width: storedMask.width,
+                height: storedMask.height,
+            };
+            const generationMetadata = {
+                ...buildImageGenerationMetadata("edit", generationConfig, 1, [source]),
+                imageEditMask: {
+                    storageKey: storedMask.storageKey,
+                    serverUrl: maskUrl,
+                    mimeType: storedMask.mimeType,
+                    width: storedMask.width,
+                    height: storedMask.height,
+                },
+                preserveUnmaskedPixels: true,
+            };
             setMaskEditNodeId(null);
             setRunningNodeId(childId);
             setNodes((prev) => [
@@ -396,7 +419,9 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
             setDialogNodeId(childId);
             const controller = startGenerationRequest(childId, node.id, childId);
             try {
-                await startAndCompleteImageTask(childId, generationConfig, prompt, [source], { id: `${node.id}-mask`, name: "mask.png", type: "image/png", dataUrl: payload.maskDataUrl }, controller);
+                await startAndCompleteImageTask(childId, generationConfig, prompt, [source], mask, controller, {
+                    preserveUnmaskedPixels: { source, mask },
+                });
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
                 const errorDetails = error instanceof Error ? error.message : "局部修改失败";
