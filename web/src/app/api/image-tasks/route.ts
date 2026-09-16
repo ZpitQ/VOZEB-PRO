@@ -6,6 +6,7 @@ import { readJsonBody } from "@/lib/auth/request";
 import { getCurrentUser } from "@/lib/auth/session";
 import { getAuthSettings, isAuthInputError, refundUserPoints } from "@/lib/auth/store";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
+import { closestImageAspectRatio } from "@/lib/image-size";
 import { configureServerProxyDispatcher } from "@/lib/server/proxy-dispatcher";
 import { fetchInternalApi, isInternalApiBaseUrl, resolveInternalOrigin } from "@/lib/server/internal-origin";
 import { resolveGeneratedMediaUrl } from "@/lib/media-url";
@@ -168,7 +169,9 @@ export async function POST(request: Request) {
         const kind = resolvedBody.kind === "edit" ? "edit" : "generation";
         if (!configs.length || !prompt) return NextResponse.json({ error: "任务参数不完整" }, { status: 400 });
         const references = Array.isArray(resolvedBody.references) ? resolvedBody.references.filter((item) => Boolean(item?.dataUrl || item?.url || item?.remoteUrl || item?.serverUrl)) : [];
-        const constrainedConfigs = configs.filter((config) => {
+        const sourceRatio = kind === "edit" && resolvedBody.mask ? closestImageAspectRatio(references[0]?.width, references[0]?.height) : "";
+        const requestConfigs = sourceRatio ? configs.map((config) => ({ ...config, size: sourceRatio })) : configs;
+        const constrainedConfigs = requestConfigs.filter((config) => {
             try {
                 assertCapabilityConstraints(config.capabilityProfile, {
                     capability: "image",

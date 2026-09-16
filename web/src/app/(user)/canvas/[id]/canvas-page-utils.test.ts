@@ -29,11 +29,17 @@ import {
     resolveMetadataImageEditMask,
     resolveMetadataImageEditValidationMask,
     resolveMetadataReferences,
+    resolveCanvasMaskEditSize,
     shouldCompositeCanvasMaskEdit,
     uploadGeneratedCanvasImage,
 } from "./canvas-page-utils";
 
 describe("Canvas native mask edit output", () => {
+    it("inherits the source image ratio instead of a stale generation ratio", () => {
+        expect(resolveCanvasMaskEditSize({ width: 1692, height: 3008 }, "16:9")).toBe("9:16");
+        expect(resolveCanvasMaskEditSize({}, "16:9")).toBe("16:9");
+    });
+
     it("uses the complete native sub2api edit instead of clipping it with the local mask", () => {
         const config = {
             model: "gpt-image-2.5-sunburst",

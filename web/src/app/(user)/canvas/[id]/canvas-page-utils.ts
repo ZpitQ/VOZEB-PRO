@@ -1,6 +1,7 @@
 "use client";
 
 import { browserReadableMediaUrl } from "@/lib/browser-media-url";
+import { closestImageAspectRatio } from "@/lib/image-size";
 import { readImageMeta } from "@/lib/image-utils";
 import { resolveStoredImageDataUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
 import { resolveMediaUrl, type UploadedFile } from "@/services/file-storage";
@@ -431,6 +432,10 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         audioInstructions: node?.metadata?.audioInstructions || defaultConfig.audioInstructions,
         count: String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
     };
+}
+
+export function resolveCanvasMaskEditSize(source: Pick<ReferenceImage, "width" | "height">, fallback: string) {
+    return closestImageAspectRatio(source.width, source.height) || fallback;
 }
 
 export function shouldCompositeCanvasMaskEdit(config: AiConfig) {

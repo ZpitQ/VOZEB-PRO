@@ -145,7 +145,7 @@ function imageTask(baseUrl: string, model: string, protocol: string, advancedCon
                       id: "reference",
                       name: "reference.png",
                       type: "image/png",
-                      dataUrl: protocol === "yumeng" ? `${origin}/media/fixture.png` : protocol === "sub2api" || protocol === "custom" ? "https://cdn.example.com/reference.png" : PNG_DATA_URL,
+                      dataUrl: protocol === "yumeng" ? `${origin}/media/fixture.png` : protocol === "custom" ? "https://cdn.example.com/reference.png" : PNG_DATA_URL,
                   },
               ]
             : [],

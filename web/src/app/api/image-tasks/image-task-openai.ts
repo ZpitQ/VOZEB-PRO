@@ -108,6 +108,7 @@ import {
     parseGeminiImagePayload,
     toGeminiImagePart,
     buildImageEditFormData,
+    imageReferenceToDataUrl,
     imageReferenceToFile,
     dataUrlToFile,
     readFetchError,
@@ -244,7 +245,7 @@ export async function runOpenAiJsonImageEditTask(
     const imageUrlObjectOnlyMode = shouldUseSub2ApiImageEdit(config, apiBase);
     const allowProtocolFallback = allowsImageProtocolFallback(config);
     const publicUrlReferenceMode = imageUrlObjectOnlyMode || referenceMode === "public-url";
-    for (const [index, body] of (await buildJsonImageEditBodies(task, quality, requestSize, responseFormat, origin, publicOrigin, publicUrlReferenceMode, imageUrlObjectOnlyMode, allowProtocolFallback)).entries()) {
+    for (const [index, body] of (await buildJsonImageEditBodies(task, quality, requestSize, responseFormat, origin, publicOrigin, cookie, publicUrlReferenceMode, imageUrlObjectOnlyMode, allowProtocolFallback)).entries()) {
         const headers = taskHeaders(config, cookie, imagePointsIdempotencyKey(task, index === 0 ? billingVariant : `${billingVariant}-${index + 1}`));
         headers.set("content-type", "application/json");
         const response = await imageSubmissionFetch(config, url, { method: "POST", headers, body: JSON.stringify(body), cache: "no-store" });
@@ -385,16 +386,31 @@ export async function buildJsonImageEditBodies(
     responseFormat: (typeof IMAGE_RESPONSE_FORMATS)[number],
     origin: string,
     publicOrigin: string,
+    cookie = "",
     publicUrlReferenceMode = false,
     imageUrlObjectOnlyMode = false,
     includeCompatibilityFields = true,
 ) {
     const referenceContext = { ownerUserId: task.userId, taskId: task.id };
-    const images = (
-        await Promise.all(task.references.map((reference) => (publicUrlReferenceMode ? publicImageReferenceRequestUrl(reference, origin, publicOrigin, referenceContext) : Promise.resolve(jsonImageReferenceRequestUrl(reference, origin)))))
-    ).filter(Boolean);
-    const mask = task.mask ? (publicUrlReferenceMode ? await publicImageReferenceRequestUrl(task.mask, origin, publicOrigin, referenceContext) : jsonImageReferenceRequestUrl(task.mask, origin)) : "";
     const nativeSub2Api = isNativeSub2ApiImageEdit(task.config);
+    const images = (
+        await Promise.all(
+            task.references.map((reference, index) =>
+                nativeSub2Api
+                    ? imageReferenceToDataUrl(reference, reference.name || `reference-${index + 1}.png`, origin, cookie)
+                    : publicUrlReferenceMode
+                      ? publicImageReferenceRequestUrl(reference, origin, publicOrigin, referenceContext)
+                      : Promise.resolve(jsonImageReferenceRequestUrl(reference, origin)),
+            ),
+        )
+    ).filter(Boolean);
+    const mask = task.mask
+        ? nativeSub2Api
+            ? await imageReferenceToDataUrl(task.mask, task.mask.name || "mask.png", origin, cookie)
+            : publicUrlReferenceMode
+              ? await publicImageReferenceRequestUrl(task.mask, origin, publicOrigin, referenceContext)
+              : jsonImageReferenceRequestUrl(task.mask, origin)
+        : "";
     const prompt = withImageOutputInstructions(task.config, imageUrlObjectOnlyMode || nativeSub2Api ? buildSub2ApiImageEditPrompt(task.prompt, task.references, task.mask, nativeSub2Api) : buildImageReferencePromptText(task.prompt, task.references));
     const base = {
         model: task.config.model,

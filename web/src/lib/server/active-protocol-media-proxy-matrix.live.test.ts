@@ -189,14 +189,14 @@ describe("active protocols through persisted admin settings and the system proxy
         const channel = await configureProxyChannel(definition, "image", model, protocolAdvancedConfig("sub2api", operation, model));
         const task = imageTask(channel, true);
         task.source = "canvas";
-        task.mask = { type: "image/png", dataUrl: "https://cdn.example.com/mask.png" };
+        task.mask = { type: "image/png", dataUrl: PNG_DATA_URL };
 
         await expectImageResult(await runImage(task, "sub2api"));
         expectProxyRequests(channel, "/images/edits", model, true);
         expect(fixture.requests).toHaveLength(1);
         expect(JSON.parse(fixture.requests[0]!.body.toString("utf8"))).toMatchObject({
-            images: [{ image_url: "https://cdn.example.com/reference.png" }],
-            mask: { image_url: "https://cdn.example.com/mask.png" },
+            images: [{ image_url: PNG_DATA_URL }],
+            mask: { image_url: PNG_DATA_URL },
             input_fidelity: "high",
         });
         expect(mocks.consumeUserPoints).toHaveBeenCalledTimes(1);
@@ -414,7 +414,7 @@ function imageTask(channel: ProxyChannel, edit: boolean): ImageTask {
                       id: "reference",
                       name: "reference.png",
                       type: "image/png",
-                      dataUrl: protocol === "yumeng" ? `${fixtureOrigin}/media/fixture.png` : ["sub2api", "custom"].includes(protocol) ? "https://cdn.example.com/reference.png" : PNG_DATA_URL,
+                      dataUrl: protocol === "yumeng" ? `${fixtureOrigin}/media/fixture.png` : protocol === "custom" ? "https://cdn.example.com/reference.png" : PNG_DATA_URL,
                   },
               ]
             : [],
