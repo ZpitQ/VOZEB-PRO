@@ -1,37 +1,34 @@
-# Canvas Mask Semantic Edit Design
+# Canvas Native Mask Edit Design
 
 ## Goal
 
-Make Canvas masked edits through the `sub2api` JSON protocol follow the user's requested content and place it inside the painted region while preserving every pixel outside that region.
+Generate the requested complete potted plant at the painted location, matching the original room's style, materials, warm sunlight, shadows, scale, and perspective.
 
-## Root Cause
+## Verified Root Cause
 
-The Canvas currently sends the source image in `image_urls` and sends the mask only through the top-level `mask` field. The configured upstream does not consume that field as visual input. The shared sub2api prompt also describes every reference as a person or character identity reference, so scene edits are biased toward recreating an unrelated subject instead of editing the selected area.
+Production v0.0.21 task `402b9aa8-3405-4047-a612-4330a0358b26` returned a different landscape living room. Compositing that result into the portrait source preserved the outside pixels but clipped unrelated plant fragments into the mask. The earlier hypothesis that a mask appended to `image_urls` would be consumed was incorrect.
 
-The client already composites the generated result over the source with the mask. This protects unselected pixels, but it cannot make the upstream generate the requested object at the correct location.
+The deployed sub2api revision `86f93c28ee34cc74b629dafb748bd5ac5ca8c5ea` parses `images[].image_url` and `mask.image_url` only for `/v1/images/edits`. Its Responses bridge sends source images as `input_image`, sets tool action `edit`, and forwards the mask as `input_image_mask.image_url`. The old `/images/generations` request with string arrays and a string mask therefore generated from text without source or selection guidance.
 
-## Design
+## Request Contract
 
-The mask dialog calculates normalized bounds and center coordinates from painted alpha pixels. The edit region travels with the mask through the Canvas node snapshot, task request, and stored image task so retries use the same selection.
+Explicit sub2api uses `/images/edits` by default, with source/reference URL objects in `images` and the binary mask in a separate `mask.image_url`. The mask is not a scene reference. Explicit administrator edit paths retain their precedence and production saved model/operation paths must be corrected before acceptance.
 
-For masked `sub2api` edits, the JSON request keeps source and ordinary reference images first and appends the mask URL as the final `image_urls` entry. The prompt identifies that final image as a binary mask, explains that transparent pixels are editable and opaque pixels must remain unchanged, and includes the normalized bounds and center. It requires the complete requested object to fit inside that region and prohibits unrelated people, animals, furniture, objects, or scene replacement.
+The request includes `input_fidelity: high`. The deployed OAuth bridge does not forward that field; source, action, and native mask forwarding are the verified controls. Visual acceptance must demonstrate style consistency instead of assuming this parameter provides it.
 
-Unmasked sub2api edits retain the existing reference-image behavior. Other providers keep their current mask protocols.
+Three real API comparisons showed that the native result preserves the room style and produces a complete plant. Aligning source/mask dimensions and adding strict normalized bounds still left foliage outside the narrow painted rectangle. Applying the local Alpha compositor then produced a hard rectangular edge and removed the leaves. Explicit sub2api native edits therefore keep the complete provider result. Legacy and automatically detected compatible providers retain local outside-mask pixel compositing because their mask behavior is not verified.
 
-The existing local pixel compositor remains the final boundary that guarantees pixels outside the mask are copied from the source.
+Automatic legacy adapters, including Code2Alita and declared `image_urls` templates, retain their existing contracts. Standard OpenAI multipart and Gemini inlineData edits remain unchanged.
 
-## Data Contract
+## Prompt and Geometry
 
-The mask reference gains optional `editRegion` metadata:
+Reuse the validated normalized mask bounds and center already persisted by Canvas. Identify the source and separate native mask, require the entire object to fit in the editable region, and preserve the scene and its artistic style, colors, material texture, realism, light direction, warmth, exposure, shadows, scale, and perspective. Preserve the user's requested content verbatim.
 
-- `left`, `top`, `right`, and `bottom`: normalized selected bounds in the source image.
-- `centerX` and `centerY`: normalized center of those bounds.
-
-All values are finite and clamped to `[0, 1]` before entering the provider prompt.
+The source is 1600 x 2844 while the affected node requests 3840 x 2160. Verify the native edit before deciding whether inherited output aspect preferences require correction. The compositor cannot recover a source-aligned edit from a redesigned or geometrically distorted upstream scene.
 
 ## Validation
 
-- A fixture test verifies the mask is the final sub2api `image_urls` item and the prompt contains the mask semantics and normalized location.
-- A fixture test verifies masked prompts do not contain person or character identity language.
-- Existing unmasked fixture coverage verifies its request remains unchanged.
-- Type checking, linting, formatting, unit tests, release checks, build, and required desktop Chromium gates validate the full change.
+- TCP fixture mirrors the deployed parser: generation paths and `image_urls` cannot supply edit input; native source and mask objects are required.
+- Persisted model configuration and the system proxy preserve the native fields and bill one request.
+- Native sub2api Canvas output bypasses local clipping through a persisted provider decision; legacy, OpenAI, Gemini, mask metadata, recovery, and pixel preservation regressions remain valid.
+- Run required checks, browser gates, and real Sunburst Canvas acceptance; publish merged main as v0.0.22 and deploy latest.

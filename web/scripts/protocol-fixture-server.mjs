@@ -168,6 +168,13 @@ async function handleFixtureRequest({ request, response, url, body, tasks, reque
         return sendJson(response, 200, { task_id: id, status: "queued" });
     }
     if (request.method === "POST" && ["/images/generations", "/images/edits"].includes(path)) {
+        if (options.sub2apiImageEdits) {
+            const payload = jsonBody(body);
+            // sub2api 86f93c28 only reads images[].image_url and mask.image_url on edits.
+            const inputs = path === "/images/edits" && Array.isArray(payload.images) ? payload.images.map((image) => image?.image_url).filter((url) => typeof url === "string" && url.trim()) : [];
+            if (!inputs.length) return sendJson(response, 400, { error: { message: "image input is required" } });
+            if (payload.mask && typeof payload.mask.image_url !== "string") return sendJson(response, 400, { error: { message: "mask.image_url is required" } });
+        }
         const model = requestedModel(body, request.headers["content-type"] || "");
         if (options.failImage || shouldFailRequest(request, model)) return sendJson(response, options.failImage || model.includes("-fail") ? 400 : 503, { error: { message: "fixture image failure" } });
         const image = requestsTransparentBackground(body, request.headers["content-type"] || "") ? Buffer.from(TRANSPARENT_PNG_BASE64, "base64") : await fixtureImage(options);

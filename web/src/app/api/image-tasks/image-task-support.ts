@@ -118,6 +118,7 @@ export async function openAiImageTaskPath(config: ImageTaskConfig, kind: ImageTa
     if (kind !== "edit") return configuredPath || "/images/generations";
     const configuredEditPath = (config.advancedConfig?.editPath || "").trim();
     if (configuredEditPath) return normalizeImageTaskPath(configuredEditPath);
+    if (isNativeSub2ApiImageEdit(config)) return "/images/edits";
     const apiBase = await resolveConfiguredApiBaseUrl(config.baseUrl).catch(() => config.baseUrl);
     if (shouldUseSub2ApiImageEdit(config, apiBase)) return configuredPath || "/images/generations";
 
@@ -187,13 +188,17 @@ export function readSystemChannelId(baseUrl: string) {
 }
 
 export function shouldUseSub2ApiImageEdit(config: ImageTaskConfig, apiBase: string) {
-    if (config.advancedConfig?.protocol === "sub2api") return true;
+    if (isNativeSub2ApiImageEdit(config)) return true;
     if (isCode2AlitaApiBase(apiBase)) return true;
     const advanced = config.advancedConfig;
     const requestTemplate = (advanced?.requestTemplate || "").toLowerCase();
     const referenceRule = (advanced?.referenceRule || "").toLowerCase();
     if (/\bsub2api\b/i.test(`${requestTemplate}\n${referenceRule}`)) return true;
     return /\bimage_urls\b|images\[\]\.image_url|"images"\s*:\s*\[\s*\{\s*"image_url"|images\s*:\s*\[\s*\{\s*image_url/i.test(requestTemplate);
+}
+
+export function isNativeSub2ApiImageEdit(config: ImageTaskConfig) {
+    return (resolveChannelModelConfig(config.advancedConfig, config.model)?.protocol || config.advancedConfig?.protocol) === "sub2api";
 }
 
 export function isCode2AlitaApiBase(baseUrl: string) {

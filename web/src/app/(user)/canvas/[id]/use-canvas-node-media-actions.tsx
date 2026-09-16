@@ -24,7 +24,18 @@ import { fitNodeSize } from "../utils/canvas-node-size";
 
 import { IMAGE_PROMPT_REVERSE_PRESET, NODE_STATUS_ERROR, NODE_STATUS_LOADING, NODE_STATUS_SUCCESS, createCanvasNode } from "./canvas-page-elements";
 import { pauseCanvasGenerationReview } from "./canvas-generation-review";
-import { applyNodeConfigPatch, buildAngleLabel, buildAnglePrompt, buildGenerationConfig, buildImageGenerationMetadata, canvasNodeReferenceImage, imageMetadata, isGenerationCanceled, uploadCanvasImage } from "./canvas-page-utils";
+import {
+    applyNodeConfigPatch,
+    buildAngleLabel,
+    buildAnglePrompt,
+    buildGenerationConfig,
+    buildImageGenerationMetadata,
+    canvasNodeReferenceImage,
+    imageMetadata,
+    isGenerationCanceled,
+    shouldCompositeCanvasMaskEdit,
+    uploadCanvasImage,
+} from "./canvas-page-utils";
 
 import type { CanvasInteractions } from "./use-canvas-interactions";
 import type { CanvasPageState } from "./use-canvas-page-state";
@@ -373,6 +384,7 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
             }
             const userPrompt = payload.prompt.trim();
             const prompt = `只修改蒙版透明区域，其他区域保持不变。${userPrompt}`;
+            const preserveUnmaskedPixels = shouldCompositeCanvasMaskEdit(generationConfig);
             const childId = nanoid();
             const source = canvasNodeReferenceImage(node);
             const storedMask = await uploadCanvasImage(payload.maskDataUrl);
@@ -399,7 +411,7 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
                     height: storedMask.height,
                     editRegion: payload.editRegion,
                 },
-                preserveUnmaskedPixels: true,
+                preserveUnmaskedPixels: preserveUnmaskedPixels || undefined,
             };
             setMaskEditNodeId(null);
             setRunningNodeId(childId);
@@ -422,7 +434,7 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
             const controller = startGenerationRequest(childId, node.id, childId);
             try {
                 await startAndCompleteImageTask(childId, generationConfig, prompt, [source], mask, controller, {
-                    preserveUnmaskedPixels: { source, mask },
+                    ...(preserveUnmaskedPixels ? { preserveUnmaskedPixels: { source, mask } } : {}),
                 });
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
