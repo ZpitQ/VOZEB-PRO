@@ -4,6 +4,7 @@ import {
     applySubjectMaskToCropImageData,
     applySubjectMaskToImageData,
     assertCanvasImageEditChanged,
+    compositeCanvasImageEditResult,
     compositeImageDataWithinMask,
     expandLayerBox,
     expandLayerRemovalBox,
@@ -134,6 +135,17 @@ describe("Canvas 智能分层", () => {
 
         expect(measureCanvasImageEditChange(source, generated, mask)).toMatchObject({ editedPixels: 1, changedPixels: 0, changedRatio: 0, meanAbsoluteDifference: 0 });
     });
+
+    it("局部编辑允许轻微变化并继续保护蒙版外原图像素", async () => {
+        const fixture = installCompositeBrowserFixture({
+            source: pixels([10, 20, 30, 255], [40, 50, 60, 255]),
+            generated: pixels([210, 220, 230, 255], [42, 51, 62, 255]),
+            mask: pixels([255, 255, 255, 255], [255, 255, 255, 0]),
+        });
+
+        await expect(compositeCanvasImageEditResult("source", "generated", "mask", undefined, false)).resolves.toBeInstanceOf(Blob);
+        expect(fixture.output()).toEqual([10, 20, 30, 255, 42, 51, 62, 255]);
+    });
 });
 
 function pixels(...values: number[][]) {
@@ -181,4 +193,58 @@ function installUpscaleBrowserFixture(options: { rejectTaintedCanvas?: boolean }
     });
 
     return { sources, crossOrigins };
+}
+
+function installCompositeBrowserFixture(images: Record<string, ReturnType<typeof pixels>>) {
+    let output: number[] = [];
+
+    class ImageFixture {
+        width = 2;
+        height = 1;
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        crossOrigin: string | null = null;
+        source = "";
+
+        set src(value: string) {
+            this.source = value;
+            this.onload?.();
+        }
+    }
+
+    class ImageDataFixture {
+        constructor(
+            public data: Uint8ClampedArray,
+            public width: number,
+            public height: number,
+        ) {}
+    }
+
+    vi.stubGlobal("Image", ImageFixture);
+    vi.stubGlobal("ImageData", ImageDataFixture);
+    vi.stubGlobal("document", {
+        createElement: () => {
+            let drawnImage: ImageFixture | undefined;
+            let writtenImage: ImageDataFixture | undefined;
+            return {
+                width: 0,
+                height: 0,
+                getContext: () => ({
+                    drawImage: (image: ImageFixture) => {
+                        drawnImage = image;
+                    },
+                    getImageData: () => images[drawnImage?.source || ""],
+                    putImageData: (image: ImageDataFixture) => {
+                        writtenImage = image;
+                    },
+                }),
+                toBlob: (callback: (blob: Blob) => void) => {
+                    output = [...(writtenImage?.data || [])];
+                    callback(new Blob([new Uint8Array(output)], { type: "image/png" }));
+                },
+            };
+        },
+    });
+
+    return { output: () => output };
 }
