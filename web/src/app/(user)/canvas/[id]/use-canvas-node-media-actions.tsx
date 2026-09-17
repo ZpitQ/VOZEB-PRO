@@ -389,7 +389,7 @@ export function useCanvasNodeMediaActions({ state, tasks, interactions }: { stat
                 return;
             }
             const userPrompt = payload.prompt.trim();
-            const prompt = `只修改蒙版透明区域，其他区域保持不变。${userPrompt}`;
+            const prompt = `只修改选定区域，其他区域保持不变。${userPrompt}`;
             const preserveUnmaskedPixels = shouldCompositeCanvasMaskEdit(generationConfig);
             const childId = nanoid();
             const storedMask = await uploadCanvasImage(payload.maskDataUrl);

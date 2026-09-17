@@ -186,7 +186,8 @@ describe("OpenAI image provider over a live compatible fixture", () => {
             expect(body.image_urls).toBeUndefined();
             expect(body.input_fidelity).toBe("high");
             expect(body.prompt).toContain("mask field is a binary edit mask");
-            expect(body.prompt).toContain("Transparent pixels are the editable region; opaque pixels must be preserved");
+            expect(body.prompt).toContain("Edit only the selected region of the source scene; preserve everything outside that region.");
+            expect(body.prompt).not.toMatch(/transparent pixels|opaque pixels|蒙版透明区域/i);
             expect(body.prompt).toContain("left=0.4200, top=0.6477, right=0.7563, bottom=0.7686");
             expect(body.prompt).toContain("centerX=0.5881, centerY=0.7082");
             expect(body.prompt).toContain("complete requested object inside the editable region");

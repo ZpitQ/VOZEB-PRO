@@ -466,7 +466,7 @@ export function buildSub2ApiImageEditPrompt(prompt: string, references: readonly
         return [
             nativeSub2Api ? "Use the first source image in images as the source scene that must be edited in place." : "Use image_urls[0] as the source scene that must be edited in place.",
             nativeSub2Api ? "The separate mask field is a binary edit mask, not a scene reference." : `The final image_urls item is a binary edit mask (image_urls[${references.length}]).`,
-            "Transparent pixels are the editable region; opaque pixels must be preserved.",
+            "Edit only the selected region of the source scene; preserve everything outside that region.",
             ...location,
             "Apply the user request only inside the editable region and place the complete requested object inside the editable region.",
             "Preserve the source scene, composition, subjects, lighting, and perspective. Do not replace or redesign the whole scene.",
