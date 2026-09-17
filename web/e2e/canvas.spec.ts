@@ -8,6 +8,48 @@ import { E2E_PROTOCOL_ORIGIN } from "./support";
 
 test.describe.configure({ mode: "serial" });
 
+test("canvas image prompt placement settles after zooming with multiple images", async ({ page, request }) => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    const image = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="360" height="640"><rect width="360" height="640" fill="tan"/></svg>')}`;
+    const project = await createCanvasProject(request, {
+        title: `Canvas 缩放提示框 ${randomUUID().slice(0, 8)}`,
+        viewport: { x: 100, y: 100, k: 1 },
+        nodes: [node("zoom-source", "image", 300, 120, 360, 640, { content: image, naturalWidth: 360, naturalHeight: 640 }), node("zoom-other", "image", 750, 120, 360, 640, { content: image, naturalWidth: 360, naturalHeight: 640 })],
+        connections: [],
+    });
+    try {
+        await page.goto(`/canvas/${project.id}`, { waitUntil: "domcontentloaded" });
+        await page.locator('[data-node-id="zoom-source"]').click({ position: { x: 160, y: 180 } });
+        const prompt = page.getByRole("textbox", { name: "节点提示词" });
+        await expect(prompt).toBeAttached();
+        for (const zoom of [120, 125, 115, 100, 80]) {
+            await page.locator('input[type="range"]').first().fill(String(zoom));
+            const samples = await page.evaluate(async () => {
+                const panel = document.querySelector<HTMLElement>("[data-canvas-node-panel]");
+                if (!panel) throw new Error("Prompt panel missing");
+                const input = panel.querySelector("textarea");
+                const samples = [];
+                for (let frame = 0; frame < 60; frame += 1) {
+                    await new Promise(requestAnimationFrame);
+                    const bounds = panel.getBoundingClientRect();
+                    samples.push({ placement: panel.dataset.canvasNodePanelPlacement, top: bounds.top, bottom: bounds.bottom, height: bounds.height, sameInput: input === panel.querySelector("textarea") });
+                }
+                return samples.slice(10);
+            });
+            expect(new Set(samples.map((sample) => sample.placement)).size, `placement oscillates at ${zoom}%`).toBe(1);
+            expect(Math.max(...samples.map((sample) => sample.top)) - Math.min(...samples.map((sample) => sample.top)), `panel jumps at ${zoom}%`).toBeLessThan(1);
+            expect(samples.every((sample) => sample.sameInput)).toBe(true);
+            expect(samples[0].top).toBeGreaterThanOrEqual(0);
+            expect(samples[0].bottom).toBeLessThanOrEqual(960);
+            if (zoom === 80) expect(samples[0].placement).toBe("bottom");
+        }
+        await prompt.fill("保持原图风格");
+        await expect(prompt).toHaveValue("保持原图风格");
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
 test("canvas keeps editing, selection, linking and persistence fluid", async ({ page, request }) => {
     const project = await createCanvasProject(request, {
         title: `Canvas 交互回归 ${randomUUID().slice(0, 8)}`,
@@ -97,6 +139,9 @@ test("canvas keeps editing, selection, linking and persistence fluid", async ({ 
         await promptDialog.getByRole("button", { name: "收起提示词输入" }).click();
         await expect(promptDialog).toBeHidden();
         await expect(nodePrompt).toHaveValue("弹窗中的长提示词会实时回写原输入框");
+        await surface.focus();
+        await page.keyboard.press("Escape");
+        await expect(nodePrompt).toHaveCount(0);
 
         await page.getByRole("button", { name: "切换到框选模式" }).click();
         await expect(surface).toHaveAttribute("data-canvas-interaction-mode", "select");
@@ -152,6 +197,9 @@ test("canvas keeps editing, selection, linking and persistence fluid", async ({ 
         await expect(page.locator("[data-node-id]")).toHaveCount(4);
         await page.waitForTimeout(500);
         await expectCanvasSaved(page);
+        await surface.focus();
+        await page.keyboard.press("Escape");
+        await expect(page.locator("[data-canvas-node-panel]")).toHaveCount(0);
 
         patchRequests.length = 0;
         const beforeDrag = await sourceNode.boundingBox();
