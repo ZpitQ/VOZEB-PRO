@@ -282,8 +282,40 @@ test("canvas node prompt keeps image and video mentions after long text", async 
         await expect(videoOption.locator("video")).toBeVisible();
         await videoOption.click();
         await expect(prompt).toHaveValue(`${longText}\n先参考图片1 再结合视频1 `);
+        await expect(prompt).toBeFocused();
+        await expect(prompt).not.toHaveCSS("color", "rgba(0, 0, 0, 0)");
+        await expect(prompt).not.toHaveCSS("caret-color", "rgba(0, 0, 0, 0)");
+        await expect(page.locator('[data-canvas-resource-reference="prompt-image"]')).toHaveCount(0);
+        await prompt.press("End");
+        await prompt.press("ArrowLeft");
+        const cursor = await prompt.evaluate((element: HTMLTextAreaElement) => element.selectionStart);
+        await page.keyboard.insertText("补充");
+        const edited = `${longText}\n先参考图片1 再结合视频1 `;
+        await expect(prompt).toHaveValue(`${edited.slice(0, cursor)}补充${edited.slice(cursor)}`);
+        await page.locator("[data-canvas-surface]").focus();
+        const scrollTop = await prompt.evaluate((element) => element.scrollTop);
+        expect(scrollTop).toBeGreaterThan(0);
+        await expect
+            .poll(async () => {
+                const preview = await prompt
+                    .locator("..")
+                    .locator(":scope > div")
+                    .first()
+                    .evaluate((element) => ({ top: element.scrollTop, max: element.scrollHeight - element.clientHeight }));
+                return preview.top === Math.min(scrollTop, preview.max);
+            })
+            .toBe(true);
         await expect(page.locator('[data-canvas-resource-reference="prompt-image"] img')).toBeVisible();
         await expect(page.locator('[data-canvas-resource-reference="prompt-video"] video')).toBeVisible();
+        await prompt.focus();
+        await expect.poll(() => prompt.evaluate((element) => element.scrollTop)).toBe(scrollTop);
+        await expect(page.locator('[data-canvas-resource-reference="prompt-image"]')).toHaveCount(0);
+        await expect(prompt).not.toHaveCSS("color", "rgba(0, 0, 0, 0)");
+        await page.getByRole("button", { name: "放大提示词输入" }).click();
+        const expanded = page.getByRole("textbox", { name: "提示词编辑器" });
+        await expect(expanded).toBeFocused();
+        await expect(expanded).not.toHaveCSS("color", "rgba(0, 0, 0, 0)");
+        await expect(expanded).toHaveValue(await prompt.inputValue());
     } finally {
         await deleteCanvasProject(request, project.id);
     }
