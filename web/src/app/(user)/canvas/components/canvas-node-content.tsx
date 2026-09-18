@@ -424,7 +424,20 @@ export function ImageContent({
     const theme = canvasThemes[colorTheme];
     const isBatchChild = Boolean(node.metadata?.batchRootId);
     const imageRef = useRef<HTMLImageElement>(null);
-    const previewWidth = canvasImagePreviewWidth(node.width, scale, node.metadata?.naturalWidth);
+    const previewSource = node.metadata?.content || "";
+    const previewVariantRef = useRef<{
+        source: string;
+        width: number;
+    } | null>(null);
+    const previewVariant =
+        previewVariantRef.current?.source === previewSource
+            ? previewVariantRef.current
+            : {
+                  source: previewSource,
+                  width: canvasImagePreviewWidth(node.width, scale, node.metadata?.naturalWidth),
+              };
+    previewVariantRef.current = previewVariant;
+    const previewWidth = previewVariant.width;
     const reportDimensions = useCallback(
         (image: HTMLImageElement) => {
             if (node.metadata?.naturalWidth && node.metadata?.naturalHeight) return;
@@ -490,10 +503,9 @@ export function ImageContent({
     );
 }
 
-const CANVAS_IMAGE_PREVIEW_WIDTH = 1920;
-
-export function canvasImagePreviewWidth(_nodeWidth: number, _scale: number, naturalWidth?: number) {
-    return naturalWidth && naturalWidth > 0 ? Math.min(CANVAS_IMAGE_PREVIEW_WIDTH, naturalWidth) : CANVAS_IMAGE_PREVIEW_WIDTH;
+export function canvasImagePreviewWidth(nodeWidth: number, scale: number, naturalWidth?: number) {
+    const screenWidth = Math.max(1, Math.ceil(nodeWidth * Math.max(scale, 0.01) * (globalThis.devicePixelRatio || 1)));
+    return naturalWidth && naturalWidth > 0 ? Math.min(screenWidth, naturalWidth) : screenWidth;
 }
 
 export function ImageInfoBar({ node }: { node: CanvasNodeData }) {
