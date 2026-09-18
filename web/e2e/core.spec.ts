@@ -287,7 +287,7 @@ test("Canvas Agent persists local image and video results while the canvas remai
     const project = await createCanvasProject(request, { title: `Canvas Agent 协议 ${randomUUID().slice(0, 8)}`, viewport: { x: 80, y: 100, k: 1 }, nodes: [], connections: [] });
     try {
         await page.goto(`/canvas/${project.id}`, { waitUntil: "domcontentloaded" });
-        const composer = page.getByPlaceholder("描述你想让 Agent 如何操作画布");
+        const composer = page.getByRole("textbox", { name: "描述你想让 Agent 如何操作画布" });
         await expect(composer).toBeVisible({ timeout: 20_000 });
         await composer.fill("生成一张图片和一段视频，验证画布协议与持久化");
         const runCreated = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/agent/runs");

@@ -253,7 +253,7 @@ test("creative workspaces remain usable without horizontal overflow in light and
                 const agentPanel = page.getByLabel("Canvas Agent 对话面板");
                 await expect(agentPanel).toBeVisible();
                 await expect.poll(async () => Math.round((await agentPanel.boundingBox())?.width || 0)).toBe(page.viewportSize()?.width || 0);
-                await expect(page.getByPlaceholder("描述你想让 Agent 如何操作画布")).toBeVisible();
+                await expect(page.getByRole("textbox", { name: "描述你想让 Agent 如何操作画布" })).toBeVisible();
                 await expectNoHorizontalOverflow(page, `${route} Agent`);
                 await page.getByRole("button", { name: "收起 Agent 面板" }).click();
             }
