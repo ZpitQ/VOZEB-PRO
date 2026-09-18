@@ -1,6 +1,6 @@
 import { nanoid } from "nanoid";
 import type { CreativeFoundation, CreativeReview } from "@/lib/creative-agent-contract";
-import { CreativeRuntimeInputError, type CreativeGenerationPreferences, type CreativeProjectHandoffPlan, type CreativeRunRequest, type CreativeSurface } from "@/lib/creative-runtime-contract";
+import { CreativeRuntimeInputError, MAX_SNAPSHOT_BYTES, type CreativeGenerationPreferences, type CreativeProjectHandoffPlan, type CreativeRunRequest, type CreativeSurface } from "@/lib/creative-runtime-contract";
 import { extractImageSizeFromPrompt } from "@/lib/image-size";
 import { videoFrameAssetIds, type VideoReferenceRole } from "@/lib/video-reference-contract";
 import { createCreativeRunBundle, getCreativeAssetsByIds, getCreativeRunByClientRequestId, mutateCreativeRun } from "./creative-runtime-store";
@@ -12,6 +12,7 @@ import type { AgentRunPlannerAudit } from "./agent-run-audit";
 import { AGENT_REQUEST_SCHEMA } from "./agent-prompt-json";
 import { normalizeAgentRunCanvasSnapshot, selectedCanvasNodeIds } from "./agent-run-canvas-snapshot";
 import { getDramaProject } from "./drama-project-store";
+import { getCanvasProject } from "./canvas-project-store";
 
 export type AgentRunStatus = "planning" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type AgentRunReviewStatus = "review_pending" | "reviewing" | "review_completed" | "review_unavailable";
@@ -133,7 +134,7 @@ export async function createAgentRun(userId: string, input: CreativeRunRequest) 
     await assertVideoFrameAssets(userId, input);
     const now = Date.now();
     const conversationId = input.conversationId || `conversation-${nanoid()}`;
-    const snapshot = input.surface === "canvas" ? normalizeAgentRunCanvasSnapshot(input.snapshot, input.projectId) : input.surface === "drama" && input.projectId ? await resolveDramaRunSnapshot(userId, input.projectId, input.snapshot) : input.snapshot;
+    const snapshot = input.surface === "canvas" && input.projectId ? await resolveCanvasRunSnapshot(userId, input.projectId, input.snapshot) : input.surface === "drama" && input.projectId ? await resolveDramaRunSnapshot(userId, input.projectId, input.snapshot) : input.snapshot;
     const run: AgentRun = {
         id: `agent-${nanoid()}`,
         userId,
@@ -171,6 +172,24 @@ export async function createAgentRun(userId: string, input: CreativeRunRequest) 
         acknowledgement: agentRequirementAcknowledgement(publicPrompt, input.surface, input.assetIds.length > 0 || (input.surface === "canvas" && selectedCanvasNodeIds(snapshot).length > 0)),
         ttlMs: TTL,
     });
+}
+
+async function resolveCanvasRunSnapshot(userId: string, projectId: string, requestSnapshot: unknown) {
+    const project = await getCanvasProject(projectId.trim(), userId);
+    if (!project) throw new CreativeRuntimeInputError("画布项目不存在", 404);
+    const requestBytes = requestSnapshot === undefined ? 0 : new TextEncoder().encode(JSON.stringify(requestSnapshot)).length;
+    if (requestBytes <= MAX_SNAPSHOT_BYTES) return normalizeAgentRunCanvasSnapshot(requestSnapshot, projectId);
+    const transient = record(requestSnapshot);
+    const snapshot = normalizeAgentRunCanvasSnapshot(
+        {
+            ...project,
+            ...(Array.isArray(transient.selectedNodeIds) ? { selectedNodeIds: transient.selectedNodeIds } : {}),
+            ...(typeof transient.imageSize === "string" && transient.imageSize.trim() ? { imageSize: transient.imageSize.trim() } : {}),
+        },
+        project.id,
+    );
+    if (new TextEncoder().encode(JSON.stringify(snapshot)).length > MAX_SNAPSHOT_BYTES) throw new CreativeRuntimeInputError("当前项目快照过大", 413);
+    return snapshot;
 }
 
 async function resolveDramaRunSnapshot(userId: string, projectId: string, requestSnapshot: unknown) {
