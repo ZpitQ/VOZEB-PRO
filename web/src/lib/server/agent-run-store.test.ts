@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentRun } from "./agent-run-store";
 
-const mocks = vi.hoisted(() => ({ createCreativeRunBundle: vi.fn(), getCreativeAssetsByIds: vi.fn(), getDramaProject: vi.fn(), mutateCreativeRun: vi.fn() }));
+const mocks = vi.hoisted(() => ({ createCreativeRunBundle: vi.fn(), getCanvasProject: vi.fn(), getCreativeAssetsByIds: vi.fn(), getDramaProject: vi.fn(), mutateCreativeRun: vi.fn() }));
 
 vi.mock("./creative-runtime-store", () => ({
     createCreativeRunBundle: mocks.createCreativeRunBundle,
@@ -12,6 +12,7 @@ vi.mock("./creative-runtime-store", () => ({
 }));
 vi.mock("./drama-project-store", () => ({ getDramaProject: mocks.getDramaProject }));
 vi.mock("./generation-task-store", () => ({ getStoredGenerationTask: vi.fn(), listStoredGenerationTasks: vi.fn() }));
+vi.mock("./canvas-project-store", () => ({ getCanvasProject: mocks.getCanvasProject }));
 
 import { createAgentRun, setAgentRunStatus, updateAgentRunById, updateAgentRunTaskById } from "./agent-run-store";
 
@@ -49,6 +50,7 @@ describe("createAgentRun Canvas snapshot", () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.createCreativeRunBundle.mockImplementation(async (_userId, input) => input);
+        mocks.getCanvasProject.mockImplementation(async (projectId: string) => ({ id: projectId }));
     });
 
     it("persists one trusted compact snapshot with exact config size and one-hop context", async () => {
@@ -119,6 +121,38 @@ describe("createAgentRun Canvas snapshot", () => {
         expect((created.run.snapshot as { nodes: unknown[]; connections: unknown[]; analysis: { nodeCount: number } }).nodes).toHaveLength(2);
         expect((created.run.snapshot as { nodes: unknown[]; connections: unknown[]; analysis: { nodeCount: number } }).connections).toHaveLength(1);
         expect((created.run.snapshot as { nodes: unknown[]; connections: unknown[]; analysis: { nodeCount: number } }).analysis.nodeCount).toBe(2);
+    });
+});
+describe("large Canvas snapshot", () => {
+    it("hydrates an oversized client snapshot from the authorized Canvas project", async () => {
+        mocks.createCreativeRunBundle.mockImplementation(async (_userId, input) => input);
+        mocks.getCanvasProject.mockResolvedValue({
+            id: "large-project",
+            title: "服务端画布",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            nodes: [{ id: "image", type: "image", title: "图片", width: 100, height: 100, position: { x: 0, y: 0 }, metadata: { prompt: "服务端内容", serverUrl: "/api/reference-assets/image" } }],
+            connections: [],
+            chatSessions: [],
+            activeChatId: null,
+            backgroundMode: "grid",
+            showImageInfo: false,
+            viewport: { x: 0, y: 0, k: 1 },
+        });
+        const created = await createAgentRun("user", {
+            clientRequestId: "request-canvas-large",
+            surface: "canvas",
+            projectId: "large-project",
+            prompt: "继续编辑",
+            assetIds: [],
+            skillIds: [],
+            modelIds: [],
+            snapshot: { selectedNodeIds: ["image"], value: "x".repeat(513 * 1024) },
+        });
+
+        expect(mocks.getCanvasProject).toHaveBeenCalledWith("large-project", "user");
+        expect(created.run.snapshot).toMatchObject({ projectId: "large-project", title: "服务端画布", selectedNodeIds: ["image"] });
+        expect(JSON.stringify(created.run.snapshot)).not.toContain("x".repeat(1_000));
     });
 });
 
