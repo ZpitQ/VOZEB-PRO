@@ -5,7 +5,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasNodeData } from "../types";
 import { CanvasNode } from "./canvas-node";
-import { NodeContent } from "./canvas-node-content";
+import { canvasImagePreviewWidth, NodeContent } from "./canvas-node-content";
 
 const imageNode: CanvasNodeData = {
     id: "generated-image",
@@ -71,9 +71,16 @@ describe("CanvasNode image border", () => {
         expect(markup).toContain(`border-color:${canvasThemes.light.node.stroke}`);
         expect(markup).toContain("rounded-3xl border-2");
         expect(markup).toContain("overflow-hidden rounded-3xl");
-        expect(markup).toContain("/api/reference-assets/permanent/generated-image.png?format=webp&amp;width=320");
+        expect(markup).toContain("/api/reference-assets/permanent/generated-image.png?format=webp&amp;width=1920");
         expect(markup).toContain('loading="lazy"');
         expect(markup).toContain('decoding="async"');
+    });
+
+    it("keeps the canvas media variant stable while zooming", () => {
+        expect(canvasImagePreviewWidth(320, 1)).toBe(1920);
+        expect(canvasImagePreviewWidth(320, 4)).toBe(1920);
+        expect(renderImageNode({ scale: 1 })).toContain("width=1920");
+        expect(renderImageNode({ scale: 4 })).toContain("width=1920");
     });
 
     it("keeps the blue active border when the image is selected", () => {
@@ -101,7 +108,7 @@ describe("CanvasNode image border", () => {
         expect(subject).not.toContain('data-canvas-transparent-preview="true"');
         expect(removedBackground).not.toContain('data-canvas-transparent-preview="true"');
         expect(subject).not.toContain("background-image:linear-gradient");
-        expect(subject).toContain("/api/reference-assets/permanent/generated-image.png?format=webp&amp;width=320");
+        expect(subject).toContain("/api/reference-assets/permanent/generated-image.png?format=webp&amp;width=1920");
         expect(background).not.toContain("data-canvas-transparent-preview");
         expect(ordinary).not.toContain("data-canvas-transparent-preview");
     });

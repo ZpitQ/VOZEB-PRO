@@ -490,9 +490,10 @@ export function ImageContent({
     );
 }
 
-export function canvasImagePreviewWidth(nodeWidth: number, scale: number, naturalWidth?: number) {
-    const screenWidth = Math.max(1, Math.ceil(nodeWidth * Math.max(scale, 0.01) * (globalThis.devicePixelRatio || 1)));
-    return naturalWidth && naturalWidth > 0 ? Math.min(screenWidth, naturalWidth) : screenWidth;
+const CANVAS_IMAGE_PREVIEW_WIDTH = 1920;
+
+export function canvasImagePreviewWidth(_nodeWidth: number, _scale: number, naturalWidth?: number) {
+    return naturalWidth && naturalWidth > 0 ? Math.min(CANVAS_IMAGE_PREVIEW_WIDTH, naturalWidth) : CANVAS_IMAGE_PREVIEW_WIDTH;
 }
 
 export function ImageInfoBar({ node }: { node: CanvasNodeData }) {
