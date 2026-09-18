@@ -115,7 +115,10 @@ describe("normalizeCreativeRunRequest", () => {
     });
 
     it("allows an oversized Canvas client snapshot when the server can hydrate by project ID", () => {
-        expect(normalizeCreativeRunRequest({ clientRequestId: "canvas-large", surface: "canvas", projectId: "canvas-project", prompt: "继续当前画布", snapshot: { value: "x".repeat(513 * 1024) } })).toMatchObject({ surface: "canvas", projectId: "canvas-project" });
+        expect(normalizeCreativeRunRequest({ clientRequestId: "canvas-large", surface: "canvas", projectId: "canvas-project", prompt: "继续当前画布", snapshot: { value: "x".repeat(513 * 1024) } })).toMatchObject({
+            surface: "canvas",
+            projectId: "canvas-project",
+        });
     });
 
     it("allows an oversized drama client snapshot when the server can hydrate by project ID", () => {

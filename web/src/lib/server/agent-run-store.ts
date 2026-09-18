@@ -134,7 +134,12 @@ export async function createAgentRun(userId: string, input: CreativeRunRequest) 
     await assertVideoFrameAssets(userId, input);
     const now = Date.now();
     const conversationId = input.conversationId || `conversation-${nanoid()}`;
-    const snapshot = input.surface === "canvas" && input.projectId ? await resolveCanvasRunSnapshot(userId, input.projectId, input.snapshot) : input.surface === "drama" && input.projectId ? await resolveDramaRunSnapshot(userId, input.projectId, input.snapshot) : input.snapshot;
+    const snapshot =
+        input.surface === "canvas" && input.projectId
+            ? await resolveCanvasRunSnapshot(userId, input.projectId, input.snapshot)
+            : input.surface === "drama" && input.projectId
+              ? await resolveDramaRunSnapshot(userId, input.projectId, input.snapshot)
+              : input.snapshot;
     const run: AgentRun = {
         id: `agent-${nanoid()}`,
         userId,

@@ -123,6 +123,7 @@ describe("createAgentRun Canvas snapshot", () => {
         expect((created.run.snapshot as { nodes: unknown[]; connections: unknown[]; analysis: { nodeCount: number } }).analysis.nodeCount).toBe(2);
     });
 });
+describe("large Canvas snapshot", () => {
     it("hydrates an oversized client snapshot from the authorized Canvas project", async () => {
         mocks.createCreativeRunBundle.mockImplementation(async (_userId, input) => input);
         mocks.getCanvasProject.mockResolvedValue({
@@ -153,6 +154,7 @@ describe("createAgentRun Canvas snapshot", () => {
         expect(created.run.snapshot).toMatchObject({ projectId: "large-project", title: "服务端画布", selectedNodeIds: ["image"] });
         expect(JSON.stringify(created.run.snapshot)).not.toContain("x".repeat(1_000));
     });
+});
 
 describe("createAgentRun Drama snapshot", () => {
     beforeEach(() => {
