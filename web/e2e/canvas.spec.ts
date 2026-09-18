@@ -8,6 +8,63 @@ import { E2E_PROTOCOL_ORIGIN } from "./support";
 
 test.describe.configure({ mode: "serial" });
 
+test("canvas Agent grows and inserts reference chips into the text flow", async ({ page, request }) => {
+    const project = await createCanvasProject(request, {
+        title: `Canvas 行内引用 ${randomUUID().slice(0, 8)}`,
+        nodes: Array.from({ length: 8 }, (_, index) => node(`inline-${index}`, "image", index * 260, 120, 220, 160, { content: "/logo.svg", serverUrl: "/logo.svg" })),
+        connections: [],
+    });
+    const submitted: Array<{ prompt: string; snapshot: { selectedNodeIds: string[] } }> = [];
+    await page.route("**/api/agent/runs", async (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        submitted.push(route.request().postDataJSON());
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: 503, msg: "测试停止于请求边界" }) });
+    });
+    try {
+        await page.goto(`/canvas/${project.id}`, { waitUntil: "domcontentloaded" });
+        const panel = page.getByLabel("Canvas Agent 对话面板");
+        const input = panel.getByRole("textbox", { name: "描述你想让 Agent 如何操作画布" });
+        const toolbar = panel.locator("[data-canvas-agent-toolbar]");
+        await expect(toolbar.getByRole("button", { name: "添加参考素材", exact: true })).toBeVisible();
+        const initialHeight = (await input.boundingBox())!.height;
+        await input.fill("参考这些图片，");
+        for (let index = 0; index < 8; index++) {
+            await input.press("Control+End");
+            await page.keyboard.insertText("@");
+            await page.getByTestId("canvas-agent-mention-picker").locator(`[data-node-id="inline-${index}"]`).click();
+            await page.keyboard.insertText(`第${index + 1}张保持材质和光照，`);
+        }
+        await expect(input.locator("[data-canvas-agent-reference]")).toHaveCount(8);
+        await expect.poll(async () => (await input.boundingBox())!.height).toBeGreaterThan(initialHeight);
+        expect(await input.innerText()).toMatch(/^参考这些图片/);
+        await input.press("Control+Home");
+        await input.press("ArrowRight");
+        await page.keyboard.insertText("插入位置");
+        await expect(input).toContainText("参插入位置考这些图片");
+        await input.locator('[data-canvas-agent-reference="inline-1"]').getByRole("button").click();
+        await expect(input.locator("[data-canvas-agent-reference]")).toHaveCount(7);
+        await expect(input.locator('[data-canvas-agent-reference="inline-2"]')).toContainText("图片2");
+        await page.screenshot({ path: ".e2e-artifacts/agent-inline-desktop.png", caret: "initial" });
+        await input.press("Control+End");
+        await page.keyboard.insertText("长提示词保持原始构图和光线。".repeat(200));
+        await expect.poll(() => input.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+        for (const width of [1280, 390, 430]) {
+            await page.setViewportSize({ width, height: 900 });
+            await expect(toolbar.getByRole("button", { name: "发送", exact: true })).toBeInViewport();
+            await expectNoHorizontalOverflow(page, `Canvas 行内引用 ${width}`);
+        }
+        await input.press("Control+Home");
+        await page.screenshot({ path: ".e2e-artifacts/agent-inline-composer.png", caret: "initial" });
+        await toolbar.getByRole("button", { name: "发送", exact: true }).click();
+        await expect.poll(() => submitted.length).toBe(1);
+        expect(submitted[0].snapshot.selectedNodeIds).toEqual(["inline-0", "inline-2", "inline-3", "inline-4", "inline-5", "inline-6", "inline-7"]);
+        expect(submitted[0].prompt).toContain("参插入位置考这些图片，@图片1 第1张保持材质和光照， 第2张保持材质和光照，@图片2 第3张保持材质和光照，");
+        await expect(input.locator("[data-canvas-agent-reference]")).toHaveCount(0);
+    } finally {
+        await deleteCanvasProject(request, project.id);
+    }
+});
+
 test("canvas image prompt placement settles after zooming with multiple images", async ({ page, request }) => {
     await page.setViewportSize({ width: 1440, height: 960 });
     const image = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="360" height="640"><rect width="360" height="640" fill="tan"/></svg>')}`;
@@ -98,7 +155,7 @@ test("canvas keeps editing, selection, linking and persistence fluid", async ({ 
         await expect(configNode.locator("[data-canvas-config-details]")).toHaveCount(0);
         await expect.poll(async () => (await configNode.boundingBox())!.height).toBeLessThanOrEqual(182);
         await configNode.click({ position: { x: 36, y: 36 } });
-        const composer = page.locator('[contenteditable="true"]');
+        const composer = page.getByLabel("组装提示词", { exact: true });
         await expect(composer).toBeVisible();
         await expect.poll(() => composer.evaluate((element) => document.activeElement === element)).toBe(true);
         const composerPatchCount = patchRequests.length;
@@ -580,7 +637,7 @@ test("canvas opens the Agent rail at the intended width and keeps a fresh chat a
         await deleteDialog.getByRole("button", { name: /删\s*除/ }).click();
 
         await expect(page.getByRole("tab", { name: "对话", exact: true })).toHaveAttribute("aria-selected", "true");
-        const agentComposer = page.getByPlaceholder("描述你想让 Agent 如何操作画布");
+        const agentComposer = page.getByRole("textbox", { name: "描述你想让 Agent 如何操作画布" });
         await expect(agentComposer).toBeVisible();
         await expect(page.getByText("你好，我是你的画布助手", { exact: true })).toBeVisible();
         await expect.poll(() => page.locator("[data-canvas-agent-scroll]").evaluate((element) => element.scrollTop)).toBe(0);
@@ -592,20 +649,21 @@ test("canvas opens the Agent rail at the intended width and keeps a fresh chat a
         await expect(mentionPicker.getByRole("button", { name: "引用协议引用图片" })).toBeVisible();
         await expect(mentionPicker.locator("img")).toBeVisible();
         await mentionPicker.getByRole("button", { name: "引用协议引用图片" }).click();
-        await expect(agentComposer).toHaveValue("222@图片1 ");
-        await agentComposer.fill(`${await agentComposer.inputValue()}再参考@`);
+        await expect(agentComposer).toHaveText("222图片1 ");
+        await agentComposer.press("Control+End");
+        await page.keyboard.insertText("再参考@");
         await expect(mentionPicker).toBeVisible();
         await mentionPicker.getByRole("tab", { name: /视频/ }).click();
         await expect(mentionPicker.getByRole("button", { name: "引用协议引用视频" })).toBeVisible();
         await expect(mentionPicker.locator("video")).toBeVisible();
         await mentionPicker.getByRole("button", { name: "引用协议引用视频" }).click();
-        await expect(agentComposer).toHaveValue("222@图片1 再参考@视频1 ");
+        await expect(agentComposer).toHaveText("222图片1 再参考视频1 ");
         await agentComposer.fill("");
 
         const generationPreferencesTrigger = panel.getByRole("button", { name: /生成参数：/ });
         await expect
             .poll(() => panel.locator("[data-canvas-agent-toolbar] button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label") || "")))
-            .toEqual([expect.stringMatching(/^(选择创作 Skill|当前 Skill：)/), expect.stringMatching(/^智能规划.*点击/), expect.stringMatching(/^(选择生成模型|已选择 \d+ 个模型)$/), expect.stringMatching(/^生成参数：/), "发送"]);
+            .toEqual(["添加参考素材", expect.stringMatching(/^(选择创作 Skill|当前 Skill：)/), expect.stringMatching(/^智能规划.*点击/), expect.stringMatching(/^(选择生成模型|已选择 \d+ 个模型)$/), expect.stringMatching(/^生成参数：/), "发送"]);
         await expect.poll(async () => Math.round((await generationPreferencesTrigger.boundingBox())?.width || 0)).toBeLessThanOrEqual(116);
         await generationPreferencesTrigger.click();
         const generationPreferencesPanel = page.locator("[data-creative-generation-preferences]");
@@ -644,7 +702,7 @@ test("canvas Agent toolbar stays ordered and its generation settings fit narrow 
             await expect.poll(async () => Math.round((await trigger.boundingBox())?.width || 0)).toBeLessThanOrEqual(116);
             await expect
                 .poll(() => panel.locator("[data-canvas-agent-toolbar] button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label") || "")))
-                .toEqual([expect.stringMatching(/^(选择创作 Skill|当前 Skill：)/), expect.stringMatching(/^智能规划.*点击/), expect.stringMatching(/^(选择生成模型|已选择 \d+ 个模型)$/), expect.stringMatching(/^生成参数：/), "发送"]);
+                .toEqual(["添加参考素材", expect.stringMatching(/^(选择创作 Skill|当前 Skill：)/), expect.stringMatching(/^智能规划.*点击/), expect.stringMatching(/^(选择生成模型|已选择 \d+ 个模型)$/), expect.stringMatching(/^生成参数：/), "发送"]);
             await expect
                 .poll(async () => {
                     const controls = panel.locator("[data-creative-agent-controls='compact']");
@@ -874,7 +932,7 @@ test("canvas Agent keeps simultaneous runs bound to separate chats", async ({ pa
 
     try {
         await page.goto(`/canvas/${project.id}`, { waitUntil: "domcontentloaded" });
-        const composer = page.getByPlaceholder("描述你想让 Agent 如何操作画布");
+        const composer = page.getByRole("textbox", { name: "描述你想让 Agent 如何操作画布" });
         await expect(composer).toBeVisible({ timeout: 20_000 });
         await composer.fill("第一条后台任务");
         await page.getByRole("button", { name: "发送" }).click();
@@ -1098,12 +1156,21 @@ test("canvas Agent attachment remove badge stays compact and theme readable", as
         await page.goto(`/canvas/${project.id}`, { waitUntil: "domcontentloaded" });
         const panel = page.getByRole("complementary", { name: "Canvas Agent 对话面板" });
         await expect(panel).toBeVisible({ timeout: 20_000 });
-        await panel.locator('input[type="file"][multiple]').setInputFiles({
+        const input = panel.getByRole("textbox", { name: "描述你想让 Agent 如何操作画布" });
+        await input.fill("前后");
+        await input.press("Control+End");
+        await input.press("ArrowLeft");
+        const chooserPromise = page.waitForEvent("filechooser");
+        await panel.locator("[data-canvas-agent-toolbar]").getByRole("button", { name: "添加参考素材", exact: true }).click();
+        const chooser = await chooserPromise;
+        await chooser.setFiles({
             name: "reference.png",
             mimeType: "image/png",
             buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl3kgAAAABJRU5ErkJggg==", "base64"),
         });
 
+        await expect(input.locator("[data-canvas-agent-reference]")).toHaveCount(1);
+        await expect(input).toHaveText("前图片1 后");
         const removeButton = panel.getByRole("button", { name: "移除参考素材：reference.png" });
         const badge = removeButton.locator(":scope > span");
         await expect(removeButton).toBeVisible();

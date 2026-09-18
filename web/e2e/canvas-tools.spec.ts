@@ -241,31 +241,20 @@ test("canvas Agent can reference images beyond the first fifty without stalling"
         await expect(composer).toBeVisible({ timeout: 20_000 });
 
         for (const nodeId of ["image-52", "image-59", "image-64"]) {
-            await composer.fill(`${await composer.inputValue()}@${nodeId}`);
+            await composer.press("Control+End");
+            await page.keyboard.insertText(`@${nodeId}`);
             const option = page.getByRole("button", { name: `引用${nodeId}`, exact: true });
             await expect(option).toBeVisible();
             await option.click();
         }
 
-        await expect(composer).toHaveValue("@图片1 @图片2 @图片3 ");
-        await expect(panel.locator('[data-canvas-agent-input-row] img[alt="image-64"]')).toBeVisible();
-        await composer.fill(`${await composer.inputValue()}${Array.from({ length: 18 }, (_, index) => `\n保持参考主体一致，补充第 ${index + 1} 条镜头运动说明。`).join("")}`);
+        await expect(composer).toHaveText("图片1 图片2 图片3 ");
+        await expect(composer.locator('[data-canvas-agent-reference="image-64"] img')).toBeVisible();
+        await composer.press("Control+End");
+        await page.keyboard.insertText(Array.from({ length: 18 }, (_, index) => `\n保持参考主体一致，补充第 ${index + 1} 条镜头运动说明。`).join(""));
         await expect.poll(() => composer.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-        const mentionBounds = await panel.locator('[data-testid="canvas-agent-mention-preview"]').evaluate((preview) => {
-            const previewRect = preview.getBoundingClientRect();
-            const textareaRect = preview.parentElement?.querySelector("textarea")?.getBoundingClientRect();
-            const scrollLayerRect = preview.querySelector("[data-canvas-agent-mention-scroll-layer]")?.getBoundingClientRect();
-            return {
-                previewTop: previewRect.top,
-                previewBottom: previewRect.bottom,
-                textareaTop: textareaRect?.top ?? Number.NaN,
-                textareaBottom: textareaRect?.bottom ?? Number.NaN,
-                scrollLayerTop: scrollLayerRect?.top,
-            };
-        });
-        expect(mentionBounds.previewTop).toBeGreaterThanOrEqual(mentionBounds.textareaTop - 1);
-        expect(mentionBounds.previewBottom).toBeLessThanOrEqual(mentionBounds.textareaBottom + 1);
-        expect(mentionBounds.scrollLayerTop ?? Number.POSITIVE_INFINITY).toBeLessThan(mentionBounds.previewTop);
+        await expect(composer).toHaveCSS("overflow-y", "auto");
+        await expect(panel.locator("[data-canvas-agent-toolbar]")).toBeInViewport();
         await expect(page.locator('.node-element[data-node-id="image-64"]')).toHaveCSS("z-index", "50");
         const previewWidths = await page.locator('.node-element[data-node-id^="image-"] img').evaluateAll((images) => images.map((image) => new URL((image as HTMLImageElement).src).searchParams.get("width")).filter(Boolean));
         const devicePixelRatio = await page.evaluate(() => window.devicePixelRatio);
