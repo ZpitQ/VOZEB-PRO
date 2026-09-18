@@ -228,14 +228,14 @@ function ReferencePreviewIcon({ kind }: Pick<CanvasResourceReference, "kind">) {
     );
 }
 
-function MentionMenu({
+export function MentionMenu({
     textarea,
     references,
     activeIndex,
     theme,
     onSelect,
 }: {
-    textarea: HTMLTextAreaElement;
+    textarea: HTMLElement;
     references: CanvasResourceReference[];
     activeIndex: number;
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];

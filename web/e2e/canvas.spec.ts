@@ -27,12 +27,12 @@ test("canvas image prompt placement settles after zooming with multiple images",
             const samples = await page.evaluate(async () => {
                 const panel = document.querySelector<HTMLElement>("[data-canvas-node-panel]");
                 if (!panel) throw new Error("Prompt panel missing");
-                const input = panel.querySelector("textarea");
+                const input = panel.querySelector('[contenteditable="true"]');
                 const samples = [];
                 for (let frame = 0; frame < 60; frame += 1) {
                     await new Promise(requestAnimationFrame);
                     const bounds = panel.getBoundingClientRect();
-                    samples.push({ placement: panel.dataset.canvasNodePanelPlacement, top: bounds.top, bottom: bounds.bottom, height: bounds.height, sameInput: input === panel.querySelector("textarea") });
+                    samples.push({ placement: panel.dataset.canvasNodePanelPlacement, top: bounds.top, bottom: bounds.bottom, height: bounds.height, sameInput: input === panel.querySelector('[contenteditable="true"]') });
                 }
                 return samples.slice(10);
             });
@@ -44,7 +44,7 @@ test("canvas image prompt placement settles after zooming with multiple images",
             if (zoom === 80) expect(samples[0].placement).toBe("bottom");
         }
         await prompt.fill("保持原图风格");
-        await expect(prompt).toHaveValue("保持原图风格");
+        await expect(prompt).toHaveText("保持原图风格");
     } finally {
         await deleteCanvasProject(request, project.id);
     }
@@ -133,12 +133,12 @@ test("canvas keeps editing, selection, linking and persistence fluid", async ({ 
         await expect(promptDialog.locator('[data-canvas-prompt-editor="expanded"]')).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
         await expect(expandedPrompt).toHaveCSS("background-color", "rgb(238, 246, 251)");
         await expect(promptDialog.locator(".ant-modal-footer")).toHaveCount(0);
-        await expect(expandedPrompt).toHaveValue("放大编辑后仍然同步");
+        await expect(expandedPrompt).toHaveText("放大编辑后仍然同步");
         await expect.poll(() => expandedPrompt.evaluate((element) => document.activeElement === element)).toBe(true);
         await expandedPrompt.fill("弹窗中的长提示词会实时回写原输入框");
         await promptDialog.getByRole("button", { name: "收起提示词输入" }).click();
         await expect(promptDialog).toBeHidden();
-        await expect(nodePrompt).toHaveValue("弹窗中的长提示词会实时回写原输入框");
+        await expect(nodePrompt).toHaveText("弹窗中的长提示词会实时回写原输入框");
         await surface.focus();
         await page.keyboard.press("Escape");
         await expect(nodePrompt).toHaveCount(0);
@@ -250,9 +250,9 @@ test("canvas node prompt keeps image and video mentions after long text", async 
     const project = await createCanvasProject(request, {
         title: `Canvas 节点长提示词引用 ${randomUUID().slice(0, 8)}`,
         nodes: [
-            { ...node("prompt-image", "image", 60, 80, 220, 160, { content: `${E2E_PROTOCOL_ORIGIN}/media/fixture.png`, serverUrl: `${E2E_PROTOCOL_ORIGIN}/media/fixture.png` }), title: "节点参考图片" },
+            { ...node("prompt-image", "image", 60, 80, 220, 160, { content: "/logo.svg", serverUrl: "/logo.svg" }), title: "节点参考图片" },
             { ...node("prompt-video", "video", 60, 300, 220, 160, { content: `${E2E_PROTOCOL_ORIGIN}/media/fixture.mp4`, serverUrl: `${E2E_PROTOCOL_ORIGIN}/media/fixture.mp4` }), title: "节点参考视频" },
-            node("prompt-target", "image", 420, 180, 260, 200, {}),
+            node("prompt-target", "image", 420, 180, 260, 200, { content: "/logo.svg", serverUrl: "/logo.svg", prompt: "原图生成提示词" }),
         ],
         connections: [
             { id: "prompt-image-edge", fromNodeId: "prompt-image", toNodeId: "prompt-target" },
@@ -267,55 +267,109 @@ test("canvas node prompt keeps image and video mentions after long text", async 
         await expect(prompt).toBeVisible({ timeout: 20_000 });
 
         const longText = Array.from({ length: 16 }, (_, index) => `第 ${index + 1} 条镜头要求保持人物、场景和光线连续。`).join("\n");
-        await prompt.fill(`${longText}\n先参考@图`);
+        await prompt.fill(`${longText}\n先参考`);
+        await prompt.press("Control+End");
+        await page.keyboard.insertText("@图");
         let menu = page.locator('[data-canvas-resource-mention-menu="true"]');
         await expect(menu).toBeVisible();
         const imageOption = menu.getByRole("button").filter({ hasText: "图片1" });
         await expect(imageOption.locator("img")).toBeVisible();
         await imageOption.click();
-        await expect(prompt).toHaveValue(`${longText}\n先参考图片1 `);
+        await expect
+            .poll(() =>
+                prompt
+                    .locator(":scope > p")
+                    .allTextContents()
+                    .then((lines) => lines.join("\n")),
+            )
+            .toBe(`${longText}\n先参考图片1 `);
 
-        await prompt.fill(`${await prompt.inputValue()}再结合@视`);
+        await prompt.press("Control+End");
+        await page.keyboard.insertText("再结合@视");
         menu = page.locator('[data-canvas-resource-mention-menu="true"]');
         await expect(menu).toBeVisible();
         const videoOption = menu.getByRole("button").filter({ hasText: "视频1" });
         await expect(videoOption.locator("video")).toBeVisible();
         await videoOption.click();
-        await expect(prompt).toHaveValue(`${longText}\n先参考图片1 再结合视频1 `);
-        await expect(prompt).toBeFocused();
-        await expect(prompt).not.toHaveCSS("color", "rgba(0, 0, 0, 0)");
-        await expect(prompt).not.toHaveCSS("caret-color", "rgba(0, 0, 0, 0)");
-        await expect(page.locator('[data-canvas-resource-reference="prompt-image"]')).toHaveCount(0);
-        await prompt.press("End");
-        await prompt.press("ArrowLeft");
-        const cursor = await prompt.evaluate((element: HTMLTextAreaElement) => element.selectionStart);
-        await page.keyboard.insertText("补充");
-        const edited = `${longText}\n先参考图片1 再结合视频1 `;
-        await expect(prompt).toHaveValue(`${edited.slice(0, cursor)}补充${edited.slice(cursor)}`);
-        await page.locator("[data-canvas-surface]").focus();
-        const scrollTop = await prompt.evaluate((element) => element.scrollTop);
-        expect(scrollTop).toBeGreaterThan(0);
         await expect
-            .poll(async () => {
-                const preview = await prompt
-                    .locator("..")
-                    .locator(":scope > div")
-                    .first()
-                    .evaluate((element) => ({ top: element.scrollTop, max: element.scrollHeight - element.clientHeight }));
-                return preview.top === Math.min(scrollTop, preview.max);
-            })
-            .toBe(true);
-        await expect(page.locator('[data-canvas-resource-reference="prompt-image"] img')).toBeVisible();
-        await expect(page.locator('[data-canvas-resource-reference="prompt-video"] video')).toBeVisible();
-        await prompt.focus();
-        await expect.poll(() => prompt.evaluate((element) => element.scrollTop)).toBe(scrollTop);
-        await expect(page.locator('[data-canvas-resource-reference="prompt-image"]')).toHaveCount(0);
-        await expect(prompt).not.toHaveCSS("color", "rgba(0, 0, 0, 0)");
+            .poll(() =>
+                prompt
+                    .locator(":scope > p")
+                    .allTextContents()
+                    .then((lines) => lines.join("\n")),
+            )
+            .toBe(`${longText}\n先参考图片1 再结合视频1 `);
+        await expect(prompt).toBeFocused();
+        await expect(prompt.locator('[data-canvas-resource-reference="prompt-image"] img')).toBeVisible();
+        await expect.poll(() => prompt.locator('[data-canvas-resource-reference="prompt-image"] img').evaluate((el) => (el as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+        await expect(prompt.locator('[data-canvas-resource-reference="prompt-video"] video')).toBeVisible();
+        await expect(prompt).not.toHaveCSS("caret-color", "rgba(0, 0, 0, 0)");
+        await prompt.press("Control+End");
+        await page.keyboard.insertText("保持光影");
+        const draft = `${longText}\n先参考图片1 再结合视频1 保持光影`;
+        await expect
+            .poll(() =>
+                prompt
+                    .locator(":scope > p")
+                    .allTextContents()
+                    .then((lines) => lines.join("\n")),
+            )
+            .toBe(draft);
         await page.getByRole("button", { name: "放大提示词输入" }).click();
         const expanded = page.getByRole("textbox", { name: "提示词编辑器" });
         await expect(expanded).toBeFocused();
-        await expect(expanded).not.toHaveCSS("color", "rgba(0, 0, 0, 0)");
-        await expect(expanded).toHaveValue(await prompt.inputValue());
+        await expect
+            .poll(() =>
+                expanded
+                    .locator(":scope > p")
+                    .allTextContents()
+                    .then((lines) => lines.join("\n")),
+            )
+            .toBe(draft);
+        await expect(expanded.locator('[data-canvas-resource-reference="prompt-image"] img')).toBeVisible();
+        await page.getByRole("button", { name: "收起提示词输入" }).click();
+        await page.locator("[data-canvas-surface]").focus();
+        await page.keyboard.press("Escape");
+        await expect(prompt).toHaveCount(0);
+        await page.locator('[data-node-id="prompt-target"]').click({ position: { x: 40, y: 40 } });
+        await expect
+            .poll(() =>
+                prompt
+                    .locator(":scope > p")
+                    .allTextContents()
+                    .then((lines) => lines.join("\n")),
+            )
+            .toBe(draft);
+        await expect.poll(async () => (await readCanvasProject(request, `/api/canvas/projects/${project.id}`)).nodes.find((item) => item.id === "prompt-target")?.metadata).toMatchObject({ prompt: "原图生成提示词", editPromptDraft: draft });
+        await expectCanvasSaved(page);
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.locator('[data-node-id="prompt-target"]').click({ position: { x: 40, y: 40 } });
+        await expect
+            .poll(() =>
+                prompt
+                    .locator(":scope > p")
+                    .allTextContents()
+                    .then((lines) => lines.join("\n")),
+            )
+            .toBe(draft);
+        await expect(prompt.locator('[data-canvas-resource-reference="prompt-image"] img')).toBeVisible();
+        await expect.poll(() => prompt.locator('[data-canvas-resource-reference="prompt-image"] img').evaluate((el) => (el as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+        await prompt.fill("前");
+        await prompt.press("Control+End");
+        await page.keyboard.insertText("@图");
+        await page.locator('[data-canvas-resource-mention-menu="true"]').getByRole("button").filter({ hasText: "图片1" }).click();
+        await prompt.press("Control+Home");
+        await prompt.press("ArrowRight");
+        await page.keyboard.insertText("中");
+        await expect(prompt).toHaveText("前中图片1 ");
+        await expect(prompt.locator('[data-canvas-resource-reference="prompt-image"] img')).toBeVisible();
+        await expect.poll(() => prompt.locator('[data-canvas-resource-reference="prompt-image"] img').evaluate((el) => (el as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+        await page.screenshot({ path: ".e2e-artifacts/rich-reference-editor.png", caret: "initial" });
+        await prompt.press("Control+End");
+        await prompt.press("Backspace");
+        await prompt.press("Backspace");
+        await expect(prompt.locator("[data-canvas-resource-reference]")).toHaveCount(0);
+        await expect(prompt).toHaveText("前中");
     } finally {
         await deleteCanvasProject(request, project.id);
     }
