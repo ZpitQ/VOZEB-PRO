@@ -258,7 +258,7 @@ test("creative workspaces remain usable without horizontal overflow in light and
                 await page.getByRole("button", { name: "收起 Agent 面板" }).click();
             }
             await page.locator('[data-node-id="responsive-config"]').click({ position: { x: 32, y: 32 } });
-            await expect.poll(() => page.locator('[contenteditable="true"]').evaluate((element) => document.activeElement === element)).toBe(true);
+            await expect.poll(() => page.locator('[data-node-id="responsive-config"] [contenteditable="true"]').evaluate((element) => document.activeElement === element)).toBe(true);
             const configPanel = page.locator("[data-canvas-node-panel]");
             await expect
                 .poll(async () => {
