@@ -23,6 +23,7 @@ import { createSignedReferenceAssetUrl, signReferenceAssetInputUrl } from "@/lib
 import { assertCapabilityConstraints } from "@/lib/server/capability-constraints";
 import { GenerationSubmissionSafeFailure } from "@/lib/server/generation-submission-error";
 
+import { runNativeSub2ApiImageSubmission } from "./image-task-memory";
 import {
     type CreateImageTaskBody,
     type ImageApiResponse,
@@ -238,6 +239,22 @@ export async function runOpenAiJsonImageEditTask(
     singleStep = false,
     billingVariant = "primary",
 ): Promise<ImageTaskRunResult> {
+    const run = () => runOpenAiJsonImageEditTaskUnlocked(task, url, origin, publicOrigin, quality, requestSize, cookie, responseFormat, singleStep, billingVariant);
+    return isNativeSub2ApiImageEdit(task.config) ? runNativeSub2ApiImageSubmission(task, run) : run();
+}
+
+async function runOpenAiJsonImageEditTaskUnlocked(
+    task: ImageTask,
+    url: string,
+    origin: string,
+    publicOrigin: string,
+    quality: string | undefined,
+    requestSize: string | undefined,
+    cookie: string,
+    responseFormat: (typeof IMAGE_RESPONSE_FORMATS)[number],
+    singleStep: boolean,
+    billingVariant: string,
+): Promise<ImageTaskRunResult> {
     const config = task.config;
     let lastMessage = "";
     const apiBase = await resolveConfiguredApiBaseUrl(task.config.baseUrl).catch(() => task.config.baseUrl);
@@ -255,7 +272,7 @@ export async function runOpenAiJsonImageEditTask(
             if (imageUrlObjectOnlyMode) throw imageSubmissionResponseError(response.status, message);
             if (allowProtocolFallback && shouldRetryJsonImageEditPayload(response.status, message)) continue;
             if (allowProtocolFallback && shouldTryNextImageResponseFormat(responseFormat, response.status, message)) {
-                if (responseFormat === "url") return runOpenAiJsonImageEditTask(task, url, origin, publicOrigin, quality, requestSize, cookie, "b64_json", singleStep, "base64");
+                if (responseFormat === "url") return runOpenAiJsonImageEditTaskUnlocked(task, url, origin, publicOrigin, quality, requestSize, cookie, "b64_json", singleStep, "base64");
                 return runOpenAiResponsesImageTask(task, origin, cookie, singleStep, "responses");
             }
             if (allowProtocolFallback && shouldFallbackToResponsesImage(response.status, message)) return runOpenAiResponsesImageTask(task, origin, cookie, singleStep, "responses");
@@ -266,12 +283,12 @@ export async function runOpenAiJsonImageEditTask(
         const result = await parseChargedImageResponse(task, response, () => parseImagePayloadOrPoll(config, payload, resultBaseUrl, cookie, url, singleStep));
         if (allowProtocolFallback && responseFormat === "url" && shouldRetryInternalImageUrlAsBase64(result)) {
             await refundChargedImageResponse(task, response.headers);
-            return runOpenAiJsonImageEditTask(task, url, origin, publicOrigin, quality, requestSize, cookie, "b64_json", singleStep, "base64");
+            return runOpenAiJsonImageEditTaskUnlocked(task, url, origin, publicOrigin, quality, requestSize, cookie, "b64_json", singleStep, "base64");
         }
         return result;
     }
     if (allowProtocolFallback && shouldTryNextImageResponseFormat(responseFormat, 400, lastMessage)) {
-        if (responseFormat === "url") return runOpenAiJsonImageEditTask(task, url, origin, publicOrigin, quality, requestSize, cookie, "b64_json", singleStep, "base64");
+        if (responseFormat === "url") return runOpenAiJsonImageEditTaskUnlocked(task, url, origin, publicOrigin, quality, requestSize, cookie, "b64_json", singleStep, "base64");
         return runOpenAiResponsesImageTask(task, origin, cookie, singleStep, "responses");
     }
     throw new GenerationSubmissionSafeFailure(lastMessage || "图片生成失败");
