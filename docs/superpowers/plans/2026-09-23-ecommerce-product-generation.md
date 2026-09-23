@@ -37,27 +37,27 @@
 - `validateEcommerceEditPlan(plan: EcommerceEditPlan): void`：校验来源归属、策略与操作组合、严格商品保护项和连续编辑父结果。
 - `planPublicSummary(plan: EcommerceEditPlan)`：只返回用户可见的操作摘要，不包含内部 prompt、分析细节或模型选择理由。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 覆盖：`product_to_scene` 必须有商品主参考；`strict_product` 必须有商品核心保护项；`local_edit` 必须有目标对象或手动区域；场景参考不能成为商品主参考；无效 `continuity.parentResultId` 不能被静默接受；公开摘要不包含内部字段。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-edit-plan.test.ts`
 
 Expected: FAIL because the new contract functions do not exist.
 
-- [ ] **Step 3: 实现最小契约与校验**
+- [x] **Step 3: 实现最小契约与校验**
 
 使用不可变的输入输出对象；规范化字符串数组、稳定 ID 和策略枚举；不要在该模块调用模型、数据库或图片处理库。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-edit-plan.test.ts`
 
 Expected: PASS with coverage for valid plans, rejected plans and public summaries.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add CONTEXT.md docs/adr/0001-logical-model-roles-for-ecommerce-generation.md docs/adr/0002-strategy-modes-for-product-imaging.md docs/adr/0003-adaptive-multimodal-planning.md web/src/lib/server/ecommerce-edit-plan.ts web/src/lib/server/ecommerce-edit-plan.test.ts
