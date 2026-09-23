@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CreativeConversationContext } from "@/lib/creative-runtime-contract";
 import { AGENT_PLAN_SCHEMA_VERSION } from "./agent-run-audit";
 import type { AgentRun, AgentRunTask } from "./agent-run-store";
@@ -52,6 +52,7 @@ import { resetTextPlanningRuntime } from "./text-planning-runtime";
 describe("executeAgentRun backend settings", () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "off");
         resetTextPlanningRuntime();
         mocks.events = [];
         mocks.getCreativeAssetsByIds.mockResolvedValue([]);
@@ -97,6 +98,26 @@ describe("executeAgentRun backend settings", () => {
             if (url.includes("/api/image-tasks/")) return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/output.png" } } });
             throw new Error(`unexpected request: ${url}`);
         });
+    });
+
+    afterEach(() => vi.unstubAllEnvs());
+
+    it("records an ecommerce shadow snapshot without changing the legacy planner request", async () => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "shadow");
+        mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "把白底台灯放到明亮客厅", referencedAssetIds: ["asset-product"] });
+        mocks.getCreativeAssetsByIds.mockResolvedValue([creativeImageAsset("asset-product", "白底台灯", "https://cdn.example.com/product.png")]);
+        mocks.getAuthSettings.mockResolvedValue(canvasSettings("image-default", "image-default-channel"));
+        mocks.fetchInternalApi.mockImplementation(async (url: string) => {
+            if (url.endsWith("/chat/completions")) return Response.json({ output: [{ type: "function_call", name: "create_agent_plan", arguments: JSON.stringify(conversationPlan("image-default", "已按原流程处理。")) }] });
+            throw new Error(`unexpected request: ${url}`);
+        });
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        expect(mocks.run?.ecommerceSnapshot).toMatchObject({ mode: "shadow", input: { userRequest: "把白底台灯放到明亮客厅", assetIds: ["asset-product"] }, fallback: { reason: "ecommerce_planner_disabled" } });
+        const plannerBody = JSON.parse(String(mocks.fetchInternalApi.mock.calls.find(([url]) => url.endsWith("/chat/completions"))?.[1]?.body)) as { messages: Array<{ content: string }> };
+        expect(JSON.parse(plannerBody.messages[1].content)).toMatchObject({ requirement: "把白底台灯放到明亮客厅" });
+        expect(mocks.run?.tasks).toEqual([]);
     });
 
     it("preserves generated media dimensions in canvas output ops", () => {

@@ -17,6 +17,7 @@ import { buildAgentRunPlannerAudit } from "@/lib/server/agent-run-audit";
 import { agentRequestDigest, buildAgentRequest, serializeAgentRequest } from "@/lib/server/agent-prompt-json";
 import { orderCreativeAssetsByIds } from "@/lib/creative-asset-references";
 import { withDirectAgentExecutionContext } from "./agent-run-direct-context";
+import { buildEcommercePlanningInput, ecommerceShadowPlanningEnabled, legacyPlanFallback, recordEcommerceGenerationSnapshot } from "./ecommerce-generation-snapshot";
 
 const globalAgentExecutors = globalThis as typeof globalThis & { __vozebProAgentRunControllers?: Map<string, AbortController> };
 const controllers = (globalAgentExecutors.__vozebProAgentRunControllers ??= new Map<string, AbortController>());
@@ -67,6 +68,25 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
         const skillOptions = plannerAgentSkills(settings, claimed);
         const skills = selectAgentSkills(settings, claimed.surface, claimed.selectedSkillIds);
         if (!(await canContinue(run.id, executionId))) return;
+        const ecommerceAssets = (usesMemoryCandidates ? memoryAssets : explicitAssets).filter((asset) => asset.type === "image");
+        if (ecommerceShadowPlanningEnabled(process.env.ECOMMERCE_GENERATION_ROLLOUT) && claimed.surface === "chat" && ecommerceAssets.length) {
+            const planningInput = buildEcommercePlanningInput(claimed, ecommerceAssets, conversationContext);
+            const fallback = legacyPlanFallback({
+                userRequest: planningInput.userRequest,
+                assetIds: planningInput.assetCandidates.map((asset) => asset.id),
+                conversationId: planningInput.conversationId,
+                surface: planningInput.surface,
+            });
+            const shadowSnapshot = recordEcommerceGenerationSnapshot(claimed, {
+                version: "ecommerce-generation.v1",
+                mode: "shadow",
+                input: fallback.input,
+                compilerVersion: "legacy-shadow.v1",
+                fallback: { reason: fallback.reason },
+                createdAt: Date.now(),
+            });
+            if (!(await updateAgentRunById(run.id, { ecommerceSnapshot: shadowSnapshot }, undefined, ["running"], executionId))) return;
+        }
         if (claimed.requestedModelIds?.length) {
             const directModelOptions = claimed.generationPreferences?.mode ? availableModels : allModels;
             const selectedModels = claimed.requestedModelIds.map((id) => directModelOptions.find((item) => item.id === id && item.capability !== "text")).filter((item): item is ReturnType<typeof agentModelOptions>[number] => Boolean(item));

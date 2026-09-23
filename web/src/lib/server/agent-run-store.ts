@@ -13,6 +13,7 @@ import { AGENT_REQUEST_SCHEMA } from "./agent-prompt-json";
 import { normalizeAgentRunCanvasSnapshot, selectedCanvasNodeIds } from "./agent-run-canvas-snapshot";
 import { getDramaProject } from "./drama-project-store";
 import { getCanvasProject } from "./canvas-project-store";
+import type { EcommerceGenerationSnapshotRecord } from "./ecommerce-generation-snapshot";
 
 export type AgentRunStatus = "planning" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type AgentRunReviewStatus = "review_pending" | "reviewing" | "review_completed" | "review_unavailable";
@@ -99,6 +100,7 @@ export type AgentRun = {
     plannerStreamMode?: "stream" | "complete";
     plannerStreamFallbackReason?: string;
     plannerAudit?: AgentRunPlannerAudit;
+    ecommerceSnapshot?: EcommerceGenerationSnapshotRecord;
     cancellation?: AgentRunCancellation;
     failure?: string;
     failureStage?: AgentRunFailureStage;
@@ -298,6 +300,7 @@ export async function updateAgentRunById(
             | "plannerStreamMode"
             | "plannerStreamFallbackReason"
             | "plannerAudit"
+            | "ecommerceSnapshot"
             | "cancellation"
             | "failure"
             | "failureStage"

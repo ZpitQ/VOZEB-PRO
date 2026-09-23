@@ -69,9 +69,9 @@ git commit -m "feat: define ecommerce image edit plan contract"
 **Files:**
 - Create: `web/src/lib/server/ecommerce-generation-snapshot.ts`
 - Create: `web/src/lib/server/ecommerce-generation-snapshot.test.ts`
-- Modify: `web/src/lib/server/agent-run-execution.ts`
-- Modify: `web/src/lib/server/agent-run-surface-policy.ts`
-- Modify: `web/src/lib/server/agent-function-call.ts`
+- Modify: `web/src/lib/server/agent-run-executor.ts`
+- Modify: `web/src/lib/server/agent-run-store.ts`
+- Modify: `.env.example`
 - Test: `web/src/lib/server/agent-run-executor.test.ts`
 
 **Interfaces:**
@@ -79,30 +79,30 @@ git commit -m "feat: define ecommerce image edit plan contract"
 - `recordEcommerceGenerationSnapshot(task, snapshot)`：只保存服务端内部的计划、模型角色快照、编译器版本和验收状态。
 - `legacyPlanFallback(input)`：当新计划不完整或开关关闭时，继续走现有 Agent 任务流程。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 验证新开关关闭时生成请求与当前旧路径一致；影子模式不改变任务 prompt 或结果；内部快照不出现在公开 Agent Run、用户消息或公开摘要；新计划解析失败时能记录原因并回退旧流程。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `pnpm exec vitest run web/src/lib/server/agent-run-executor.test.ts web/src/lib/server/ecommerce-generation-snapshot.test.ts`
 
 Expected: FAIL on missing snapshot and shadow-path assertions.
 
-- [ ] **Step 3: 接入影子路径**
+- [x] **Step 3: 接入影子路径**
 
-在 `agent-run-execution.ts` 中保留原有 `normalizeTasks` 和 `dispatchTask` 行为，只在内部生成并记录计划；不得把分析摘要或执行 prompt 写入公开消息。
+在 `agent-run-executor.ts` 中保留原有 `normalizeTasks` 和任务执行行为，只在内部生成并记录快照；不得把分析摘要或执行 prompt 写入公开消息。影子模式由 `ECOMMERCE_GENERATION_ROLLOUT=shadow` 显式开启，默认关闭。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm exec vitest run web/src/lib/server/agent-run-executor.test.ts web/src/lib/server/ecommerce-generation-snapshot.test.ts`
 
 Expected: PASS with legacy behavior unchanged and snapshot fields isolated.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
-git add web/src/lib/server/agent-run-execution.ts web/src/lib/server/agent-run-surface-policy.ts web/src/lib/server/agent-function-call.ts web/src/lib/server/ecommerce-generation-snapshot.ts web/src/lib/server/ecommerce-generation-snapshot.test.ts web/src/lib/server/agent-run-executor.test.ts
+git add .env.example web/src/lib/server/agent-run-executor.ts web/src/lib/server/agent-run-store.ts web/src/lib/server/ecommerce-generation-snapshot.ts web/src/lib/server/ecommerce-generation-snapshot.test.ts web/src/lib/server/agent-run-executor.test.ts
 git commit -m "feat: add shadow ecommerce generation planning"
 ```
 
