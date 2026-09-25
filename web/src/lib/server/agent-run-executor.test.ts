@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import sharp from "sharp";
 import type { CreativeConversationContext } from "@/lib/creative-runtime-contract";
 import { AGENT_PLAN_SCHEMA_VERSION } from "./agent-run-audit";
 import type { AgentRun, AgentRunTask } from "./agent-run-store";
@@ -8,7 +9,10 @@ const mocks = vi.hoisted(() => ({
     fetchInternalApi: vi.fn(),
     getAuthSettings: vi.fn(),
     refundUserPoints: vi.fn(async () => undefined),
-    getCreativeAssetsByIds: vi.fn(async (_ids: string[] = []): Promise<Array<Record<string, unknown>>> => []),
+    getCreativeAssetsByIds: vi.fn(async (_ids: string[] = []): Promise<Array<Record<string, unknown>>> => {
+        void _ids;
+        return [];
+    }),
     listRecentCreativeMediaAssets: vi.fn(async (): Promise<Array<Record<string, unknown>>> => []),
     getCreativeConversationContext: vi.fn(async (): Promise<CreativeConversationContext> => ({ summary: "", summaryThroughSequence: 0, recentMessages: [] })),
     registerCreativeAssets: vi.fn(),
@@ -19,6 +23,13 @@ const mocks = vi.hoisted(() => ({
     updateAgentRunById: vi.fn(),
     updateAgentRunTaskById: vi.fn(),
     scheduleGenerationTask: vi.fn(async () => undefined),
+    analyzeEcommerceReferences: vi.fn(),
+    planEcommerceEdit: vi.fn(),
+    selectCurrentSceneBaseline: vi.fn(),
+    createEditBranch: vi.fn(),
+    checkEcommerceResult: vi.fn(),
+    attachEcommerceTraceToGenerationLogs: vi.fn(async () => ({ updated: 1 })),
+    updateImageTask: vi.fn(async (id: string, patch: Record<string, unknown>) => ({ id, ...patch })),
 }));
 
 vi.mock("@/lib/auth/store", () => ({
@@ -34,7 +45,21 @@ vi.mock("@/lib/server/creative-runtime-store", () => ({
 }));
 vi.mock("@/lib/server/generation-task-store", () => ({ linkStoredGenerationTask: mocks.linkStoredGenerationTask }));
 vi.mock("@/lib/server/generation-task-scheduler", () => ({ scheduleGenerationTask: mocks.scheduleGenerationTask }));
+vi.mock("@/lib/server/generation-log-store", () => ({ attachEcommerceTraceToGenerationLogs: mocks.attachEcommerceTraceToGenerationLogs }));
+vi.mock("@/lib/server/image-task-store", () => ({ updateImageTask: mocks.updateImageTask }));
 vi.mock("@/lib/server/creative-review-service", () => ({ reviewCreativeOutputs: mocks.reviewCreativeOutputs }));
+vi.mock("./ecommerce-visual-analysis", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("./ecommerce-visual-analysis")>();
+    return { ...actual, analyzeEcommerceReferences: mocks.analyzeEcommerceReferences };
+});
+vi.mock("./ecommerce-edit-planner", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("./ecommerce-edit-planner")>();
+    return { ...actual, planEcommerceEdit: mocks.planEcommerceEdit };
+});
+vi.mock("./ecommerce-quality-check", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("./ecommerce-quality-check")>();
+    return { ...actual, checkEcommerceResult: mocks.checkEcommerceResult };
+});
 vi.mock("@/lib/server/agent-run-store", async (importOriginal) => {
     const actual = await importOriginal<typeof import("@/lib/server/agent-run-store")>();
     return {
@@ -42,6 +67,8 @@ vi.mock("@/lib/server/agent-run-store", async (importOriginal) => {
         getAgentRun: vi.fn(async () => mocks.run),
         updateAgentRunById: mocks.updateAgentRunById,
         updateAgentRunTaskById: mocks.updateAgentRunTaskById,
+        selectCurrentSceneBaseline: mocks.selectCurrentSceneBaseline,
+        createEditBranch: mocks.createEditBranch,
     };
 });
 
@@ -57,6 +84,12 @@ describe("executeAgentRun backend settings", () => {
         mocks.events = [];
         mocks.getCreativeAssetsByIds.mockResolvedValue([]);
         mocks.listRecentCreativeMediaAssets.mockResolvedValue([]);
+        mocks.analyzeEcommerceReferences.mockReset();
+        mocks.planEcommerceEdit.mockReset();
+        mocks.selectCurrentSceneBaseline.mockReset().mockResolvedValue(null);
+        mocks.createEditBranch.mockReset().mockImplementation(async (parentResultId: string, run: AgentRun) => ({ parentResultId, branchId: `ecommerce-${run.id}` }));
+        mocks.checkEcommerceResult.mockReset().mockResolvedValue(passedQualityCheck());
+        mocks.updateImageTask.mockReset().mockImplementation(async (id: string, patch: Record<string, unknown>) => ({ id, ...patch }));
         mocks.getCreativeConversationContext.mockResolvedValue({ summary: "", summaryThroughSequence: 0, recentMessages: [] });
         mocks.reviewCreativeOutputs.mockResolvedValue({ mode: "visual", status: "passed", summary: "检查通过", issues: [], retryTaskIds: [] });
         mocks.registerCreativeAssets.mockImplementation(async (inputs: Array<Record<string, unknown>>) => inputs.map((input, index) => ({ ...input, id: `asset-${index}`, status: "ready", createdAt: 1, updatedAt: 1 })));
@@ -115,9 +148,420 @@ describe("executeAgentRun backend settings", () => {
         await executeAgentRun(mocks.run, "http://localhost", "session=test");
 
         expect(mocks.run?.ecommerceSnapshot).toMatchObject({ mode: "shadow", input: { userRequest: "把白底台灯放到明亮客厅", assetIds: ["asset-product"] }, fallback: { reason: "ecommerce_planner_disabled" } });
+        expect(mocks.analyzeEcommerceReferences).not.toHaveBeenCalled();
+        expect(mocks.checkEcommerceResult).not.toHaveBeenCalled();
         const plannerBody = JSON.parse(String(mocks.fetchInternalApi.mock.calls.find(([url]) => url.endsWith("/chat/completions"))?.[1]?.body)) as { messages: Array<{ content: string }> };
         expect(JSON.parse(plannerBody.messages[1].content)).toMatchObject({ requirement: "把白底台灯放到明亮客厅" });
         expect(mocks.run?.tasks).toEqual([]);
+    });
+
+    it("pauses for review when every visual-analysis candidate fails", async () => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+        mocks.run = runFixture({
+            surface: "chat",
+            projectId: undefined,
+            prompt: "生成简约家具图",
+            referencedAssetIds: ["asset-product"],
+            generationPreferences: { mode: "image", image: { count: 1 } },
+        });
+        mocks.getCreativeAssetsByIds.mockResolvedValue([creativeImageAsset("asset-product", "product.png", "upload")]);
+        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
+        mocks.analyzeEcommerceReferences.mockRejectedValue(new Error("all vision candidates rejected the contract"));
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        expect(mocks.run).toMatchObject({
+            status: "paused",
+            tasks: [{ status: "needs_review", error: "无法可靠分析参考图，任务已暂停等待复核。" }],
+            ecommerceSnapshot: { fallback: { reason: "visual_analysis_unavailable" } },
+        });
+        expect(mocks.run).not.toHaveProperty("failure");
+        expect(mocks.planEcommerceEdit).not.toHaveBeenCalled();
+        expect(mocks.fetchInternalApi.mock.calls.some(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"))).toBe(false);
+    });
+
+    it("executes the internal product-to-scene slice and preserves strict reference metadata", async () => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+        const source = await sharp({ create: { width: 64, height: 48, channels: 4, background: "#ffffff" } })
+            .composite([{ input: { create: { width: 20, height: 28, channels: 4, background: "#252525" } }, left: 22, top: 10 }])
+            .png()
+            .toBuffer();
+        mocks.run = runFixture({
+            surface: "chat",
+            projectId: undefined,
+            prompt: "生成简约家具图",
+            referencedAssetIds: ["asset-product"],
+            generationPreferences: { mode: "image", image: { size: "4:3", quality: "high", count: 1 } },
+        });
+        mocks.getCreativeAssetsByIds.mockResolvedValue([
+            {
+                ...creativeImageAsset("asset-product", "product.png", "upload"),
+                remoteUrl: undefined,
+                serverUrl: "/api/reference-assets/product.png",
+                width: 64,
+                height: 48,
+            },
+        ]);
+        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
+        mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceAnalysis("product"));
+        mocks.planEcommerceEdit.mockResolvedValue({
+            plan: ecommercePlan(),
+            modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
+        });
+        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (url.endsWith("/api/reference-assets/product.png")) return new Response(source, { headers: { "content-type": "image/png" } });
+            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-ecommerce" } });
+            if (url.endsWith("/api/image-tasks/child-ecommerce")) {
+                return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/ecommerce.png" } } });
+            }
+            throw new Error("unexpected request: " + url);
+        });
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        expect(mocks.analyzeEcommerceReferences).toHaveBeenCalledOnce();
+        expect(mocks.planEcommerceEdit).toHaveBeenCalledOnce();
+        const createCall = mocks.fetchInternalApi.mock.calls.find(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"));
+        const body = JSON.parse(String(createCall?.[1]?.body)) as {
+            references: Array<Record<string, unknown>>;
+            productProtectionRegions: Record<string, unknown>;
+            ecommerceExecution: Record<string, unknown>;
+        };
+        expect(body.references).toEqual([expect.objectContaining({ id: "asset-product", url: "/api/reference-assets/product.png", width: 64, height: 48 })]);
+        expect(body.productProtectionRegions).toMatchObject({
+            productAnchorId: "asset-product",
+            sourceSize: { width: 64, height: 48 },
+            editableBackground: { mask: { trust: "trusted", provider: "white-background-flood-fill.v1" } },
+        });
+        expect(body.ecommerceExecution).toMatchObject({
+            state: "ready",
+            compilerVersion: "ecommerce-openai-image-2.5.v1",
+            providerProfileId: "gpt-image-2.5-flare",
+            modelSnapshot: {
+                logicalRole: "image_generation",
+                logicalModelId: "image-model",
+                channelId: "image-channel",
+                upstreamModel: "gpt-image-2.5-flare",
+            },
+        });
+        expect(mocks.run).toMatchObject({
+            status: "completed",
+            ecommerceSnapshot: {
+                mode: "active",
+                plan: { operation: "product_to_scene", strategy: "strict_product" },
+                compilerVersion: "ecommerce-openai-image-2.5.v1",
+                modelRouteSnapshots: {
+                    vision_analysis: expect.objectContaining({ logicalRole: "vision_analysis", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" }),
+                    edit_planning: expect.objectContaining({ logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" }),
+                    image_generation: expect.objectContaining({ channelId: "image-channel", upstreamModel: "gpt-image-2.5-flare" }),
+                    quality_check: expect.objectContaining({ logicalRole: "quality_check", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" }),
+                },
+                qualityCheck: expect.objectContaining({ status: "passed", publicStatus: "passed" }),
+            },
+        });
+        expect(mocks.checkEcommerceResult).toHaveBeenCalledOnce();
+        expect(mocks.attachEcommerceTraceToGenerationLogs).toHaveBeenCalledWith(
+            ["child-ecommerce"],
+            expect.objectContaining({
+                version: "ecommerce-generation-trace.v1",
+                runId: mocks.run?.id,
+                finalStatus: "passed",
+                stages: expect.arrayContaining([
+                    expect.objectContaining({ key: "visual_analysis", status: "completed" }),
+                    expect.objectContaining({ key: "edit_planning", status: "completed" }),
+                    expect.objectContaining({ key: "image_generation", status: "completed" }),
+                    expect.objectContaining({ key: "quality_check", status: "passed" }),
+                ]),
+            }),
+        );
+        expect(mocks.updateImageTask).toHaveBeenCalledWith("child-ecommerce", expect.objectContaining({ ecommerceTrace: expect.objectContaining({ finalStatus: "passed" }) }));
+        expect(mocks.updateImageTask.mock.invocationCallOrder[0]).toBeLessThan(mocks.attachEcommerceTraceToGenerationLogs.mock.invocationCallOrder[0]);
+        expect(mocks.checkEcommerceResult.mock.invocationCallOrder[0]).toBeLessThan(mocks.registerCreativeAssets.mock.invocationCallOrder[0]);
+        expect(mocks.events.filter((event) => event.type === "ecommerce.progress").map((event) => event.data)).toEqual([
+            { stage: "identifying_product", text: "正在识别商品" },
+            { stage: "planning_scene", text: "正在规划场景" },
+            { stage: "generating_image", text: "正在生成图片" },
+            { stage: "checking_result", text: "正在检查商品细节" },
+        ]);
+        expect(JSON.stringify(mocks.events)).not.toContain("vision-role-private");
+    });
+
+    it("keeps a hard-failed ecommerce result internal and pauses before asset publication", async () => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+        const source = await sharp({ create: { width: 64, height: 48, channels: 4, background: "#ffffff" } })
+            .composite([{ input: { create: { width: 20, height: 28, channels: 4, background: "#252525" } }, left: 22, top: 10 }])
+            .png()
+            .toBuffer();
+        mocks.run = runFixture({
+            surface: "chat",
+            projectId: undefined,
+            prompt: "生成简约家具图",
+            referencedAssetIds: ["asset-product"],
+            generationPreferences: { mode: "image", image: { size: "4:3", quality: "high", count: 1 } },
+        });
+        mocks.getCreativeAssetsByIds.mockResolvedValue([
+            {
+                ...creativeImageAsset("asset-product", "product.png", ""),
+                remoteUrl: undefined,
+                serverUrl: "/api/reference-assets/product.png",
+                width: 64,
+                height: 48,
+            },
+        ]);
+        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
+        mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceAnalysis("product"));
+        mocks.planEcommerceEdit.mockResolvedValue({
+            plan: ecommercePlan(),
+            modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
+        });
+        mocks.checkEcommerceResult.mockResolvedValue(blockedQualityCheck());
+        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (url.endsWith("/api/reference-assets/product.png")) return new Response(source, { headers: { "content-type": "image/png" } });
+            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-blocked" } });
+            if (url.endsWith("/api/image-tasks/child-blocked")) return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/blocked.png" } } });
+            throw new Error("unexpected request: " + url);
+        });
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        expect(mocks.checkEcommerceResult).toHaveBeenCalledOnce();
+        expect(mocks.registerCreativeAssets).not.toHaveBeenCalled();
+        expect(mocks.run).toMatchObject({
+            status: "paused",
+            assetIds: [],
+            tasks: [{ status: "needs_review", result: { url: "https://cdn.example.com/blocked.png" }, assetIds: [] }],
+            ecommerceSnapshot: { qualityCheck: { status: "blocked", publicStatus: "needs_review" } },
+        });
+        expect(mocks.events).toContainEqual({ type: "ecommerce.quality", data: { status: "needs_review", text: "商品一致性检查未通过，需要复核。" } });
+        expect(JSON.stringify(mocks.events)).not.toContain("product silhouette changed");
+    });
+
+    it("edits one explicitly referenced history result using the recovered product anchor", async () => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+        const sceneBytes = await sharp({ create: { width: 100, height: 80, channels: 4, background: "#d8d8d8" } })
+            .png()
+            .toBuffer();
+        const product = { ...creativeImageAsset("product-anchor", "product.png", ""), serverUrl: "/api/reference-assets/product.png", width: 100, height: 80 };
+        const history = {
+            ...creativeImageAsset("scene-result", "scene.png", ""),
+            serverUrl: "/api/reference-assets/scene.png",
+            width: 100,
+            height: 80,
+            sourceRunId: "run-product-scene",
+            parentAssetId: "product-anchor",
+        };
+        mocks.selectCurrentSceneBaseline.mockResolvedValue(history);
+        mocks.run = runFixture({
+            surface: "chat",
+            projectId: undefined,
+            prompt: "把背景换成厨房",
+            referencedAssetIds: [history.id],
+            generationPreferences: { mode: "image", image: { count: 1 } },
+        });
+        mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[] = []) => {
+            if (ids.includes(history.id)) return [history];
+            if (ids.includes(product.id)) return [product];
+            return [];
+        });
+        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
+        mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceLocalAnalysis());
+        mocks.planEcommerceEdit.mockResolvedValue({
+            plan: ecommerceLocalPlan(["background-main"]),
+            modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
+        });
+        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (url.endsWith("/api/reference-assets/scene.png")) return new Response(sceneBytes, { headers: { "content-type": "image/png" } });
+            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-local-edit" } });
+            if (url.endsWith("/api/image-tasks/child-local-edit")) return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/local-edit.png" } } });
+            throw new Error("unexpected request: " + url);
+        });
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        const createCall = mocks.fetchInternalApi.mock.calls.find(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"));
+        const body = JSON.parse(String(createCall?.[1]?.body)) as { references: Array<Record<string, unknown>>; productProtectionRegions: Record<string, unknown> };
+        expect(body.references).toEqual([expect.objectContaining({ id: "scene-result", ecommerceRole: "scene" }), expect.objectContaining({ id: "product-anchor", ecommerceRole: "product" })]);
+        expect(body.productProtectionRegions).toMatchObject({ productAnchorId: "product-anchor", sourceAssetId: "scene-result" });
+        expect(mocks.run).toMatchObject({ status: "completed", ecommerceSnapshot: { plan: { operation: "local_edit", source: { currentSceneBaselineId: "scene-result" } } } });
+    });
+
+    it("continues the latest completed scene without a new upload", async () => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+        const sceneBytes = await sharp({ create: { width: 100, height: 80, channels: 4, background: "#d8d8d8" } })
+            .png()
+            .toBuffer();
+        const product = { ...creativeImageAsset("product-anchor", "product.png", ""), serverUrl: "/api/reference-assets/product.png", width: 100, height: 80 };
+        const history = {
+            ...creativeImageAsset("scene-result", "scene.png", ""),
+            serverUrl: "/api/reference-assets/scene.png",
+            width: 100,
+            height: 80,
+            sourceRunId: "run-product-scene",
+            parentAssetId: product.id,
+        };
+        mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "再亮一点", referencedAssetIds: [], generationPreferences: { mode: "image", image: { count: 1 } } });
+        mocks.listRecentCreativeMediaAssets.mockResolvedValue([history]);
+        mocks.selectCurrentSceneBaseline.mockResolvedValue(history);
+        mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[] = []) => (ids.includes(product.id) ? [product] : []));
+        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
+        mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceLocalAnalysis());
+        mocks.planEcommerceEdit.mockResolvedValue({
+            plan: ecommerceLocalPlan(["background-main"], "再亮一点"),
+            modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
+        });
+        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (url.endsWith("/api/reference-assets/scene.png")) return new Response(sceneBytes, { headers: { "content-type": "image/png" } });
+            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-continuation" } });
+            if (url.endsWith("/api/image-tasks/child-continuation")) return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/brighter.png" } } });
+            throw new Error("unexpected request: " + url);
+        });
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        expect(mocks.selectCurrentSceneBaseline).toHaveBeenCalledWith(mocks.run?.conversationId, undefined, mocks.run?.userId);
+        expect(mocks.createEditBranch).toHaveBeenCalledWith(history.id, expect.objectContaining({ id: mocks.run?.id }), expect.any(String));
+        expect(mocks.run).toMatchObject({ status: "completed", ecommerceSnapshot: { plan: { source: { productAnchorId: product.id, currentSceneBaselineId: history.id } } } });
+    });
+
+    it("uses an uploaded empty room as a scene reference while retaining product and branch IDs", async () => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+        const productBytes = await sharp({ create: { width: 64, height: 48, channels: 4, background: "#ffffff" } })
+            .composite([{ input: { create: { width: 20, height: 28, channels: 4, background: "#252525" } }, left: 22, top: 10 }])
+            .png()
+            .toBuffer();
+        const product = { ...creativeImageAsset("product-anchor", "product.png", ""), serverUrl: "/api/reference-assets/product.png", width: 64, height: 48 };
+        const room = { ...creativeImageAsset("scene-reference", "room.png", ""), serverUrl: "/api/reference-assets/room.png", width: 64, height: 48 };
+        const history = { ...creativeImageAsset("scene-result", "previous.png", ""), sourceRunId: "run-prior", parentAssetId: product.id };
+        mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "改成这个房间", referencedAssetIds: [room.id], generationPreferences: { mode: "image" } });
+        mocks.selectCurrentSceneBaseline.mockResolvedValue(history);
+        mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[] = []) => (ids.includes(room.id) ? [room] : ids.includes(product.id) ? [product] : []));
+        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
+        const analysis = ecommerceLocalAnalysis();
+        mocks.analyzeEcommerceReferences.mockResolvedValue({ ...analysis, references: [{ ...analysis.references[0], assetId: room.id, productCore: null, fusionHalo: null, editableTargets: [] }, analysis.references[1]] });
+        mocks.planEcommerceEdit.mockResolvedValue({
+            plan: { ...ecommercePlan(), source: { productAnchorId: product.id, currentSceneBaselineId: null, sceneReferenceIds: [room.id] }, continuity: { parentResultId: history.id, branchId: "ecommerce-agent-run" } },
+            modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
+        });
+        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (url.endsWith("/api/reference-assets/product.png")) return new Response(productBytes, { headers: { "content-type": "image/png" } });
+            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-room" } });
+            if (url.endsWith("/api/image-tasks/child-room")) return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/new-room.png" } } });
+            throw new Error("unexpected request: " + url);
+        });
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        expect(mocks.analyzeEcommerceReferences).toHaveBeenCalledWith(
+            expect.objectContaining({ planningInput: expect.objectContaining({ assetCandidates: [expect.objectContaining({ id: room.id }), expect.objectContaining({ id: product.id })] }) }),
+            expect.anything(),
+        );
+        expect(mocks.run).toMatchObject({
+            status: "completed",
+            ecommerceSnapshot: { plan: { operation: "product_to_scene", source: { productAnchorId: product.id, currentSceneBaselineId: null, sceneReferenceIds: [room.id] }, continuity: { parentResultId: history.id } } },
+        });
+    });
+
+    it("uses both new uploads instead of the inherited product when replacing the product", async () => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+        const replacementBytes = await sharp({ create: { width: 64, height: 48, channels: 4, background: "#ffffff" } })
+            .composite([{ input: { create: { width: 20, height: 28, channels: 4, background: "#252525" } }, left: 22, top: 10 }])
+            .png()
+            .toBuffer();
+        const replacement = { ...creativeImageAsset("replacement-product", "replacement.png", ""), serverUrl: "/api/reference-assets/replacement.png", width: 64, height: 48 };
+        const room = { ...creativeImageAsset("room-reference", "room.png", ""), serverUrl: "/api/reference-assets/room.png", width: 64, height: 48 };
+        const oldAnchor = { ...creativeImageAsset("product-anchor", "old-product.png", ""), serverUrl: "/api/reference-assets/old-product.png" };
+        const history = { ...creativeImageAsset("scene-result", "previous.png", ""), sourceRunId: "run-prior", parentAssetId: oldAnchor.id };
+        mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "换成新商品，放进这个房间", referencedAssetIds: [replacement.id, room.id], generationPreferences: { mode: "image" } });
+        mocks.selectCurrentSceneBaseline.mockResolvedValue(history);
+        mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[] = []) => (ids.includes(oldAnchor.id) ? [oldAnchor] : [replacement, room].filter((asset) => ids.includes(asset.id))));
+        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
+        const analysis = ecommerceLocalAnalysis();
+        mocks.analyzeEcommerceReferences.mockResolvedValue({
+            ...analysis,
+            references: [
+                { ...analysis.references[1], assetId: replacement.id },
+                { ...analysis.references[0], assetId: room.id, productCore: null, fusionHalo: null, editableTargets: [] },
+            ],
+        });
+        mocks.planEcommerceEdit.mockResolvedValue({
+            plan: { ...ecommercePlan(), source: { productAnchorId: replacement.id, currentSceneBaselineId: null, sceneReferenceIds: [room.id] }, continuity: { parentResultId: history.id, branchId: "ecommerce-agent-run" } },
+            modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
+        });
+        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (url.endsWith("/api/reference-assets/replacement.png")) return new Response(replacementBytes, { headers: { "content-type": "image/png" } });
+            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-replacement" } });
+            if (url.endsWith("/api/image-tasks/child-replacement")) return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/replacement-room.png" } } });
+            throw new Error("unexpected request: " + url);
+        });
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        expect(mocks.analyzeEcommerceReferences).toHaveBeenCalledWith(
+            expect.objectContaining({ planningInput: expect.objectContaining({ assetCandidates: [expect.objectContaining({ id: replacement.id }), expect.objectContaining({ id: room.id })] }) }),
+            expect.anything(),
+        );
+        expect(mocks.planEcommerceEdit).toHaveBeenCalledWith(
+            expect.objectContaining({ sources: expect.objectContaining({ productAnchorId: replacement.id, sceneReferenceIds: [room.id], parentResultId: history.id }) }),
+            expect.anything(),
+            expect.anything(),
+        );
+        expect(mocks.createEditBranch).toHaveBeenCalledWith(history.id, expect.objectContaining({ id: mocks.run?.id }), expect.any(String));
+        expect(mocks.run).toMatchObject({
+            status: "completed",
+            ecommerceSnapshot: { plan: { operation: "product_to_scene", source: { productAnchorId: replacement.id, currentSceneBaselineId: null, sceneReferenceIds: [room.id] }, continuity: { parentResultId: history.id } } },
+        });
+    });
+
+    it("pauses an ambiguous local edit target without creating a provider task", async () => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+        const product = { ...creativeImageAsset("product-anchor", "product.png", ""), serverUrl: "/api/reference-assets/product.png", width: 100, height: 80 };
+        const history = {
+            ...creativeImageAsset("scene-result", "scene.png", ""),
+            serverUrl: "/api/reference-assets/scene.png",
+            width: 100,
+            height: 80,
+            sourceRunId: "run-product-scene",
+            parentAssetId: "product-anchor",
+        };
+        mocks.selectCurrentSceneBaseline.mockResolvedValue(history);
+        mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "去掉绿植", referencedAssetIds: [history.id], generationPreferences: { mode: "image" } });
+        mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[] = []) => (ids.includes(history.id) ? [history] : ids.includes(product.id) ? [product] : []));
+        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
+        mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceLocalAnalysis());
+        mocks.planEcommerceEdit.mockResolvedValue({
+            plan: ecommerceLocalPlan(["plant-left", "plant-right"], "去掉绿植"),
+            modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
+        });
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        expect(mocks.planEcommerceEdit).toHaveBeenCalledOnce();
+        expect(mocks.run).toMatchObject({ status: "paused", tasks: [expect.objectContaining({ status: "needs_review", error: "检测到多个可编辑目标，请明确要修改哪一个位置或物品。" })] });
+        expect(mocks.fetchInternalApi.mock.calls.some(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"))).toBe(false);
+    });
+
+    it("persists ambiguous ecommerce references as needs_review without submitting a provider task", async () => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+        mocks.run = runFixture({
+            surface: "chat",
+            projectId: undefined,
+            prompt: "生成场景图",
+            referencedAssetIds: ["asset-unknown"],
+            generationPreferences: { mode: "image" },
+        });
+        mocks.getCreativeAssetsByIds.mockResolvedValue([creativeImageAsset("asset-unknown", "unknown.png", "https://cdn.example.com/unknown.png")]);
+        mocks.getAuthSettings.mockResolvedValue(settings("image-model", "image-channel"));
+        mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceAnalysis("unknown"));
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        expect(mocks.run).toMatchObject({
+            status: "paused",
+            tasks: [expect.objectContaining({ id: "ecommerce-product-scene", status: "needs_review", error: expect.any(String) })],
+            ecommerceSnapshot: { mode: "active", fallback: { reason: expect.any(String) } },
+        });
+        expect(mocks.planEcommerceEdit).not.toHaveBeenCalled();
+        expect(mocks.fetchInternalApi.mock.calls.some(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"))).toBe(false);
     });
 
     it("preserves generated media dimensions in canvas output ops", () => {
@@ -216,31 +660,48 @@ describe("executeAgentRun backend settings", () => {
         expect(mocks.events.some((event) => event.type === "run.review.needs_revision")).toBe(true);
     });
 
-    it("runs an explicitly selected generation model without a default text model", async () => {
-        mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "生成商品主图", requestedModelIds: ["image-model"] });
+    it("plans a chat request before executing every explicitly selected generation model", async () => {
+        mocks.run = runFixture({
+            surface: "chat",
+            projectId: undefined,
+            prompt: "把白底台灯放到明亮的现代客厅",
+            requestedModelIds: ["image-model"],
+            referencedAssetIds: ["asset-product"],
+            generationPreferences: { mode: "image" },
+        });
         mocks.getCreativeConversationContext.mockResolvedValue({
             summary: "同一商品使用红色包装",
             summaryThroughSequence: 1,
             recentMessages: [],
         });
-        const manualSettings = settings("image-model", "image-channel") as unknown as {
-            defaultModels: { textModel: string };
-            systemChannels: Array<{ id: string }>;
-            logicalModels: Array<{ capability: string }>;
+        mocks.getCreativeAssetsByIds.mockResolvedValue([creativeImageAsset("asset-product", "白底台灯", "https://cdn.example.com/product.png")]);
+        mocks.getAuthSettings.mockResolvedValue(settings("image-model", "image-channel"));
+        const basePlan = canvasPlan("image-model");
+        const plan = {
+            ...basePlan,
+            deliverables: [{ ...basePlan.deliverables[0], prompt: "保留台灯外观，将白底替换为明亮现代客厅，使用自然窗光和真实接触阴影", assetIds: ["asset-product"] }],
         };
-        manualSettings.defaultModels.textModel = "";
-        manualSettings.systemChannels = manualSettings.systemChannels.filter((channel) => channel.id !== "planner-channel");
-        manualSettings.logicalModels = manualSettings.logicalModels.filter((model) => model.capability !== "text");
-        mocks.getAuthSettings.mockResolvedValue(manualSettings as never);
+        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (url.endsWith("/chat/completions")) return Response.json({ output: [{ type: "function_call", name: "create_agent_plan", arguments: JSON.stringify(plan) }] });
+            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-planned" } });
+            if (url.endsWith("/api/image-tasks/child-planned")) return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/planned.png" } } });
+            throw new Error(`unexpected request: ${url}`);
+        });
 
         await executeAgentRun(mocks.run, "http://localhost", "session=test");
 
         expect(mocks.getCreativeConversationContext).toHaveBeenCalledWith("conversation", "user", "agent-run");
         expect(mocks.listRecentCreativeMediaAssets).not.toHaveBeenCalled();
-        expect(mocks.fetchInternalApi.mock.calls.some(([url]) => String(url).endsWith("/responses") || String(url).endsWith("/chat/completions"))).toBe(false);
+        const planningCall = mocks.fetchInternalApi.mock.calls.find(([url]) => String(url).endsWith("/chat/completions"));
+        expect(planningCall).toBeDefined();
+        const planningBody = JSON.parse(String(planningCall?.[1]?.body)) as { messages: Array<{ content: string }> };
+        const planningInput = JSON.parse(planningBody.messages[1].content) as { requestedModelIds: string[]; availableModels: Array<{ id: string }>; conversationContext: { summary: string } };
+        expect(planningInput.requestedModelIds).toEqual(["image-model"]);
+        expect(planningInput.availableModels.map((model) => model.id)).toEqual(["image-model"]);
+        expect(planningInput.conversationContext.summary).toBe("同一商品使用红色包装");
         expect(mocks.fetchInternalApi.mock.calls.some(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"))).toBe(true);
-        expect(mocks.run?.tasks[0]).toMatchObject({ optimizedPrompt: "生成商品主图" });
-        expect(mocks.run?.tasks[0]?.prompt).toContain("同一商品使用红色包装");
+        expect(mocks.run?.tasks[0]).toMatchObject({ model: "image-model", optimizedPrompt: plan.deliverables[0].prompt });
+        expect(mocks.run?.plannerAudit).toMatchObject({ mode: "model", logicalModelId: "planner" });
         expect(mocks.run?.status).toBe("completed");
     });
 
@@ -1164,3 +1625,145 @@ describe("executeAgentRun backend settings", () => {
         expect(mocks.run?.status).toBe("cancelled");
     });
 });
+
+function ecommerceSettings() {
+    const value = settings("image-model", "image-channel") as unknown as {
+        systemChannels: Array<{ id: string; apiFormat?: string; models: string[] }>;
+        logicalModels: Array<{ id: string; bindings: Array<{ upstreamModel: string }> }>;
+    };
+    const channel = value.systemChannels.find((item) => item.id === "image-channel");
+    const model = value.logicalModels.find((item) => item.id === "image-model");
+    if (!channel || !model) throw new Error("missing ecommerce image fixture");
+    channel.apiFormat = "openai";
+    channel.models = ["gpt-image-2.5-flare"];
+    model.bindings[0].upstreamModel = "gpt-image-2.5-flare";
+    return value as never;
+}
+
+function ecommerceAnalysis(role: "product" | "unknown") {
+    return {
+        analysisVersion: "ecommerce-visual-analysis.v1" as const,
+        modelRole: {
+            logicalRole: "vision_analysis" as const,
+            logicalModelId: "planner",
+            channelId: "planner-channel",
+            upstreamModel: "vendor/planner",
+        },
+        references: [
+            role === "product"
+                ? {
+                      assetId: "asset-product",
+                      role,
+                      confidence: "high" as const,
+                      visualEvidence: { whiteBackground: true, transparentBackground: false, isolatedSubject: true, completeScene: false },
+                      productFacts: { identity: "chair", outline: "chair", color: "oak", material: "wood", brandText: [], view: "front" },
+                      sceneFacts: null,
+                      productCore: { x: 0.3, y: 0.2, width: 0.4, height: 0.6 },
+                      fusionHalo: { x: 0.25, y: 0.15, width: 0.5, height: 0.7 },
+                      editableTargets: [],
+                  }
+                : {
+                      assetId: "asset-unknown",
+                      role,
+                      confidence: "low" as const,
+                      visualEvidence: { whiteBackground: false, transparentBackground: false, isolatedSubject: false, completeScene: false },
+                      productFacts: null,
+                      sceneFacts: null,
+                      productCore: null,
+                      fusionHalo: null,
+                      editableTargets: [],
+                  },
+        ],
+    };
+}
+
+function ecommercePlan() {
+    return {
+        planVersion: "ecommerce-edit.v1" as const,
+        operation: "product_to_scene" as const,
+        source: { productAnchorId: "asset-product", currentSceneBaselineId: null, sceneReferenceIds: [] },
+        baseline: {
+            productFacts: { identity: "chair", outline: "chair", color: "oak", material: "wood", brandText: [], view: "front" },
+            sceneFacts: { space: "living room", composition: "eye level", lighting: "soft daylight" },
+        },
+        delta: { requestedChanges: ["place in room"], targetObjects: ["scene"], targetRegions: ["background"] },
+        preserve: { productCore: ["outline", "brand_text", "color", "material", "scale", "view"], sceneElements: [] },
+        strategy: "strict_product" as const,
+        modelRoles: { visionAnalysis: "vision-role-private", editPlanning: "planner", generation: "image-model", qualityCheck: "planner" },
+        continuity: { parentResultId: null, branchId: "ecommerce-agent-run" },
+        validation: { requiredChecks: ["product_identity"] },
+    };
+}
+
+function passedQualityCheck() {
+    return {
+        version: "ecommerce-quality.v1" as const,
+        status: "passed" as const,
+        publicStatus: "passed" as const,
+        modelRole: { logicalRole: "quality_check" as const, capability: "text" as const, logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner", apiFormat: "openai" as const },
+        checks: [],
+        hardFailures: [],
+        internalReason: "all required checks passed",
+        checkedAt: 1,
+    };
+}
+
+function blockedQualityCheck() {
+    return {
+        ...passedQualityCheck(),
+        status: "blocked" as const,
+        publicStatus: "needs_review" as const,
+        checks: [{ resultId: "child-blocked", key: "product_silhouette" as const, status: "failed" as const, reason: "product silhouette changed" }],
+        hardFailures: [{ resultId: "child-blocked", key: "product_silhouette" as const, status: "failed" as const, reason: "product silhouette changed" }],
+        internalReason: "product silhouette changed",
+    };
+}
+
+function ecommerceLocalAnalysis() {
+    return {
+        analysisVersion: "ecommerce-visual-analysis.v1" as const,
+        modelRole: { logicalRole: "vision_analysis" as const, logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
+        references: [
+            {
+                assetId: "scene-result",
+                role: "scene" as const,
+                confidence: "high" as const,
+                visualEvidence: { whiteBackground: false, transparentBackground: false, isolatedSubject: false, completeScene: true },
+                productFacts: null,
+                sceneFacts: { space: "living room", composition: "eye level", lighting: "soft daylight" },
+                productCore: { x: 0.4, y: 0.25, width: 0.2, height: 0.5 },
+                fusionHalo: { x: 0.35, y: 0.2, width: 0.3, height: 0.6 },
+                editableTargets: [
+                    { id: "background-main", kind: "background" as const, label: "main background", region: { x: 0, y: 0, width: 1, height: 1 } },
+                    { id: "plant-left", kind: "prop" as const, label: "left plant", region: { x: 0.02, y: 0.2, width: 0.2, height: 0.58 } },
+                    { id: "plant-right", kind: "prop" as const, label: "right plant", region: { x: 0.72, y: 0.2, width: 0.2, height: 0.58 } },
+                ],
+            },
+            {
+                assetId: "product-anchor",
+                role: "product" as const,
+                confidence: "high" as const,
+                visualEvidence: { whiteBackground: true, transparentBackground: false, isolatedSubject: true, completeScene: false },
+                productFacts: { identity: "chair", outline: "chair", color: "oak", material: "wood", brandText: [], view: "front" },
+                sceneFacts: null,
+                productCore: { x: 0.3, y: 0.2, width: 0.4, height: 0.6 },
+                fusionHalo: { x: 0.25, y: 0.15, width: 0.5, height: 0.7 },
+                editableTargets: [],
+            },
+        ],
+    };
+}
+
+function ecommerceLocalPlan(targetObjects: string[], request = "把背景换成厨房") {
+    return {
+        ...ecommercePlan(),
+        operation: "local_edit" as const,
+        source: { productAnchorId: "product-anchor", currentSceneBaselineId: "scene-result", sceneReferenceIds: [] },
+        baseline: {
+            productFacts: { identity: "chair", outline: "chair", color: "oak", material: "wood", brandText: [], view: "front" },
+            sceneFacts: { space: "living room", composition: "eye level", lighting: "soft daylight" },
+        },
+        delta: { requestedChanges: [request], targetObjects, targetRegions: [] },
+        continuity: { parentResultId: "scene-result", branchId: "ecommerce-agent-run" },
+    };
+}

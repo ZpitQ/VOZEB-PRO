@@ -1,6 +1,7 @@
 import { registerCreativeAssets } from "@/lib/server/creative-runtime-store";
 import { agentTaskResultItems } from "@/lib/server/agent-run-result-items";
 import type { AgentRun, AgentRunTask } from "@/lib/server/agent-run-store";
+import { ecommerceProductAnchorIdFromRun } from "./ecommerce-reference-roles";
 
 export async function registerAgentTaskAssets(run: AgentRun, task: AgentRunTask, result: unknown, sourceTaskIds: string[]) {
     const records: Array<{ record: Record<string, unknown>; textContent?: string; location?: NonNullable<ReturnType<typeof persistentMediaLocation>> }> = [];
@@ -14,7 +15,10 @@ export async function registerAgentTaskAssets(run: AgentRun, task: AgentRunTask,
         if (location) records.push({ record, location });
     }
     const inputs: Parameters<typeof registerCreativeAssets>[0] = [];
-    const parentAssetIds = Array.from(new Set([task.referenceAssetId, ...(task.references || []).map((item) => item.assetId)].filter((item): item is string => Boolean(item))));
+    const productAnchorId = task.type === "image" ? ecommerceProductAnchorIdFromRun(run) : undefined;
+    const continuity = run.ecommerceSnapshot?.continuity || run.ecommerceSnapshot?.plan?.continuity;
+    const ecommerceContinuity = productAnchorId && continuity ? { productAnchorId, sceneBaselineId: run.ecommerceSnapshot?.plan?.source.currentSceneBaselineId || null, parentResultId: continuity.parentResultId, branchId: continuity.branchId } : undefined;
+    const parentAssetIds = Array.from(new Set([productAnchorId, task.referenceAssetId, ...(task.references || []).map((item) => item.assetId)].filter((item): item is string => Boolean(item))));
     records.forEach(({ record, textContent, location }, ordinal) => {
         const sourceTaskId = sourceTaskIds[Math.min(ordinal, Math.max(0, sourceTaskIds.length - 1))] || `direct-${run.id}-${task.id}`;
         const base = {
@@ -27,7 +31,7 @@ export async function registerAgentTaskAssets(run: AgentRun, task: AgentRunTask,
             ordinal,
             type: task.type,
             title: records.length > 1 ? `${task.title} ${ordinal + 1}` : task.title,
-            metadata: { agentTaskId: task.id, model: task.model, surface: run.surface, projectId: run.projectId, parentAssetIds, ...publicResultMetadata(record) },
+            metadata: { agentTaskId: task.id, model: task.model, surface: run.surface, projectId: run.projectId, parentAssetIds, ...(ecommerceContinuity ? { ecommerceContinuity } : {}), ...publicResultMetadata(record) },
         };
         if (task.type === "text") {
             if (textContent) inputs.push({ ...base, textContent });

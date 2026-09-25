@@ -353,6 +353,18 @@ export class GenerationLogsRepository {
         return this.attachAssets(result.rows.map(mapGenerationLog));
     }
 
+    async updateEcommerceTraceByTaskIds(taskIds: string[], trace: unknown) {
+        const ids = Array.from(new Set(taskIds.map((id) => id.trim()).filter(Boolean)));
+        if (!ids.length) return 0;
+        const result = await this.db.query(
+            `UPDATE generation_logs
+             SET ecommerce_trace = $2::jsonb, updated_at = now()
+             WHERE task_id = ANY($1::text[])`,
+            [ids, JSON.stringify(trace || {})],
+        );
+        return result.rowCount || 0;
+    }
+
     async listByUserIdBatch(userId: string, batchSize: number, forUpdate = false) {
         const targetUserId = userId.trim();
         if (!targetUserId) return [];

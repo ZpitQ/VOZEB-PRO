@@ -6,6 +6,9 @@ import type { GenerationAttempt } from "@/lib/server/generation-attempt";
 import type { GenerationLogSource } from "@/lib/server/generation-log-store";
 import { countActiveStoredGenerationTasks, createStoredGenerationTask, getStoredGenerationTask, mutateStoredGenerationTask, touchStoredGenerationTask, transitionStoredGenerationTask, type GenerationTaskContext } from "@/lib/server/generation-task-store";
 import { GENERATION_TASK_RETENTION_MS } from "@/lib/server/generation-task-retention";
+import type { ProductProtectionSnapshot } from "@/lib/server/ecommerce-product-regions";
+import type { EcommerceCompiledImageRequest } from "@/lib/server/ecommerce-image-compiler";
+import type { EcommerceGenerationTrace } from "@/lib/server/ecommerce-generation-trace";
 
 type ImageTaskKind = "generation" | "edit";
 type ImageTaskStatus = "pending" | "running" | "success" | "error" | "cancelled";
@@ -38,6 +41,7 @@ export type ImageTaskReference = {
     width?: number;
     height?: number;
     editRegion?: ImageEditRegion;
+    ecommerceRole?: "product" | "scene";
 };
 
 export type StoredImageTaskMediaResult = {
@@ -65,6 +69,9 @@ export type ImageTask = GenerationTaskContext & {
     prompt: string;
     references: ImageTaskReference[];
     mask?: ImageTaskReference;
+    productProtection?: ProductProtectionSnapshot;
+    ecommerceExecution?: EcommerceCompiledImageRequest;
+    ecommerceTrace?: EcommerceGenerationTrace;
     result?: StoredImageTaskMediaResult & { results?: StoredImageTaskMediaResult[] };
     upstream?: { id: string; mediaBaseUrl: string; pollBaseUrl: string; explicitPollUrl?: string };
     billing?: { pointsCost: number; pointsRecordId?: string; refunded: boolean };
@@ -110,6 +117,6 @@ export function touchImageTask(id: string) {
     return touchStoredGenerationTask("image", id, Date.now(), GENERATION_TASK_RETENTION_MS);
 }
 
-export async function updateImageTask(id: string, patch: Partial<Pick<ImageTask, "config" | "candidateConfigs" | "attempts" | "attemptNo" | "upstream" | "billing" | "result" | "retryable">>) {
+export async function updateImageTask(id: string, patch: Partial<Pick<ImageTask, "config" | "candidateConfigs" | "attempts" | "attemptNo" | "upstream" | "billing" | "result" | "retryable" | "ecommerceTrace">>) {
     return mutateStoredGenerationTask<ImageTask>("image", id, GENERATION_TASK_RETENTION_MS, (task) => ({ ...task, ...patch }));
 }

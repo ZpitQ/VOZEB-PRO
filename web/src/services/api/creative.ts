@@ -219,6 +219,12 @@ export function watchCreativeAgentRun(runId: string, handlers: CreativeRunHandle
     listen("run.planning.context_ready", () => handlers.onProgress("需要的内容已经准备好，正在为你整理创作思路…"));
     listen("run.planning.model_connected", () => handlers.onProgress("创作思路已经理清，正在安排接下来的步骤…"));
     listen("run.planning.validating", () => handlers.onProgress("正在确认创作步骤，很快就可以开始…"));
+    listen("ecommerce.progress", ({ data }) => {
+        const stage = text(data?.stage);
+        if (stage === "identifying_product") handlers.onProgress("正在识别商品");
+        if (stage === "planning_scene") handlers.onProgress("正在规划场景");
+        if (stage === "generating_image") handlers.onProgress("正在生成图片");
+    });
     listen("skills.selected", () => handlers.onProgress("正在挑选更合适的创作方式…"));
     listen("run.planned", ({ data }) => {
         void refreshUserPointsIfSystem("system");

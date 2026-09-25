@@ -13,6 +13,7 @@ import { toSafeGenerationErrorMessage } from "@/lib/server/generation-errors";
 import { generationModelId, toSystemGenerationChannel } from "@/lib/server/generation-channel";
 import { finishGenerationAttempt, startGenerationAttempt } from "@/lib/server/generation-attempt";
 import { resolveLogicalModelCandidates } from "@/lib/server/logical-model-router";
+import { routeEcommerceRole, type EcommerceRoleRouteSnapshot } from "@/lib/server/ecommerce-model-routing";
 import { resolveChannelModelConfig } from "@/lib/channel-protocol-registry";
 import { assertReferenceCapabilities } from "@/lib/server/provider-task-config";
 import { countActiveImageTasksForUser, createImageTask, getImageTask, touchImageTask, transitionImageTask, type ImageTask, type ImageTaskConfig, type ImageTaskReference, updateImageTask } from "@/lib/server/image-task-store";
@@ -67,9 +68,11 @@ export function publicTask(task: ImageTask) {
     };
 }
 
-export function sanitizeConfigs(config: ImageTaskConfig | undefined, settings: Awaited<ReturnType<typeof getAuthSettings>>): ImageTaskConfig[] {
+export function sanitizeConfigs(config: ImageTaskConfig | undefined, settings: Awaited<ReturnType<typeof getAuthSettings>>, ecommerceSnapshot?: EcommerceRoleRouteSnapshot): ImageTaskConfig[] {
     const requestedModel = config?.model || settings.defaultModels.imageModel;
-    return resolveLogicalModelCandidates(settings, "image", requestedModel).map((resolved) => {
+    const resolvedCandidates = ecommerceSnapshot ? [routeEcommerceRole(settings, "image_generation", ecommerceSnapshot)].filter(Boolean) : resolveLogicalModelCandidates(settings, "image", requestedModel);
+    return resolvedCandidates.map((resolved) => {
+        if (!resolved) throw new Error("电商生图执行快照已失效");
         const channel = toSystemGenerationChannel(resolved);
         return {
             ...channel,
@@ -642,6 +645,20 @@ export function shouldTryNextImageResponseFormat(responseFormat: (typeof IMAGE_R
     if (responseFormat === "url") return /response[_ -]?format|url|unsupported|not supported|invalid/i.test(message);
     if (responseFormat === "b64_json") return /response[_ -]?format|b64|base64|unsupported|not supported|invalid/i.test(message);
     return false;
+}
+
+export function assertStrictProductProviderTask(task: ImageTask, provider: "openai" | "gemini") {
+    const protection = task.productProtection;
+    if (!protection) return;
+    if (protection.state !== "ready" || !task.mask) {
+        throw new GenerationSubmissionSafeFailure(protection.reason || "严格商品任务缺少可信商品蒙版");
+    }
+    if (provider !== "openai" || task.config.apiFormat !== "openai") {
+        throw new GenerationSubmissionSafeFailure("当前 provider 不支持可信独立蒙版，严格商品任务需要人工复核");
+    }
+    if (task.mask.width !== protection.sourceSize.width || task.mask.height !== protection.sourceSize.height) {
+        throw new GenerationSubmissionSafeFailure("严格商品蒙版尺寸与源图不一致");
+    }
 }
 
 /** Explicit admin presets own one request shape; only legacy auto/compatible channels may probe alternatives. */

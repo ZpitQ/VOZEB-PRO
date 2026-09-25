@@ -88,6 +88,23 @@ describe("统一创作 Agent 事件流", () => {
         expect(progress.join(" ")).not.toContain("must stay private");
     });
 
+    it("maps ecommerce stages from the public stage enum and ignores private payload fields", () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const progress: string[] = [];
+        watchCreativeAgentRun("run-ecommerce", {
+            onProgress: (text) => progress.push(text),
+            onTerminal: () => undefined,
+            onConnectionError: () => undefined,
+        });
+
+        FakeEventSource.instance.emit("ecommerce.progress", { data: { stage: "identifying_product", plan: "private" } });
+        FakeEventSource.instance.emit("ecommerce.progress", { data: { stage: "planning_scene", prompt: "private" } });
+        FakeEventSource.instance.emit("ecommerce.progress", { data: { stage: "generating_image", modelRoles: "private" } });
+
+        expect(progress).toEqual(["正在识别商品", "正在规划场景", "正在生成图片"]);
+        expect(progress.join(" ")).not.toContain("private");
+    });
+
     it("reports terminal failure without asking the user to choose a target", () => {
         vi.stubGlobal("EventSource", FakeEventSource);
         const terminal: unknown[] = [];

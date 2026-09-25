@@ -42,6 +42,43 @@ describe("registerAgentTaskAssets", () => {
             expect.objectContaining({ ordinal: 1, remoteUrl: "https://cdn.example.com/two.mp4" }),
         ]);
     });
+
+    it("keeps the ecommerce product anchor first in generated asset lineage", async () => {
+        const ecommerceRun = {
+            ...run(),
+            ecommerceSnapshot: {
+                version: "ecommerce-generation.v1",
+                mode: "active",
+                input: { userRequest: "生成场景图", assetIds: ["asset-product", "asset-scene"], conversationId: "conversation-one", surface: "chat" },
+                plan: { source: { productAnchorId: "asset-product", currentSceneBaselineId: "asset-scene" } },
+                continuity: { parentResultId: "asset-scene", branchId: "ecommerce-run-one" },
+                createdAt: 1,
+                runId: "run-one",
+                userId: "user-one",
+            } as AgentRun["ecommerceSnapshot"],
+        };
+        await registerAgentTaskAssets(
+            ecommerceRun,
+            {
+                ...task(),
+                type: "image",
+                referenceAssetId: "asset-scene",
+                references: [{ assetId: "asset-scene", type: "image", url: "/api/reference-assets/permanent/scene.png" }],
+            },
+            { url: "https://cdn.example.com/result.png" },
+            ["image-task-one"],
+        );
+
+        expect(mocks.registerCreativeAssets).toHaveBeenCalledWith([
+            expect.objectContaining({
+                parentAssetId: "asset-product",
+                metadata: expect.objectContaining({
+                    parentAssetIds: ["asset-product", "asset-scene"],
+                    ecommerceContinuity: { productAnchorId: "asset-product", sceneBaselineId: "asset-scene", parentResultId: "asset-scene", branchId: "ecommerce-run-one" },
+                }),
+            }),
+        ]);
+    });
 });
 
 function run(): AgentRun {

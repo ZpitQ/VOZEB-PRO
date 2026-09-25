@@ -11,6 +11,13 @@ describe("creative generation waiting", () => {
         expect(creativeGenerationWaitingCopy({ mode: "image", runStatus: "running", progressText: "检查完成，正在整理结果", elapsedSeconds: 180 })).toContain("整理最后的细节");
     });
 
+    it("keeps the real ecommerce phase visible instead of replacing it with comfort copy", () => {
+        expect(creativeGenerationWaitingCopy({ mode: "image", runStatus: "running", progressText: "正在识别商品", elapsedSeconds: 180 })).toBe("正在识别商品");
+        expect(creativeGenerationWaitingCopy({ mode: "image", runStatus: "running", progressText: "正在规划场景", elapsedSeconds: 180 })).toBe("正在规划场景");
+        expect(creativeGenerationWaitingCopy({ mode: "image", runStatus: "running", progressText: "正在生成图片", elapsedSeconds: 180 })).toBe("正在生成图片");
+        expect(creativeGenerationWaitingCopy({ mode: "image", runStatus: "running", progressText: "正在检查商品细节", elapsedSeconds: 180 })).toBe("正在检查商品细节");
+    });
+
     it("adapts the comfort copy by media type and natural elapsed minutes", () => {
         expect(creativeGenerationWaitingCopy({ mode: "image", runStatus: "running", progressText: "正在处理创作任务", elapsedSeconds: 20 })).toContain("画面正在一点点显现");
         expect(creativeGenerationWaitingCopy({ mode: "video", runStatus: "running", progressText: "正在处理创作任务", elapsedSeconds: 20 })).toContain("镜头正在一帧帧铺开");

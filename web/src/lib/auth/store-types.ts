@@ -147,6 +147,10 @@ export type SystemDefaultModels = {
     audioModel: string;
 };
 
+export type EcommerceLogicalModelRole = "vision_analysis" | "edit_planning" | "image_generation" | "quality_check";
+
+export type EcommerceModelRoles = Record<EcommerceLogicalModelRole, string[]>;
+
 export type AgentSkillWorkspace = "image" | "video" | "canvas" | "drama";
 
 export type AgentSkill = {
@@ -480,6 +484,7 @@ export type AuthSettings = {
     systemChannels: SystemModelChannel[];
     logicalModels: LogicalModel[];
     defaultModels: SystemDefaultModels;
+    ecommerceModelRoles: EcommerceModelRoles;
     agentSkills: AgentSkill[];
 };
 

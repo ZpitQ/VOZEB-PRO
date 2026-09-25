@@ -51,6 +51,43 @@ describe("text planning runtime live protocol fixture", () => {
         expect(lastRequest().path).toBe("/api/ai/system/compatible/models/mock-text:generateContent");
     });
 
+    it("sends multimodal planning input through every supported TCP protocol contract", async () => {
+        await requestStructuredText(multimodalInput(candidate("newapi")));
+        expect(JSON.parse(lastRequest().body.toString("utf8"))).toMatchObject({
+            messages: expect.arrayContaining([
+                {
+                    role: "user",
+                    content: [
+                        { type: "text", text: "analyze" },
+                        { type: "image_url", image_url: { url: "data:image/png;base64,aW1hZ2U=" } },
+                    ],
+                },
+            ]),
+        });
+
+        await requestStructuredText(multimodalInput(candidate("compatible", { createPath: "/responses" })));
+        expect(JSON.parse(lastRequest().body.toString("utf8"))).toMatchObject({
+            input: expect.arrayContaining([
+                {
+                    role: "user",
+                    content: [
+                        { type: "input_text", text: "analyze" },
+                        { type: "input_image", image_url: "data:image/png;base64,aW1hZ2U=" },
+                    ],
+                },
+            ]),
+        });
+
+        await requestStructuredText(multimodalInput(candidate("compatible", { apiFormat: "gemini", createPath: "/models/:model:generateContent" })));
+        expect(JSON.parse(lastRequest().body.toString("utf8"))).toMatchObject({
+            contents: [{ role: "user", parts: [{ text: "analyze" }, { inlineData: { mimeType: "image/png", data: "aW1hZ2U=" } }] }],
+        });
+
+        const requestCount = fixture.requests.length;
+        await expect(requestStructuredText(multimodalInput(candidate("custom", { createPath: "/planner/run", requestTemplate: '{"prompt":"{{prompt}}"}', resultField: "data.plan" })))).rejects.toThrow("不支持图片理解");
+        expect(fixture.requests).toHaveLength(requestCount);
+    });
+
     it.each(GLOBAL_AIOPC_TEXT_PRESETS)("receives structured text through the legacy $id preset", async (preset) => {
         const result = await requestStructuredText(input(candidate("globalaiopc", { apiFormat: preset.apiFormat, globalAiOpcPreset: preset.id as never }, preset.modelExamples[0])));
 
@@ -96,6 +133,21 @@ function input(configured: TextPlanningCandidate) {
         candidate: configured,
         messages: [{ role: "user", content: "返回测试计划" }],
         tool: { name: "make_plan", description: "创建测试计划", parameters: { type: "object", properties: {} } },
+    };
+}
+
+function multimodalInput(configured: TextPlanningCandidate) {
+    return {
+        ...input(configured),
+        messages: [
+            {
+                role: "user",
+                content: [
+                    { type: "text" as const, text: "analyze" },
+                    { type: "image_url" as const, image_url: { url: "data:image/png;base64,aW1hZ2U=" } },
+                ],
+            },
+        ],
     };
 }
 

@@ -1,8 +1,10 @@
 import { nanoid } from "nanoid";
 import type { CreativeFoundation, CreativeReview } from "@/lib/creative-agent-contract";
-import { CreativeRuntimeInputError, MAX_SNAPSHOT_BYTES, type CreativeGenerationPreferences, type CreativeProjectHandoffPlan, type CreativeRunRequest, type CreativeSurface } from "@/lib/creative-runtime-contract";
+import { CreativeRuntimeInputError, MAX_SNAPSHOT_BYTES, type CreativeAsset, type CreativeGenerationPreferences, type CreativeProjectHandoffPlan, type CreativeRunRequest, type CreativeSurface } from "@/lib/creative-runtime-contract";
 import { extractImageSizeFromPrompt } from "@/lib/image-size";
 import { videoFrameAssetIds, type VideoReferenceRole } from "@/lib/video-reference-contract";
+import type { ProductProtectionRegions } from "./ecommerce-product-regions";
+import type { EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
 import { createCreativeRunBundle, getCreativeAssetsByIds, getCreativeRunByClientRequestId, mutateCreativeRun } from "./creative-runtime-store";
 import { getStoredGenerationTask, queryStoredGenerationTasks } from "./generation-task-store";
 import { cancelledRunCanvasOps, taskCanvasEventOps } from "./agent-run-canvas-ops";
@@ -13,7 +15,7 @@ import { AGENT_REQUEST_SCHEMA } from "./agent-prompt-json";
 import { normalizeAgentRunCanvasSnapshot, selectedCanvasNodeIds } from "./agent-run-canvas-snapshot";
 import { getDramaProject } from "./drama-project-store";
 import { getCanvasProject } from "./canvas-project-store";
-import type { EcommerceGenerationSnapshotRecord } from "./ecommerce-generation-snapshot";
+import { ECOMMERCE_GENERATION_SNAPSHOT_VERSION, type EcommerceGenerationSnapshotRecord } from "./ecommerce-generation-snapshot";
 
 export type AgentRunStatus = "planning" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type AgentRunReviewStatus = "review_pending" | "reviewing" | "review_completed" | "review_unavailable";
@@ -26,6 +28,9 @@ export type AgentRunReference = {
     url: string;
     type: "image" | "video" | "audio";
     role?: VideoReferenceRole;
+    ecommerceRole?: "product" | "scene";
+    width?: number;
+    height?: number;
 };
 export type AgentRunChildTask = {
     id: string;
@@ -41,6 +46,8 @@ export type AgentRunTask = {
     referenceUrl?: string;
     referenceType?: "image" | "video" | "audio";
     references?: AgentRunReference[];
+    productProtectionRegions?: ProductProtectionRegions;
+    ecommerceExecution?: EcommerceCompiledImageRequest;
     title: string;
     type: "text" | "image" | "video" | "audio";
     model?: string;
@@ -239,6 +246,67 @@ async function assertVideoFrameAssets(userId: string, input: CreativeRunRequest)
 
 export const getAgentRun = (id: string) => getStoredGenerationTask<AgentRun>("agent", id);
 export const listAgentRuns = (options: { userId: string; conversationId?: string; projectId?: string; surface?: CreativeSurface; statuses?: AgentRunStatus[]; limit?: number }) => queryStoredGenerationTasks<AgentRun>("agent", options);
+
+export async function selectCurrentSceneBaseline(conversationId: string, explicitResultId?: string, userId?: string): Promise<CreativeAsset | null> {
+    if (!conversationId.trim() || !userId?.trim()) return null;
+    if (explicitResultId) {
+        const selected = (await getCreativeAssetsByIds([explicitResultId], userId)).find((asset) => asset.id === explicitResultId);
+        if (!selected?.sourceRunId || selected.userId !== userId || selected.conversationId !== conversationId || selected.type !== "image" || selected.status !== "ready") return null;
+        const parentRun = await getAgentRun(selected.sourceRunId);
+        return parentRun?.userId === userId && parentRun.conversationId === conversationId && parentRun.surface === "chat" && parentRun.status === "completed" && parentRun.assetIds.includes(selected.id) && hasEcommerceResultLineage(selected, parentRun)
+            ? selected
+            : null;
+    }
+
+    const runs = (await listAgentRuns({ userId, conversationId, surface: "chat", statuses: ["completed"], limit: 100 }))
+        .filter((run) => run.status === "completed" && run.userId === userId && run.conversationId === conversationId)
+        .sort((left, right) => right.updatedAt - left.updatedAt || right.id.localeCompare(left.id));
+    const ids = [...new Set(runs.flatMap((run) => [...run.assetIds].reverse()))];
+    if (!ids.length) return null;
+    const byId = new Map((await getCreativeAssetsByIds(ids, userId)).map((asset) => [asset.id, asset]));
+    for (const run of runs) {
+        for (const id of [...run.assetIds].reverse()) {
+            const asset = byId.get(id);
+            if (asset?.sourceRunId === run.id && asset.userId === userId && asset.conversationId === conversationId && asset.type === "image" && asset.status === "ready" && hasEcommerceResultLineage(asset, run)) return asset;
+        }
+    }
+    return null;
+}
+
+function hasEcommerceResultLineage(asset: CreativeAsset, run: AgentRun): boolean {
+    const continuity = record(asset.metadata.ecommerceContinuity);
+    const recordedAnchorId = typeof continuity.productAnchorId === "string" ? continuity.productAnchorId : undefined;
+    const previousAnchorId = run.ecommerceSnapshot?.plan?.source.productAnchorId;
+    return Boolean(asset.parentAssetId && (asset.parentAssetId === recordedAnchorId || asset.parentAssetId === previousAnchorId));
+}
+
+export async function createEditBranch(parentResultId: string, run: AgentRun, expectedExecutionId?: string) {
+    const parentId = parentResultId.trim();
+    if (!parentId) throw new CreativeRuntimeInputError("父结果 ID 无效");
+    const continuity = { parentResultId: parentId, branchId: `ecommerce-${run.id}` };
+    const updated = await mutateCreativeRun<AgentRun>(
+        run.id,
+        TTL,
+        (current) => {
+            if (current.userId !== run.userId || current.conversationId !== run.conversationId) return null;
+            const ecommerceSnapshot: EcommerceGenerationSnapshotRecord = {
+                ...(current.ecommerceSnapshot || {
+                    version: ECOMMERCE_GENERATION_SNAPSHOT_VERSION,
+                    mode: "active",
+                    input: { userRequest: current.prompt, assetIds: [...current.referencedAssetIds], conversationId: current.conversationId, surface: current.surface },
+                    createdAt: Date.now(),
+                    runId: current.id,
+                    userId: current.userId,
+                }),
+                continuity,
+            };
+            return { run: { ...current, ecommerceSnapshot } };
+        },
+        ["running"],
+        expectedExecutionId,
+    );
+    return updated?.ecommerceSnapshot?.continuity || null;
+}
 export async function getAgentRunByClientRequestId(userId: string, clientRequestId: string) {
     return getCreativeRunByClientRequestId<AgentRun>(userId, clientRequestId);
 }

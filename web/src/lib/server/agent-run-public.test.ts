@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { publicAgentRun, publicAgentRunEvent } from "./agent-run-public";
 import { AGENT_PLAN_SCHEMA_VERSION } from "./agent-run-audit";
+import type { AgentRun } from "./agent-run-store";
 
 describe("publicAgentRun", () => {
     it("exposes only user-facing Run and task fields", () => {
@@ -125,5 +126,64 @@ describe("publicAgentRun", () => {
 
     it("removes internal planning payloads from public SSE events", () => {
         expect(publicAgentRunEvent({ id: "event-one", runId: "run-one", type: "run.planning.context_ready", data: { promptJson: "secret" }, createdAt: 1 })).toMatchObject({ type: "run.planning.context_ready", data: undefined });
+    });
+
+    it("exposes only a short ecommerce quality status and hides blocked assets", () => {
+        const run = {
+            id: "run-quality",
+            userId: "user-secret",
+            conversationId: "conversation",
+            clientRequestId: "request-secret",
+            surface: "chat",
+            inputMessageId: "input",
+            assistantMessageId: "assistant",
+            prompt: "生成场景图",
+            referencedAssetIds: ["product"],
+            assetIds: ["blocked-result"],
+            status: "paused",
+            tasks: [],
+            reviewed: true,
+            ecommerceSnapshot: {
+                version: "ecommerce-generation.v1",
+                mode: "active",
+                input: { userRequest: "生成场景图", assetIds: ["product"], conversationId: "conversation", surface: "chat" },
+                qualityCheck: {
+                    version: "ecommerce-quality.v1",
+                    status: "blocked",
+                    publicStatus: "needs_review",
+                    modelRole: {
+                        logicalRole: "quality_check",
+                        capability: "text",
+                        logicalModelId: "quality-model",
+                        channelId: "quality-channel",
+                        upstreamModel: "gpt-5.6-sol",
+                        apiFormat: "openai",
+                    },
+                    checks: [{ resultId: "result-1", key: "product_silhouette", status: "failed", reason: "internal-secret" }],
+                    hardFailures: [{ resultId: "result-1", key: "product_silhouette", status: "failed", reason: "internal-secret" }],
+                    internalReason: "internal-secret",
+                    checkedAt: 1,
+                },
+                createdAt: 1,
+                runId: "run-quality",
+                userId: "user-secret",
+            },
+            createdAt: 1,
+            updatedAt: 2,
+        } as AgentRun;
+
+        const publicRun = publicAgentRun(run);
+        const event = publicAgentRunEvent({
+            id: "event-quality",
+            runId: run.id,
+            type: "ecommerce.quality",
+            data: { status: "needs_review", text: "商品一致性检查未通过，需要复核。", internalReason: "internal-secret", checks: ["secret"] },
+            createdAt: 2,
+        });
+
+        expect(publicRun).toMatchObject({ ecommerceQualityStatus: "needs_review", assetIds: [] });
+        expect(event.data).toEqual({ status: "needs_review", text: "商品一致性检查未通过，需要复核。" });
+        expect(JSON.stringify({ publicRun, event })).not.toContain("internal-secret");
+        expect(JSON.stringify({ publicRun, event })).not.toContain("blocked-result");
     });
 });

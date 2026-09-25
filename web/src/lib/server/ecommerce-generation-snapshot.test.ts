@@ -50,6 +50,21 @@ describe("ecommerce generation shadow snapshot", () => {
         expect(JSON.stringify(input)).not.toContain("data:image/png;base64,secret");
     });
 
+    it("appends a recovered product anchor after the explicitly referenced history result", () => {
+        const input = buildEcommercePlanningInput(
+            {
+                conversationId: "conversation",
+                surface: "chat",
+                prompt: "把背景换成厨房",
+                referencedAssetIds: ["asset-scene-result"],
+            },
+            [imageAsset("asset-product-anchor", "原始商品", "/api/assets/product"), imageAsset("asset-scene-result", "上一轮场景", "/api/assets/scene-result")],
+            { summary: "", recentMessages: [] } as never,
+        );
+
+        expect(input.assetCandidates.map((asset) => asset.id)).toEqual(["asset-scene-result", "asset-product-anchor"]);
+    });
+
     it("records a server-only snapshot without changing the user-visible task", () => {
         const snapshot: EcommerceGenerationSnapshot = {
             version: "ecommerce-generation.v1",
@@ -99,3 +114,19 @@ describe("ecommerce generation shadow snapshot", () => {
         expect(publicRun).not.toHaveProperty("ecommerceSnapshot");
     });
 });
+
+function imageAsset(id: string, title: string, serverUrl: string) {
+    return {
+        id,
+        userId: "user",
+        conversationId: "conversation",
+        ordinal: 0,
+        type: "image" as const,
+        status: "ready" as const,
+        title,
+        serverUrl,
+        metadata: {},
+        createdAt: 1,
+        updatedAt: 1,
+    };
+}

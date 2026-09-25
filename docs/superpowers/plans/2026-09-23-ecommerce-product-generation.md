@@ -27,11 +27,13 @@
 ### Task 1: 固化 EcommerceEditPlan 契约
 
 **Files:**
+
 - Create: `web/src/lib/server/ecommerce-edit-plan.ts`
 - Create: `web/src/lib/server/ecommerce-edit-plan.test.ts`
 - Modify: `web/src/lib/server/agent-run-store.ts` only to add typed internal snapshot fields if the existing task payload cannot carry them
 
 **Interfaces:**
+
 - `EcommerceEditPlan`：包含 `planVersion`、`operation`、`source`、`baseline`、`delta`、`preserve`、`strategy`、`modelRoles`、`continuity`、`validation`。
 - `normalizeEcommerceEditPlan(value: unknown): EcommerceEditPlan | null`：拒绝缺少商品来源、操作类型、策略或校验项的计划。
 - `validateEcommerceEditPlan(plan: EcommerceEditPlan): void`：校验来源归属、策略与操作组合、严格商品保护项和连续编辑父结果。
@@ -67,6 +69,7 @@ git commit -m "feat: define ecommerce image edit plan contract"
 ### Task 2: 加入影子规划和内部快照
 
 **Files:**
+
 - Create: `web/src/lib/server/ecommerce-generation-snapshot.ts`
 - Create: `web/src/lib/server/ecommerce-generation-snapshot.test.ts`
 - Modify: `web/src/lib/server/agent-run-executor.ts`
@@ -75,6 +78,7 @@ git commit -m "feat: define ecommerce image edit plan contract"
 - Test: `web/src/lib/server/agent-run-executor.test.ts`
 
 **Interfaces:**
+
 - `buildEcommercePlanningInput(run, assets, conversationContext)`：为规划器提供一句话、图片角色候选和连续编辑上下文。
 - `recordEcommerceGenerationSnapshot(task, snapshot)`：只保存服务端内部的计划、模型角色快照、编译器版本和验收状态。
 - `legacyPlanFallback(input)`：当新计划不完整或开关关闭时，继续走现有 Agent 任务流程。
@@ -106,34 +110,57 @@ git add .env.example web/src/lib/server/agent-run-executor.ts web/src/lib/server
 git commit -m "feat: add shadow ecommerce generation planning"
 ```
 
+## 当前推进状态（2026-09-24）
+
+Task 1–2 已完成，线上开发环境仍使用 `ECOMMERCE_GENERATION_ROLLOUT=shadow`。一次真实白底家具图测试暴露了两个独立问题：本轮上传的草稿附件能够提交给图片任务，但没有进入 `@` 素材候选；在 `/create` 手动选择底层生成模型时，Agent Run 直接进入 `directAgentPlan`，绕过文本 Planner，导致图片模型只收到用户原话和通用约束，生成结果接近原图。
+
+已完成以下桥接修复：
+
+- `@` 素材候选统一读取历史素材和本轮附件，并按稳定资产 ID 去重。
+- `/create` 手动选择生成模型时仍经过 Planner；用户选择被作为硬约束传入并校验，Planner 不得改选、遗漏或增加模型。
+- Canvas 保留原有 direct-model 行为，避免扩大本期改动范围。
+
+该修复只恢复正确的 Planner 调用链，不代表完整电商编排已经上线。当前 Planner 仍是基于素材元数据和 URL 的文本规划，`shadow` 快照仍使用 `legacy-shadow.v1`；尚未具备多模态商品基线分析、可信商品 mask、`strict_product` provider compiler 或商品核心验收。
+
+当前模型基线：视觉分析、编辑规划和结果验收默认使用 GPT-5.6，但角色必须保持可配置、可切换；底层生图模型共有三个：`nano banana 2`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`。实现采用两个 compiler 家族和三个模型 profile，不能把 flare 与 sunburst 当作同一个执行模型。
+
+Task 3–4 已完成内部契约和适配器：商品图/场景图角色与连续来源使用稳定资产 ID；规划传输已支持 Chat、Responses 和 Gemini 的真实图片内容，自定义文本模板会明确拒绝图片而不是静默退化；视觉分析和编辑规划分别使用可配置逻辑模型角色，只允许同角色候选切换。编辑计划会拒绝缺字段、跨角色来源和不完整的 `strict_product` 保护项，并把最终商品/场景基线重新锚定到视觉分析事实；“商品旁边增加咖啡杯”一类请求不得落入商品核心区。
+
+Task 5–8 已完成开发侧垂直切片：可信商品区域和独立 mask 已接入图片任务；`/create` 可在 `internal/enabled` 下执行 `product_to_scene` 和非商品区域 `local_edit`；连续编辑会自动继承最近成功的电商场景结果，同时永久保留原始商品 `productAnchorId`。明确引用旧结果会创建新分支，父结果不覆盖；新商品建立新锚点，新房间图保持为独立场景参考，上一结果只保存为 `parentResultId`。生成资产与 Run 私有快照持久化商品锚点、场景基线、父结果和稳定 branch ID，刷新或恢复后可重建关系。
+
+开发部署仍保持 `ECOMMERCE_GENERATION_ROLLOUT=shadow`，未调用真实付费模型。Task 1–8 受影响回归、类型、范围 lint、格式和差异检查已通过，但真实商品保持度、场景融合、局部修改准确度、连续编辑分支和 `needs_review` 交互仍需切到 `internal` 后人工验收。自动最近结果当前最多扫描 100 条已完成 Chat Run；更早结果仍可通过明确结果 ID 选择。下一步按 Task 9 接入逻辑模型候选和 provider compiler；在 Task 10 结果验收完成前，不得把当前能力描述为端到端商品保真已验收。
+
 ### Task 3: 实现商品/场景参考角色识别
 
 **Files:**
+
 - Create: `web/src/lib/server/ecommerce-reference-roles.ts`
 - Create: `web/src/lib/server/ecommerce-reference-roles.test.ts`
 - Modify: `web/src/lib/server/agent-run-assets.ts`
-- Modify: `web/src/lib/server/agent-run-execution.ts`
 - Test: `web/src/lib/server/agent-run-assets.test.ts`
 
 **Interfaces:**
+
 - `classifyReferenceRoles(assets, visualHints): ReferenceRoleDecision`：返回一张商品主参考图、至多一张场景参考图、歧义原因和是否需要澄清。
 - `resolveContinuitySources(run, explicitAssets, selectedHistory): EcommerceSources`：解析原始商品锚点、当前场景基线和明确历史引用。
 
-- [ ] **Step 1: 写失败测试**
+实现边界：Task 3 只消费结构化 `visualHints`，不按标题、prompt 或附件顺序猜测角色；真正生成视觉提示并接入运行时的工作归 Task 4。生成结果的 `parentAssetId` 在存在有效电商计划时优先保存原始商品锚点，为后续双基线解析提供稳定关系。
+
+- [x] **Step 1: 写失败测试**
 
 覆盖：白底单主体优先判为商品图；完整家居空间优先判为场景图；超过两张图片进入拒绝/澄清；新商品图建立新锚点；新场景图不替换商品锚点；明确历史结果创建新分支；无法判断时只返回一个澄清问题。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-reference-roles.test.ts web/src/lib/server/agent-run-assets.test.ts`
 
 Expected: FAIL because role and continuity resolvers are not implemented.
 
-- [ ] **Step 3: 实现角色与来源解析**
+- [x] **Step 3: 实现角色与来源解析**
 
 使用稳定资产 ID 和用户明确引用，不按标题相似度或 prompt 文本猜测历史结果。保留商品主参考图和场景参考图的优先级。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-reference-roles.test.ts web/src/lib/server/agent-run-assets.test.ts`
 
@@ -141,14 +168,17 @@ Expected: PASS with no source role ambiguity leaking into generation.
 
 - [ ] **Step 5: Commit**
 
+按当前开发约定暂不提交、推送或创建 PR，等待开发环境验收。
+
 ```bash
-git add web/src/lib/server/ecommerce-reference-roles.ts web/src/lib/server/ecommerce-reference-roles.test.ts web/src/lib/server/agent-run-assets.ts web/src/lib/server/agent-run-assets.test.ts web/src/lib/server/agent-run-execution.ts
+git add web/src/lib/server/ecommerce-reference-roles.ts web/src/lib/server/ecommerce-reference-roles.test.ts web/src/lib/server/agent-run-assets.ts web/src/lib/server/agent-run-assets.test.ts
 git commit -m "feat: classify ecommerce product and scene references"
 ```
 
 ### Task 4: 建立多模态视觉分析和编辑规划
 
 **Files:**
+
 - Create: `web/src/lib/server/ecommerce-visual-analysis.ts`
 - Create: `web/src/lib/server/ecommerce-visual-analysis.test.ts`
 - Create: `web/src/lib/server/ecommerce-edit-planner.ts`
@@ -158,35 +188,38 @@ git commit -m "feat: classify ecommerce product and scene references"
 - Modify: `web/src/lib/server/agent-function-call.ts`
 
 **Interfaces:**
+
 - `analyzeEcommerceReferences(input, candidateRole)`：返回商品事实、场景事实、商品核心候选区域、融合光晕候选区域和置信状态。
 - `planEcommerceEdit(input, visualAnalysis, candidateRole)`：返回经 `validateEcommerceEditPlan` 校验的 `EcommerceEditPlan`。
 - `planEcommerceEdit` 必须支持两阶段调用；简单请求可以使用同一模型的合并实现，但仍返回同一契约。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 使用本地结构化模型 fixture 验证：商品图和场景图角色不会混淆；模型返回缺字段时计划被拒绝；核心保护项缺失时严格策略不可用；同角色候选可切换；跨角色降级被拒绝；用户请求“商品旁边增加咖啡杯”不会被规划为修改商品本体。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-visual-analysis.test.ts web/src/lib/server/ecommerce-edit-planner.test.ts`
 
 Expected: FAIL before multimodal content and planner adapters exist.
 
-- [ ] **Step 3: 扩展规划传输以支持多模态内容**
+- [x] **Step 3: 扩展规划传输以支持多模态内容**
 
 在 `text-planning-runtime.ts` 中增加结构化内容部分的传输能力，保持已有纯文本规划请求不变；图片 URL 必须经过现有站内权限和媒体访问边界。
 
-- [ ] **Step 4: 实现分析和规划适配器**
+- [x] **Step 4: 实现分析和规划适配器**
 
 分析和规划分别使用独立输入输出契约；记录实际逻辑角色和候选模型；分析失败只能同角色切换或进入待复核，不能变成无图文本规划。
 
-- [ ] **Step 5: 运行测试确认通过**
+- [x] **Step 5: 运行测试确认通过**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-visual-analysis.test.ts web/src/lib/server/ecommerce-edit-planner.test.ts web/src/lib/server/text-planning-runtime.test.ts`
 
 Expected: PASS with existing text planning tests unchanged.
 
 - [ ] **Step 6: Commit**
+
+按当前开发约定暂不提交、推送或创建 PR，等待开发环境验收。
 
 ```bash
 git add web/src/lib/server/ecommerce-visual-analysis.ts web/src/lib/server/ecommerce-visual-analysis.test.ts web/src/lib/server/ecommerce-edit-planner.ts web/src/lib/server/ecommerce-edit-planner.test.ts web/src/lib/server/text-planning-runtime.ts web/src/lib/server/agent-run-surface-policy.ts web/src/lib/server/agent-function-call.ts
@@ -196,40 +229,52 @@ git commit -m "feat: add multimodal ecommerce visual planning"
 ### Task 5: 实现商品核心区与融合光晕区
 
 **Files:**
+
 - Create: `web/src/lib/server/ecommerce-product-regions.ts`
 - Create: `web/src/lib/server/ecommerce-product-regions.test.ts`
 - Modify: `web/src/lib/server/image-task-store.ts`
 - Modify: `web/src/app/api/image-tasks/image-task-support.ts`
+- Modify: `web/src/app/api/image-tasks/image-task-types.ts`
 - Modify: `web/src/app/api/image-tasks/image-task-openai.ts`
 - Modify: `web/src/app/api/image-tasks/image-task-gemini.ts`
+- Modify: `web/src/app/api/image-tasks/route.ts`
 - Test: `web/src/app/api/image-tasks/route.test.ts`
 
 **Interfaces:**
+
 - `buildProductProtectionRegions(analysis, sourceSize): ProductProtectionRegions`：返回 `productCore`、`fusionHalo`、`editableBackground`。
 - `validateProductProtectionRegions(regions, sourceSize): void`：拒绝越界、空核心区和编辑区覆盖核心区的 mask。
 - `compileStrictProductEdit(task, regions)`：把商品角色、独立 mask、融合光晕和保护约束转换为当前 provider 适配器能理解的请求。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 覆盖核心区不能为空；融合光晕必须与核心区相邻且范围有限；背景编辑不得覆盖核心区；mask 尺寸与源图一致；provider 不支持可信 mask 时任务进入待复核而非静默整图生成；已有 Canvas mask 行为不回归。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-product-regions.test.ts web/src/app/api/image-tasks/route.test.ts`
 
 Expected: FAIL on new region validation and strict-product request assertions.
 
-- [ ] **Step 3: 实现区域校验和 provider 输入编译**
+开发服务器根目录未暴露 `vitest`，实际从 `web` 工作区执行等价命令。RED 已确认区域模块缺失，严格商品 Gemini 请求仍返回 `200` 而非 `202 needs_review`；跨 provider 候选仍保留不安全回退。
+
+- [x] **Step 3: 实现区域校验和 provider 输入编译**
 
 复用现有图片尺寸、参考图访问和蒙版规范化能力；provider-specific 字段留在图片任务适配层，编排层只传递领域区域。
 
-- [ ] **Step 4: 运行测试确认通过**
+已实现完整且不重叠的商品核心区、融合光晕区和可编辑背景区；可信实际 mask 与逻辑区域均校验源图尺寸。严格商品任务只选择支持独立 mask 的 OpenAI provider，并关闭协议及候选渠道回退；Gemini 或缺少可信 mask 时持久化为 `needs_review`，不进入 Worker 上游提交。
+
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-product-regions.test.ts web/src/app/api/image-tasks/route.test.ts web/src/app/api/image-tasks/image-task-openai-live.test.ts`
 
 Expected: PASS with native and legacy provider contracts preserved.
 
+开发服务器实际执行 `pnpm --dir web exec vitest run ...`，专项 3 个文件 43 项通过；Task 1–5 受影响回归 12 个文件 178 项通过，TypeScript、受影响文件 ESLint 与 Prettier 检查通过。
+
 - [ ] **Step 5: Commit**
+
+按当前开发约定暂不提交、推送或创建 PR，等待开发环境验收。
 
 ```bash
 git add web/src/lib/server/ecommerce-product-regions.ts web/src/lib/server/ecommerce-product-regions.test.ts web/src/lib/server/image-task-store.ts web/src/app/api/image-tasks/image-task-support.ts web/src/app/api/image-tasks/image-task-openai.ts web/src/app/api/image-tasks/image-task-gemini.ts web/src/app/api/image-tasks/route.test.ts
@@ -239,6 +284,7 @@ git commit -m "feat: protect ecommerce product regions during edits"
 ### Task 6: 交付 `/create` 的 product_to_scene 垂直切片
 
 **Files:**
+
 - Create: `web/src/lib/server/ecommerce-generation-service.ts`
 - Create: `web/src/lib/server/ecommerce-generation-service.test.ts`
 - Modify: `web/src/lib/server/agent-run-execution.ts`
@@ -249,29 +295,38 @@ git commit -m "feat: protect ecommerce product regions during edits"
 - Test: `web/src/app/(user)/create/components/creative-generation-waiting.test.tsx`
 
 **Interfaces:**
-- `createEcommerceProductSceneTask(run, plan, settings)`：从合法计划创建 image task，传递商品主参考图、可选场景参考图、区域和模型快照。
-- `publicEcommerceProgress(stage)`：将内部阶段映射为“正在识别商品/正在规划场景/正在生成图片/正在检查商品细节”。
-- `ecommerceGenerationEnabled(settings, run)`：读取影子、内部、灰度和默认开关，关闭时保持旧流程。
 
-- [ ] **Step 1: 写失败测试**
+- `createEcommerceProductSceneTask(run, plan, assets, productProtectionRegions)`：从合法计划创建 image task，传递商品主参考图、可选场景参考图、区域和模型快照。
+- `publicEcommerceProgress(stage)`：将本阶段真实执行的内部阶段映射为“正在识别商品/正在规划场景/正在生成图片”；商品细节质检留到 Task 10，未执行前不提前展示。
+- `ecommerceGenerationEnabled(rollout, run)`：只允许显式 `internal/enabled` 的统一创作图片请求进入新链路，`off/shadow` 和其他入口保持旧流程。
+
+- [x] **Step 1: 写失败测试**
 
 验证一句话 + 白底商品图会创建 `product_to_scene`；可选场景图只作为场景参考；没有场景文字时从受控欧美家居场景类别自动规划；结果任务使用 `strict_product`；用户公开消息不包含内部计划；阶段状态映射正确。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-generation-service.test.ts web/src/lib/server/agent-run-executor.test.ts web/src/app/(user)/create/components/creative-generation-waiting.test.tsx`
 
 Expected: FAIL before the vertical slice is wired into Agent Run execution.
 
-- [ ] **Step 3: 接入商品生成服务**
+RED 已确认 4 项预期失败：执行器未调用视觉分析、歧义素材仍走旧流程并失败、SSE 未映射 `ecommerce.progress`、等待页用安慰文案覆盖真实电商阶段。
+
+- [x] **Step 3: 接入商品生成服务**
 
 只在 `/create` 的图片生成意图和特性开关命中时进入新服务；Canvas、短剧和其他能力继续旧路径。
 
-- [ ] **Step 4: 运行测试确认通过**
+已接入视觉分析、商品/场景角色判定、编辑规划、白底或透明底可信分割蒙版、严格商品图片任务和私有快照。歧义素材持久化为 `needs_review` 并暂停 Run，不提交 provider；图片任务保留商品第一、场景第二的引用顺序、素材 ID、真实尺寸、电商角色和保护区域。公开事件只包含三个真实阶段，不暴露模型角色、分析或内部 prompt。
+
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-generation-service.test.ts web/src/lib/server/agent-run-executor.test.ts web/src/app/(user)/create/components/creative-generation-waiting.test.tsx`
 
 Expected: PASS with legacy path and new product-to-scene path both covered.
+
+开发服务器实际执行 Task 1–6 受影响回归 17 个文件 225 项通过，TypeScript 和受影响文件 ESLint 通过。当前部署开关仍保持 `shadow`，未调用真实付费模型；真实商品保持度、场景融合和 `needs_review` 交互仍需在开发环境显式切换到 `internal` 后人工验收。
+
+按当前开发约定暂不提交、推送或创建 PR，等待开发环境验收。
 
 - [ ] **Step 5: Commit**
 
@@ -283,38 +338,53 @@ git commit -m "feat: add ecommerce product to scene flow"
 ### Task 7: 交付 local_edit 的非商品区域局部修改
 
 **Files:**
+
+- Modify: `web/src/lib/server/ecommerce-visual-analysis.ts`
 - Modify: `web/src/lib/server/ecommerce-edit-planner.ts`
 - Modify: `web/src/lib/server/ecommerce-generation-service.ts`
 - Modify: `web/src/lib/server/ecommerce-product-regions.ts`
+- Modify: `web/src/lib/server/ecommerce-generation-snapshot.ts`
+- Modify: `web/src/lib/server/agent-run-executor.ts`
 - Create: `web/src/lib/server/ecommerce-local-edit.test.ts`
-- Modify: `web/src/app/(user)/create/components/creative-composer.tsx`
-- Test: `web/src/app/(user)/create/components/creative-composer.test.tsx`
+- Test: `web/src/lib/server/agent-run-executor.test.ts`
+- Test: `web/src/app/api/image-tasks/route.test.ts`
 
 **Interfaces:**
+
 - `resolveLocalEditTarget(plan, analysis, optionalManualRegion)`：自动定位唯一编辑目标，多个候选返回单个澄清问题，手动区域优先。
 - `createEcommerceLocalEditTask(run, plan, regions)`：只允许背景、环境、道具、光线和阴影目标进入首期 local edit。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 覆盖“把背景换成厨房”“增加一杯咖啡”“去掉右边绿植”“让光线更亮”；覆盖多个相同目标只返回一个澄清问题；手动 mask 优先；商品颜色、材质、结构和包装文字被拒绝并提示后续能力；局部编辑不扩大到商品核心区。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
-Run: `pnpm exec vitest run web/src/lib/server/ecommerce-local-edit.test.ts web/src/app/(user)/create/components/creative-composer.test.tsx`
+Run: `pnpm --dir web exec vitest run src/lib/server/ecommerce-local-edit.test.ts src/lib/server/agent-run-executor.test.ts src/app/api/image-tasks/route.test.ts`
 
 Expected: FAIL until target routing and UI clarification behavior exist.
 
-- [ ] **Step 3: 实现局部目标路由**
+RED 阶段 4 个文件共 16 项按预期失败，55 项既有测试通过。失败覆盖目标解析、局部 mask、双参考顺序和歧义时禁止提交图片任务。
+
+- [x] **Step 3: 实现局部目标路由**
 
 复用当前场景基线和原始商品锚点；本轮只加入当前 `delta`，不拼接历史 prompt。
 
-- [ ] **Step 4: 运行测试确认通过**
+实现只在用户明确引用一张带 `sourceRunId` 的历史生成图时进入 `local_edit`，并通过该结果的 `parentAssetId` 恢复原始商品锚点。视觉分析同时读取当前场景和原商品图，输出场景内商品核心、融合光晕和带稳定 ID 的可编辑目标；Planner 必须选择这些目标 ID，不能从自然语言猜坐标。局部 mask 只开放唯一目标区域，商品核心、融合边缘和无关场景保持不透明。
 
-Run: `pnpm exec vitest run web/src/lib/server/ecommerce-local-edit.test.ts web/src/app/(user)/create/components/creative-composer.test.tsx`
+首期不增加 `/create` 手动画蒙版 UI；`optionalManualRegion` 仅保留为内部优先输入契约。商品颜色、材质、结构和包装文字修改明确拒绝，多目标或目标缺失只返回一个澄清问题。
+
+- [x] **Step 4: 运行测试确认通过**
+
+Run: `pnpm --dir web exec vitest run src/lib/server/ecommerce-local-edit.test.ts src/lib/server/agent-run-executor.test.ts src/app/api/image-tasks/route.test.ts`
 
 Expected: PASS with strict product core protection.
 
+Task 7 专项与受影响回归先后通过 `108/108`、Executor + Route `62/62`，Task 1–7 扩大回归 `221/221`；本地 TCP provider fixture 另有 `21/21` 通过。TypeScript、Task 7 范围 `ESLint --max-warnings 0`、Prettier 和 `git diff --check` 均通过。以上均未调用真实或付费模型，不能替代真实图片视觉验收。
+
 - [ ] **Step 5: Commit**
+
+按当前开发约定暂不提交、推送或创建 PR，等待开发环境验收。
 
 ```bash
 git add web/src/lib/server/ecommerce-edit-planner.ts web/src/lib/server/ecommerce-generation-service.ts web/src/lib/server/ecommerce-product-regions.ts web/src/lib/server/ecommerce-local-edit.test.ts web/src/app/(user)/create/components/creative-composer.tsx web/src/app/(user)/create/components/creative-composer.test.tsx
@@ -324,6 +394,7 @@ git commit -m "feat: support non-product local ecommerce edits"
 ### Task 8: 交付连续编辑、双基线和编辑分支
 
 **Files:**
+
 - Modify: `web/src/lib/server/ecommerce-generation-service.ts`
 - Modify: `web/src/lib/server/ecommerce-reference-roles.ts`
 - Modify: `web/src/lib/server/ecommerce-generation-snapshot.ts`
@@ -333,31 +404,40 @@ git commit -m "feat: support non-product local ecommerce edits"
 - Test: `web/src/lib/server/agent-run-store.test.ts`
 
 **Interfaces:**
+
 - `resolveDualBaseline(run, explicitReference)`：返回不可替换的 `productAnchor` 和当前可分支的 `sceneBaseline`。
 - `createEditBranch(parentResultId, run)`：创建稳定 branch ID，保留父结果并为新轮写入快照。
 - `selectCurrentSceneBaseline(conversationId, explicitResultId?)`：无明确选择时返回最近成功结果，有明确选择时返回指定结果。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 覆盖“再亮一点”继承最近场景结果；商品核心事实仍来自原始白底图；明确引用旧结果创建分支；新商品图建立新锚点；新场景参考图不改变商品锚点；历史结果不会被覆盖；刷新和恢复后仍能读取父子关系。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-continuity.test.ts web/src/lib/server/agent-run-store.test.ts`
 
 Expected: FAIL until continuity fields and branch selection are persisted.
 
-- [ ] **Step 3: 实现双基线和分支持久化**
+RED 已覆盖缺失的双基线、最近结果选择、稳定分支、资产血缘和无新上传入口；独立审查后又补充明确选择普通图片必须拒绝，以及已有结果时同时上传“替换商品 + 新房间”不得丢图或丢失父结果关系。
+
+- [x] **Step 3: 实现双基线和分支持久化**
 
 只用稳定资产、结果和任务 ID 建立关系；禁止按标题或 prompt 文本推断父结果。
 
-- [ ] **Step 4: 运行测试确认通过**
+实现会自动选择最近成功且具有可信电商血缘的场景结果；明确结果同样执行归属、完成状态和电商血缘校验。`branchId` 由当前 Run ID 稳定生成，父结果不修改。生成资产和 Run 私有快照同时保存 `productAnchorId`、`sceneBaselineId`、`parentResultId` 和 `branchId`。新房间图作为 `sceneReferenceIds`，不会冒充含商品的局部编辑基线；同时上传替换商品和房间时，两张新图进入视觉分析，旧结果仅作为分支父节点。
+
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-continuity.test.ts web/src/lib/server/agent-run-store.test.ts`
 
 Expected: PASS with round-trip persistence and no result overwrite.
 
+开发服务器最终验证：Task 8 专项 4 个文件 `80/80` 通过，Task 1–8 受影响回归 19 个文件 `250/250` 通过；TypeScript、Task 8 范围 `ESLint --max-warnings 0`、Prettier 和 `git diff --check` 通过。独立任务复审已确认两个重要问题关闭，仅保留自动扫描最近 100 条已完成 Run 的低频限制。以上未调用真实或付费模型，不能替代真实图片视觉验收。
+
 - [ ] **Step 5: Commit**
+
+按当前开发约定暂不提交、推送或创建 PR，等待开发环境验收。
 
 ```bash
 git add web/src/lib/server/ecommerce-generation-service.ts web/src/lib/server/ecommerce-reference-roles.ts web/src/lib/server/ecommerce-generation-snapshot.ts web/src/lib/server/agent-run-store.ts web/src/lib/server/agent-run-assets.ts web/src/lib/server/ecommerce-continuity.test.ts web/src/lib/server/agent-run-store.test.ts
@@ -367,6 +447,7 @@ git commit -m "feat: preserve ecommerce edit continuity and branches"
 ### Task 9: 接入逻辑模型路由和 provider compiler
 
 **Files:**
+
 - Create: `web/src/lib/server/ecommerce-model-routing.ts`
 - Create: `web/src/lib/server/ecommerce-model-routing.test.ts`
 - Create: `web/src/lib/server/ecommerce-image-compiler.ts`
@@ -376,31 +457,46 @@ git commit -m "feat: preserve ecommerce edit continuity and branches"
 - Test: `web/src/lib/server/logical-model-router.test.ts`
 
 **Interfaces:**
+
 - `resolveEcommerceRoleCandidates(settings, role, capability)`：按逻辑角色返回有序候选。
 - `routeEcommerceRole(settings, role, snapshot)`：只在同角色候选内切换，并返回实际模型快照。
 - `compileEcommerceImageRequest(plan, providerProfile)`：将领域计划编译为 image task 的提示词、参考图角色、mask 和参数。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 验证管理员可以排序多个视觉、规划、验收和生成候选；失败只在同角色切换；不同模型收到不同 provider compiler 输出；已开始任务继续使用保存的快照；策略和模型切换不影响历史任务重试。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-model-routing.test.ts web/src/lib/server/ecommerce-image-compiler.test.ts web/src/lib/server/logical-model-router.test.ts`
 
 Expected: FAIL before role candidates and compiler adapters exist.
 
-- [ ] **Step 3: 实现角色候选和编译器**
+两轮 RED 分别确认角色配置/API 缺失 4 项，以及 PostgreSQL 未持久化 2 项；失败均来自预期的缺失能力。
+
+- [x] **Step 3: 实现角色候选和编译器**
 
 保持逻辑模型 ID 与上游模型名分离；编译器不得向用户公开 foundation、analysis、model reason 或内部依赖上下文。
 
-- [ ] **Step 4: 运行测试确认通过**
+已新增持久化 `ecommerceModelRoles` 设置，支持 `vision_analysis`、`edit_planning`、`image_generation` 和 `quality_check` 四类有序候选。后台“模型渠道 -> 电商流程”仅展示启用且能力匹配的逻辑模型，可添加、删除和排序；API、PostgreSQL 设置服务与旧仓储写入路径均校验并保存配置，删除渠道会清理失效候选。旧数据库或空配置继续回退系统默认模型。
+
+运行时仅在同角色候选内切换，记录实际逻辑模型、绑定、渠道、上游模型和 provider profile 快照。图片任务按创建时快照执行，后续后台改序或删除绑定不会静默改变既有任务。OpenAI/Gemini 编译器分别生成 provider 请求，严格商品任务继续执行真实渠道能力和蒙版支持核验。`quality_check` 本轮只保存预选快照，真正结果验收由 Task 10 执行。
+
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-model-routing.test.ts web/src/lib/server/ecommerce-image-compiler.test.ts web/src/lib/server/logical-model-router.test.ts`
 
 Expected: PASS with role failover, snapshot stability and provider-specific request fixtures.
 
+Task 9 与后台配置专项通过 `187/187`；Task 1-9 受影响回归 26 个文件 `332/332`。TypeScript 和 Prettier 通过，范围 ESLint 为 `0 error / 179 warning`；告警来自既有拆分式仓储文件未使用导入及一个后台既有未使用参数，未在 Task 9 扩大范围处理。
+
+开发环境验收已完成：`vozeb_pro_dev` 的 `vozeb_pro_app_settings.ecommerce_model_roles` 已迁移为 `jsonb`；后台“模型渠道 -> 电商流程”显示 `已配置 4/4`，视觉分析、编辑规划和结果验收按 `gpt-5.6-sol -> gemini-3.8-flash-high` 排序，图片生成按 `gpt-image-2.5-flare -> gpt-image-2.5-sunburst -> nano banana 2` 排序，刷新后顺序保持不变。app 与 generation-worker 均保持 `ECOMMERCE_GENERATION_ROLLOUT=shadow`，健康和就绪检查通过。
+
+同一白底木床参考图分别提交一次真实图片任务，三次均成功且未重试：Flare `62826d06-4a99-45e0-bbcd-3d601f8eea9c`（1024x1024 PNG，1,182,887 bytes）、Sunburst `fec9f688-5927-4e4c-83dd-f67a51fca84a`（1024x1024 PNG，1,208,353 bytes）、Nano Banana 2 `8549a602-c15a-498d-b3f7-3dc2b6e0e088`（1024x1024 JPEG，437,802 bytes）。Flare 与 Sunburst 基本保留白底和原构图，只做轻微亮度变化；Nano Banana 2 增加地面、窗光和地毯，形成基础室内环境且主体整体保持较好。该结果只证明三个真实 provider profile 的路由和图生图能力可用，不代表 Task 10 的商品保真、场景完整度或端到端 `internal` 链路已经验收。
+
 - [ ] **Step 5: Commit**
+
+按当前开发约定暂不提交、推送或创建 PR，等待开发环境验收。
 
 ```bash
 git add web/src/lib/server/ecommerce-model-routing.ts web/src/lib/server/ecommerce-model-routing.test.ts web/src/lib/server/ecommerce-image-compiler.ts web/src/lib/server/ecommerce-image-compiler.test.ts web/src/lib/server/logical-model-router.ts web/src/lib/server/ecommerce-generation-service.ts web/src/lib/server/logical-model-router.test.ts
@@ -410,40 +506,52 @@ git commit -m "feat: route ecommerce roles through model compilers"
 ### Task 10: 加入商品核心验收和发布开关
 
 **Files:**
+
 - Create: `web/src/lib/server/ecommerce-quality-check.ts`
 - Create: `web/src/lib/server/ecommerce-quality-check.test.ts`
 - Modify: `web/src/lib/server/ecommerce-generation-service.ts`
 - Modify: `web/src/lib/server/ecommerce-generation-snapshot.ts`
+- Create: `web/src/lib/server/ecommerce-generation-trace.ts`
+- Modify: `web/src/lib/server/generation-log-store.ts`
+- Modify: `web/src/lib/server/database/schema.ts`
+- Modify: `web/src/app/api/admin/generation-logs/route.ts`
+- Modify: `web/src/app/api/generation-logs/route.ts`
+- Modify: `web/src/components/admin/admin-generation-log.tsx`
 - Modify: `web/src/lib/server/agent-run-public.ts`
 - Modify: `web/src/app/(user)/create/components/creative-generation-waiting.tsx`
 - Test: `web/src/lib/server/agent-run-public.test.ts`
 
 **Interfaces:**
+
 - `checkEcommerceResult(input, roleCandidate)`：返回每项检查、硬失败项、可公开状态和内部原因。
 - `shouldBlockEcommerceResult(check)`：商品核心、Logo、包装文字或轮廓失败时返回 true。
 - `ecommerceRolloutStage(settings, userId)`：返回 shadow、internal、canary 或 default，并提供旧流程回退。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 覆盖商品核心失败拦截；场景轻微不符进入待调整；验收模型不可用不自动判定成功；影子结果不影响公开任务；开关关闭时完整回退旧流程；用户只看到简短状态。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-quality-check.test.ts web/src/lib/server/agent-run-public.test.ts`
 
 Expected: FAIL before quality check and rollout gates exist.
 
-- [ ] **Step 3: 实现双门禁和灰度开关**
+- [x] **Step 3: 实现双门禁、灰度开关和管理员可观测流水**
 
-自动验收只负责结构和硬失败；业务人工复核通过黄金回归集完成。验收结果写入内部快照，不写入公开消息。
+自动验收只负责结构和硬失败；业务人工复核通过黄金回归集完成。验收结果写入内部快照，不写入公开消息。商品身份、轮廓、颜色材质、比例视角无法判断时必须按硬失败拦截；Logo/包装文字仅在商品基线明确不存在品牌文字时允许 `not_applicable`。每个实际电商生图任务另把视觉分析、编辑规划、图片生成和结果验收的结构化输出持久化到生成日志 `ecommerce_trace`；Trace 先写入图片任务作为持久待办，再同步到生成日志，管理员读取缺失 Trace 的日志时从图片任务补齐并回写。管理员日志详情可查看实际模型、渠道、上游模型、执行 Prompt、图片任务 ID、八项质检和最终门禁，普通用户接口必须剥离内部流水。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm exec vitest run web/src/lib/server/ecommerce-quality-check.test.ts web/src/lib/server/agent-run-public.test.ts`
 
 Expected: PASS with strict hard-fail behavior and legacy fallback.
 
-- [ ] **Step 5: Commit**
+2026-09-25 开发环境真实验收：Run `agent-XF7fG7af1wOqk5VHePxjr`、图片任务 `e3259bac-8838-4605-8954-347b286a87b3` 完成四阶段流水，实际路由为 `gpt-5.6-sol -> gpt-5.6-sol -> gpt-image-2.5-sunburst -> gemini-3.8-flash-high`，最终门禁 `passed`。管理员 API 与 1440px/390px 后台详情可读取和展开四阶段输出，普通用户 API 已确认剥离 Trace，持久化数据未包含 Data URL。Agent 子任务日志当前不写 `conversation_id`，可观测关联以 `ecommerce_trace.runId` 和 `imageTaskIds` 为准。
+
+边界记录：视觉分析候选全部失败时，Run 进入 `paused/needs_review`，不再被标成普通执行失败；视觉分析或编辑规划在图片子任务创建前停止时，只存在 Agent Run 事件，不存在图片生成日志。本步骤保证的是“每个实际电商图片任务”的完整 Trace。若产品要审计全部用户请求的前置失败，应另立 Agent Run 可观测任务，不能用空图片日志混淆两类实体。
+
+- [x] **Step 5: Commit**
 
 ```bash
 git add web/src/lib/server/ecommerce-quality-check.ts web/src/lib/server/ecommerce-quality-check.test.ts web/src/lib/server/ecommerce-generation-service.ts web/src/lib/server/ecommerce-generation-snapshot.ts web/src/lib/server/agent-run-public.ts web/src/app/(user)/create/components/creative-generation-waiting.tsx web/src/lib/server/agent-run-public.test.ts
@@ -453,6 +561,7 @@ git commit -m "feat: gate ecommerce results and rollout stages"
 ### Task 11: 建立真实黄金回归集和浏览器验收
 
 **Files:**
+
 - Create: `web/e2e/ecommerce-product-generation.spec.ts`
 - Create: `web/e2e/fixtures/ecommerce-product-cases.json`
 - Create: `docs/content/docs/progress/pending-test.mdx` entry for the release
