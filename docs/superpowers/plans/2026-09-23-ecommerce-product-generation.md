@@ -511,12 +511,6 @@ git commit -m "feat: route ecommerce roles through model compilers"
 - Create: `web/src/lib/server/ecommerce-quality-check.test.ts`
 - Modify: `web/src/lib/server/ecommerce-generation-service.ts`
 - Modify: `web/src/lib/server/ecommerce-generation-snapshot.ts`
-- Create: `web/src/lib/server/ecommerce-generation-trace.ts`
-- Modify: `web/src/lib/server/generation-log-store.ts`
-- Modify: `web/src/lib/server/database/schema.ts`
-- Modify: `web/src/app/api/admin/generation-logs/route.ts`
-- Modify: `web/src/app/api/generation-logs/route.ts`
-- Modify: `web/src/components/admin/admin-generation-log.tsx`
 - Modify: `web/src/lib/server/agent-run-public.ts`
 - Modify: `web/src/app/(user)/create/components/creative-generation-waiting.tsx`
 - Test: `web/src/lib/server/agent-run-public.test.ts`
@@ -537,9 +531,9 @@ Run: `pnpm exec vitest run web/src/lib/server/ecommerce-quality-check.test.ts we
 
 Expected: FAIL before quality check and rollout gates exist.
 
-- [x] **Step 3: 实现双门禁、灰度开关和管理员可观测流水**
+- [x] **Step 3: 实现双门禁和灰度开关**
 
-自动验收只负责结构和硬失败；业务人工复核通过黄金回归集完成。验收结果写入内部快照，不写入公开消息。商品身份、轮廓、颜色材质、比例视角无法判断时必须按硬失败拦截；Logo/包装文字仅在商品基线明确不存在品牌文字时允许 `not_applicable`。每个实际电商生图任务另把视觉分析、编辑规划、图片生成和结果验收的结构化输出持久化到生成日志 `ecommerce_trace`；Trace 先写入图片任务作为持久待办，再同步到生成日志，管理员读取缺失 Trace 的日志时从图片任务补齐并回写。管理员日志详情可查看实际模型、渠道、上游模型、执行 Prompt、图片任务 ID、八项质检和最终门禁，普通用户接口必须剥离内部流水。
+自动验收只负责结构和硬失败；业务人工复核通过黄金回归集完成。验收结果写入内部快照，不写入公开消息。商品身份、轮廓、颜色材质、比例视角无法判断时必须按硬失败拦截；Logo/包装文字仅在商品基线明确不存在品牌文字时允许 `not_applicable`。开发过程中临时新增的管理员可观测需求单列为 Task 10A。
 
 - [x] **Step 4: 运行测试确认通过**
 
@@ -547,16 +541,55 @@ Run: `pnpm exec vitest run web/src/lib/server/ecommerce-quality-check.test.ts we
 
 Expected: PASS with strict hard-fail behavior and legacy fallback.
 
-2026-09-25 开发环境真实验收：Run `agent-XF7fG7af1wOqk5VHePxjr`、图片任务 `e3259bac-8838-4605-8954-347b286a87b3` 完成四阶段流水，实际路由为 `gpt-5.6-sol -> gpt-5.6-sol -> gpt-image-2.5-sunburst -> gemini-3.8-flash-high`，最终门禁 `passed`。管理员 API 与 1440px/390px 后台详情可读取和展开四阶段输出，普通用户 API 已确认剥离 Trace，持久化数据未包含 Data URL。Agent 子任务日志当前不写 `conversation_id`，可观测关联以 `ecommerce_trace.runId` 和 `imageTaskIds` 为准。
-
-边界记录：视觉分析候选全部失败时，Run 进入 `paused/needs_review`，不再被标成普通执行失败；视觉分析或编辑规划在图片子任务创建前停止时，只存在 Agent Run 事件，不存在图片生成日志。本步骤保证的是“每个实际电商图片任务”的完整 Trace。若产品要审计全部用户请求的前置失败，应另立 Agent Run 可观测任务，不能用空图片日志混淆两类实体。
-
 - [x] **Step 5: Commit**
 
 ```bash
 git add web/src/lib/server/ecommerce-quality-check.ts web/src/lib/server/ecommerce-quality-check.test.ts web/src/lib/server/ecommerce-generation-service.ts web/src/lib/server/ecommerce-generation-snapshot.ts web/src/lib/server/agent-run-public.ts web/src/app/(user)/create/components/creative-generation-waiting.tsx web/src/lib/server/agent-run-public.test.ts
 git commit -m "feat: gate ecommerce results and rollout stages"
 ```
+
+### Task 10A: 补充每个实际电商图片任务的管理员可观测流水（临时突发新增，已完成）
+
+**需求类型：** Task 10 开发过程中新增的临时突发需求。该任务不改变普通用户的一句话创作体验，只为管理员提供端到端诊断和验收证据。
+
+**Files:**
+
+- Create: `web/src/lib/server/ecommerce-generation-trace.ts`
+- Create: `web/src/lib/server/ecommerce-generation-trace.test.ts`
+- Create: `web/src/lib/server/generation-log-trace-outbox.test.ts`
+- Modify: `web/src/lib/server/generation-log-store.ts`
+- Modify: `web/src/lib/server/generation-log-repository.ts`
+- Modify: `web/src/lib/server/image-task-store.ts`
+- Modify: `web/src/lib/server/database/schema.ts`
+- Modify: `web/src/app/api/admin/generation-logs/route.ts`
+- Modify: `web/src/app/api/generation-logs/route.ts`
+- Modify: `web/src/components/admin/admin-generation-log.tsx`
+
+- [x] **Step 1: 定义可观测范围和权限边界**
+
+每个已经创建图片子任务的电商任务记录 `视觉分析 -> 编辑规划 -> 图片生成 -> 结果验收 -> 最终门禁`。每阶段保存状态、实际逻辑角色、渠道、上游模型和结构化输出；图片生成阶段额外保存 provider profile、编译器版本、保护区域、图片任务 ID 和实际执行 Prompt。仅管理员接口返回完整 Trace，普通用户生成日志和公开 Agent Run 必须剥离视觉事实、EditPlan、执行 Prompt、质检内部理由和模型路由细节。
+
+- [x] **Step 2: 建立持久化 Trace 和补写机制**
+
+Trace 使用 `ecommerce-generation-trace.v1` 契约写入 `generation_logs.ecommerce_trace`。为避免生成日志短暂不可用造成永久缺失，完整 Trace 先保存到图片任务作为持久待办，再同步到生成日志；管理员读取日志时会从图片任务补齐缺失 Trace 并回写。持久化内容不得包含 Data URL，跨层关联统一使用 `runId + imageTaskIds`。
+
+- [x] **Step 3: 在管理员调用记录展示完整流水**
+
+管理员可从单条图片调用记录展开四阶段结构化输出，并查看最终门禁 `passed`、`needs_review` 或 `failed`。界面同时适配桌面和移动端长 JSON，不影响普通用户创作入口。
+
+- [x] **Step 4: 覆盖失败关闭、隐私和耐久性回归**
+
+商品身份、轮廓、颜色材质、比例视角返回 `not_applicable` 时按硬失败拦截；Logo/包装文字仅在商品基线没有品牌文字时允许不适用。覆盖管理员可见、普通用户不可见、图片任务 Trace 待办、管理员读取补写、视觉分析候选耗尽进入 `paused/needs_review`，以及 Chat、Responses、Gemini 多模态传输契约。
+
+- [x] **Step 5: 完成真实任务和界面验收**
+
+2026-09-25 开发环境真实任务：Run `agent-XF7fG7af1wOqk5VHePxjr`、图片任务 `e3259bac-8838-4605-8954-347b286a87b3`，实际路由为 `gpt-5.6-sol -> gpt-5.6-sol -> gpt-image-2.5-sunburst -> gemini-3.8-flash-high`，最终门禁 `passed`。PostgreSQL、管理员 API 与 1440px/390px 后台详情均确认包含完整 Trace；普通用户 API 不返回内部流水。
+
+- [x] **Step 6: 完成回归、开发部署和提交**
+
+专项回归 `6 files / 94 tests` 通过；全量 Vitest `574 files / 2905 tests` 通过，另有 `4 files / 9 tests` 因环境条件跳过；TypeScript、ESLint、Prettier、生产构建和暂存差异检查通过。开发环境由 `docker-compose.dev.yml` 重建，`app` 健康、worker 在线、`/api/health/ready` 就绪，`ECOMMERCE_GENERATION_ROLLOUT=internal`。提交：`e1bf34bfe96801b2dd3e948b51a0da7740355c11`。
+
+**边界：** 视觉分析或编辑规划在图片子任务创建前停止时，只存在 Agent Run 事件，不存在图片生成日志。本任务保证“每个实际电商图片任务”的完整 Trace；若要审计全部用户请求的前置失败，必须另建 Agent Run 可观测入口，不能伪造空图片日志。
 
 ### Task 11: 建立真实黄金回归集和浏览器验收
 
@@ -608,13 +641,15 @@ git commit -m "test: add ecommerce product generation golden regression"
 4. Task 7：上线非商品区域 `local_edit`。
 5. Task 8：上线连续编辑、双基线和分支。
 6. Task 9：接入多模型候选和 provider compiler。
-7. Task 10-11：启用验收、灰度和黄金回归门禁。
+7. Task 10：启用结果验收和灰度门禁。
+8. Task 10A：补齐管理员可观测流水和耐久性保障（临时突发新增，已完成）。
+9. Task 11：建立真实黄金回归集和浏览器验收门禁。
 
 每一步必须先通过自动测试，再进行内部账号验收，然后才能扩大灰度范围。商品核心失败、参考角色错误、历史结果覆盖或旧流程回退失效，任何一项都停止发布。
 
 ## 计划自检
 
-- 规格覆盖：目标、两条工作流、连续编辑、模型路由、商品 mask、失败回退、用户体验、发布灰度和验收均有对应任务。
+- 规格覆盖：目标、两条工作流、连续编辑、模型路由、商品 mask、失败回退、用户体验、管理员可观测、发布灰度和验收均有对应任务。
 - 占位符检查：计划没有依赖未定义的组件名称、任务编号或待补充字段；所有新接口在任务中给出名称和职责。
 - 类型一致性：后续任务使用的 `EcommerceEditPlan`、`buildProductProtectionRegions`、`routeEcommerceRole`、`compileEcommerceImageRequest`、`checkEcommerceResult` 均在前置任务中定义。
 - 范围检查：首期只覆盖 `/create`，Canvas 和短剧明确排除，商品本体修改单独延后。
