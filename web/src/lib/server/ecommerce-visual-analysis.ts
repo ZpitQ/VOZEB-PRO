@@ -268,6 +268,31 @@ function visualAnalysisDebugSummary(value: unknown) {
         referenceKeys: references.slice(0, 2).map((item) => (isRecord(item) ? Object.keys(item).slice(0, 24) : [])),
         referenceIds: references.slice(0, 4).map((item) => (isRecord(item) ? text(item.assetId || item.asset_id || item.id) : "")),
         referenceRoles: references.slice(0, 4).map((item) => (isRecord(item) ? text(item.role || item.assetRole || item.asset_role) : "")),
+        referenceValidation: references.slice(0, 2).map((item) =>
+            isRecord(item)
+                ? {
+                      role: text(item.role),
+                      confidence: text(item.confidence),
+                      visualEvidence:
+                          item.visualEvidence === null
+                              ? "null"
+                              : {
+                                    type: typeof item.visualEvidence,
+                                    keys: isRecord(item.visualEvidence) ? Object.keys(item.visualEvidence).slice(0, 12) : [],
+                                    valid: Boolean(normalizeEvidence(item.visualEvidence)),
+                                },
+                      productFacts: item.productFacts === null ? "null" : normalizeProductFacts(item.productFacts) ? "valid" : "invalid",
+                      sceneFacts: item.sceneFacts === null ? "null" : normalizeSceneFacts(item.sceneFacts) ? "valid" : "invalid",
+                      productCore: item.productCore === null ? "null" : { type: typeof item.productCore, keys: isRecord(item.productCore) ? Object.keys(item.productCore).slice(0, 12) : [] },
+                      productCoreValid: item.productCore === null ? true : Boolean(normalizeRegion(item.productCore)),
+                      fusionHalo: item.fusionHalo === null ? "null" : { type: typeof item.fusionHalo, keys: isRecord(item.fusionHalo) ? Object.keys(item.fusionHalo).slice(0, 12) : [] },
+                      fusionHaloValid: item.fusionHalo === null ? true : Boolean(normalizeRegion(item.fusionHalo)),
+                      editableTargetCount: Array.isArray(item.editableTargets) ? item.editableTargets.length : null,
+                      editableTargetsValid: Boolean(normalizeEditableTargets(item.editableTargets)),
+                      referenceValid: Boolean(normalizeReference(item)),
+                  }
+                : { type: typeof item },
+        ),
     };
 }
 
