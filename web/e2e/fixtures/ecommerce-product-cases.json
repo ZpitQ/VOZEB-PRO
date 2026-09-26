@@ -1,0 +1,65 @@
+[
+    {
+        "id": "storage-cabinet",
+        "category": "收纳",
+        "productFileName": "storage-cabinet.webp",
+        "fixturePath": "public/generation-smoke.webp",
+        "userRequest": "把这个收纳柜自然放进明亮的现代简约客厅，保持商品外观不变。",
+        "expectedOperation": "product_to_scene",
+        "hardProtections": ["outline", "brand_text", "color", "material", "scale", "view"]
+    },
+    {
+        "id": "floor-lamp",
+        "category": "灯具",
+        "productFileName": "floor-lamp.webp",
+        "fixturePath": "public/generation-smoke.webp",
+        "userRequest": "把这盏落地灯放进温暖的欧美现代客厅，保持灯具结构和材质不变。",
+        "expectedOperation": "product_to_scene",
+        "hardProtections": ["outline", "brand_text", "color", "material", "scale", "view"]
+    },
+    {
+        "id": "dish-rack",
+        "category": "厨房",
+        "productFileName": "dish-rack.webp",
+        "fixturePath": "public/generation-smoke.webp",
+        "userRequest": "把这个沥水架放在明亮整洁的欧美厨房台面上，保持商品细节不变。",
+        "expectedOperation": "product_to_scene",
+        "hardProtections": ["outline", "brand_text", "color", "material", "scale", "view"]
+    },
+    {
+        "id": "bathroom-vanity",
+        "category": "卫浴",
+        "productFileName": "bathroom-vanity.webp",
+        "fixturePath": "public/generation-smoke.webp",
+        "userRequest": "把这个浴室柜放进通透明亮的现代欧美浴室，保持柜体比例和材质不变。",
+        "expectedOperation": "product_to_scene",
+        "hardProtections": ["outline", "brand_text", "color", "material", "scale", "view"]
+    },
+    {
+        "id": "cushion",
+        "category": "软装",
+        "productFileName": "cushion.webp",
+        "fixturePath": "public/generation-smoke.webp",
+        "userRequest": "把这个抱枕放在自然温暖的现代简约沙发上，保持颜色和织物纹理不变。",
+        "expectedOperation": "product_to_scene",
+        "hardProtections": ["outline", "brand_text", "color", "material", "scale", "view"]
+    },
+    {
+        "id": "bed-frame",
+        "category": "家具",
+        "productFileName": "bed-frame.webp",
+        "fixturePath": "public/generation-smoke.webp",
+        "userRequest": "把这张木床放进明亮舒适的现代欧美卧室，保持床架结构和木纹不变。",
+        "expectedOperation": "product_to_scene",
+        "hardProtections": ["outline", "brand_text", "color", "material", "scale", "view"]
+    },
+    {
+        "id": "toaster",
+        "category": "小家电",
+        "productFileName": "toaster.webp",
+        "fixturePath": "public/generation-smoke.webp",
+        "userRequest": "把这个烤面包机放在干净明亮的欧美厨房台面上，保持机身结构和颜色不变。",
+        "expectedOperation": "product_to_scene",
+        "hardProtections": ["outline", "brand_text", "color", "material", "scale", "view"]
+    }
+]
