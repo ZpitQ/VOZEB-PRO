@@ -58,6 +58,18 @@ describe("ecommerce generation service", () => {
         expect(mask.data[(20 * 64 + 30) * 4 + 3]).toBe(255);
     });
 
+    it("computes product bounds for production-size images without overflowing the call stack", async () => {
+        const source = await sharp({ create: { width: 1024, height: 1024, channels: 4, background: "#ffffff" } })
+            .composite([{ input: { create: { width: 800, height: 800, channels: 4, background: "#252525" } }, left: 112, top: 112 }])
+            .png()
+            .toBuffer();
+
+        const regions = await buildWhiteBackgroundProductProtection(source, analysis(), "product");
+
+        expect(regions.sourceSize).toEqual({ width: 1024, height: 1024 });
+        expect(regions.productCore.rectangles).toEqual([{ x: 112, y: 112, width: 800, height: 800 }]);
+    });
+
     it("accepts a neutral near-white background used by uploaded product images", async () => {
         const source = await productImage({ background: "#f5f5f4", products: [{ left: 22, top: 10, width: 20, height: 28 }] });
 

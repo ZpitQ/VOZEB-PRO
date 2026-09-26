@@ -471,6 +471,10 @@ function mergeChildTasks(current: AgentRunChildTask[], incoming: AgentRunChildTa
 function assistantUpdate(run: AgentRun, event?: { type: string; data?: unknown }) {
     const data = event?.data && typeof event.data === "object" ? (event.data as Record<string, unknown>) : {};
     if (event?.type.startsWith("run.review.")) return undefined;
+    if (event?.type === "task.needs_review") {
+        const reviewText = (typeof data.error === "string" ? data.error : run.tasks.find((task) => task.status === "needs_review")?.error)?.trim();
+        if (reviewText) return { status: "running" as const, content: reviewText };
+    }
     if (event?.type === "run.retry.requested") return { status: "running" as const, content: "正在重新分析并执行这次请求…" };
     if (run.status === "running" && event?.type === "task.retry.requested") return { status: "running" as const, content: "正在重新生成失败任务…" };
     if (run.status === "completed") {

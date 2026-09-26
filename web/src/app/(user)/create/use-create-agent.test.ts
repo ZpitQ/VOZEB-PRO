@@ -93,4 +93,15 @@ describe("useCreateAgent submission retry", () => {
         expect(connectionErrorSource).not.toContain("setActiveRunId(undefined)");
         expect(connectionErrorSource).not.toContain("setActiveRunStatus(undefined)");
     });
+
+    it("keeps the rendered run status synchronized with SSE status updates", async () => {
+        const source = await readFile(resolve(process.cwd(), "src/app/(user)/create/use-create-agent.ts"), "utf8");
+        const watchStart = source.indexOf("const watchRun");
+        const statusStart = source.indexOf("onStatus:", watchStart);
+        const statusSource = source.slice(statusStart, source.indexOf("onTaskCompleted:", statusStart));
+
+        expect(statusSource).toContain("setActiveRunStatus(status)");
+        expect(statusSource).toContain("setRunDetails");
+        expect(statusSource).toContain("[run.id]");
+    });
 });

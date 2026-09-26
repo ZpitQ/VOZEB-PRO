@@ -330,7 +330,10 @@ export function useCreateAgent() {
                     if (generation === conversationGenerationRef.current && activeConversationRef.current === run.conversationId) updateAssistant(assistantMessageId, text);
                 },
                 onStatus: (status) => {
-                    if (generation === conversationGenerationRef.current && activeConversationRef.current === run.conversationId) setActiveRunStatus(status);
+                    if (generation === conversationGenerationRef.current && activeConversationRef.current === run.conversationId) {
+                        setActiveRunStatus(status);
+                        setRunDetails((current) => ({ ...current, [run.id]: { ...(current[run.id] || run), status } }));
+                    }
                 },
                 onTaskCompleted: () => {
                     if (generation === conversationGenerationRef.current && activeConversationRef.current === run.conversationId) void refreshAssets(run.conversationId, generation).catch(() => undefined);
@@ -416,7 +419,7 @@ export function useCreateAgent() {
                 return false;
             }
         },
-        [refreshConversations, updateAssistant, watchRun],
+        [isCurrentConversation, refreshConversations, updateAssistant, watchRun],
     );
 
     const submit = useCallback(

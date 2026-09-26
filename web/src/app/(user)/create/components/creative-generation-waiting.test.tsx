@@ -18,6 +18,29 @@ describe("creative generation waiting", () => {
         expect(creativeGenerationWaitingCopy({ mode: "image", runStatus: "running", progressText: "正在检查商品细节", elapsedSeconds: 180 })).toBe("正在检查商品细节");
     });
 
+    it("shows the actionable review reason when an ecommerce run pauses", () => {
+        expect(
+            creativeGenerationWaitingCopy({
+                mode: "image",
+                runStatus: "paused",
+                progressText: "正在规划场景",
+                reviewText: "请确认这张图片是商品图还是场景参考图。",
+                elapsedSeconds: 5,
+            }),
+        ).toBe("请确认这张图片是商品图还是场景参考图。");
+    });
+
+    it("keeps an actionable paused progress message when run details have no task error", () => {
+        expect(
+            creativeGenerationWaitingCopy({
+                mode: "image",
+                runStatus: "paused",
+                progressText: "请确认这张图片是商品图还是场景参考图。",
+                elapsedSeconds: 5,
+            }),
+        ).toBe("请确认这张图片是商品图还是场景参考图。");
+    });
+
     it("adapts the comfort copy by media type and natural elapsed minutes", () => {
         expect(creativeGenerationWaitingCopy({ mode: "image", runStatus: "running", progressText: "正在处理创作任务", elapsedSeconds: 20 })).toContain("画面正在一点点显现");
         expect(creativeGenerationWaitingCopy({ mode: "video", runStatus: "running", progressText: "正在处理创作任务", elapsedSeconds: 20 })).toContain("镜头正在一帧帧铺开");

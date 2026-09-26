@@ -417,6 +417,30 @@ describe("setAgentRunStatus", () => {
         expect((mutation as { assistant?: { metadata?: Record<string, unknown> } } | null)?.assistant?.metadata).not.toHaveProperty("review");
     });
 
+    it("persists an actionable clarification question when a task needs review", async () => {
+        const run = canvasRun();
+        let mutation: Record<string, unknown> | null = null;
+        mocks.mutateCreativeRun.mockImplementation(async (_id, _ttl, mutate) => {
+            mutation = mutate(run);
+            return mutation && "run" in mutation ? mutation.run : null;
+        });
+
+        await updateAgentRunById(
+            "run",
+            {
+                status: "paused",
+                tasks: [{ ...run.tasks[0], status: "needs_review", error: "请确认这张图片是商品图还是场景参考图。" }, run.tasks[1]],
+            },
+            { type: "task.needs_review", data: { taskId: "image", title: "商品图", error: "请确认这张图片是商品图还是场景参考图。" } },
+            ["running"],
+        );
+
+        expect(mutation).toMatchObject({
+            run: { status: "paused", tasks: [{ status: "needs_review" }, { status: "completed" }] },
+            assistant: { status: "running", content: "请确认这张图片是商品图还是场景参考图。" },
+        });
+    });
+
     it("persists background review without rewriting the completed assistant message", async () => {
         const run = { ...canvasRun(), status: "completed" as const };
         let mutation: Record<string, unknown> | null = null;

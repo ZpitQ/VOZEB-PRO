@@ -406,12 +406,18 @@ function neighbors(index: number, width: number, height: number) {
 }
 
 function componentBounds(component: number[], width: number): ProductProtectionRectangle {
-    const xs = component.map((index) => index % width);
-    const ys = component.map((index) => Math.floor(index / width));
-    const left = Math.min(...xs);
-    const top = Math.min(...ys);
-    const right = Math.max(...xs);
-    const bottom = Math.max(...ys);
+    let left = width;
+    let top = Number.POSITIVE_INFINITY;
+    let right = -1;
+    let bottom = -1;
+    for (const index of component) {
+        const x = index % width;
+        const y = Math.floor(index / width);
+        left = Math.min(left, x);
+        top = Math.min(top, y);
+        right = Math.max(right, x);
+        bottom = Math.max(bottom, y);
+    }
     return { x: left, y: top, width: right - left + 1, height: bottom - top + 1 };
 }
 

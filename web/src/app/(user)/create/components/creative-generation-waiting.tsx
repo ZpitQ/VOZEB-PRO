@@ -22,7 +22,8 @@ export function CreativeGenerationWaiting({ run, message }: { run?: CreativeAgen
     }, [startedAt]);
 
     const elapsedSeconds = Math.max(0, Math.floor((now - startedAt) / 1000));
-    const copy = creativeGenerationWaitingCopy({ mode: creativeRunMode(run), runStatus: run?.status, progressText: message.content, elapsedSeconds });
+    const reviewText = run?.status === "paused" ? run.tasks.find((task) => task.status === "needs_review" && task.error?.trim())?.error : undefined;
+    const copy = creativeGenerationWaitingCopy({ mode: creativeRunMode(run), runStatus: run?.status, progressText: message.content, reviewText, elapsedSeconds });
 
     return (
         <div data-testid="creative-generation-waiting" className="mb-3 max-w-[520px] py-1 text-[#667085] dark:text-[#a0a9b4]">
@@ -41,9 +42,24 @@ export function CreativeGenerationWaiting({ run, message }: { run?: CreativeAgen
     );
 }
 
-export function creativeGenerationWaitingCopy({ mode, runStatus, progressText, elapsedSeconds }: { mode?: "text" | "image" | "video" | "audio"; runStatus?: CreativeAgentRun["status"]; progressText: string; elapsedSeconds: number }) {
+export function creativeGenerationWaitingCopy({
+    mode,
+    runStatus,
+    progressText,
+    reviewText,
+    elapsedSeconds,
+}: {
+    mode?: "text" | "image" | "video" | "audio";
+    runStatus?: CreativeAgentRun["status"];
+    progressText: string;
+    reviewText?: string;
+    elapsedSeconds: number;
+}) {
     const progress = progressText.trim();
+    const review = reviewText?.trim();
+    if (runStatus === "paused" && review) return review;
     if (["正在识别商品", "正在规划场景", "正在生成图片", "正在检查商品细节"].includes(progress)) return progress;
+    if (runStatus === "paused" && progress && !/任务已暂停|任务仍在后台保存/.test(progress)) return progress;
     if (runStatus === "paused" || /任务已暂停/.test(progress)) return "主人，任务已经替你暂停，进度好好保存着，想继续时叫我就好。";
     if (/连接暂时中断|无法确认实时状态/.test(progress)) return "主人，连接刚刚有些不稳，不过任务仍在后台继续，我正在替你确认。";
     if (/连接已恢复|恢复连接/.test(progress)) return "主人，连接恢复啦，我会继续守着这次创作。";
