@@ -10,7 +10,7 @@ import { requestStructuredText, type TextPlanningCandidate } from "@/lib/server/
 import { registerAgentTaskAssets } from "@/lib/server/agent-run-assets";
 import { buildAgentProjectHandoff } from "@/lib/server/agent-run-project-handoff";
 import { getAgentRun, updateAgentRunById, updateAgentRunTaskById, type AgentRun, type AgentRunChildTask, type AgentRunReference, type AgentRunTask } from "@/lib/server/agent-run-store";
-import { routeEcommerceRole } from "@/lib/server/ecommerce-model-routing";
+import { resolveEcommerceRoleCandidates, routeEcommerceRole, type EcommerceRoleCandidate } from "@/lib/server/ecommerce-model-routing";
 import { publicEcommerceProgress } from "@/lib/server/ecommerce-generation-service";
 import { assetAccessUrl, creativeAssetContext, resolveTaskReferences } from "@/lib/server/agent-run-surface-policy";
 import { selectedCanvasNodeIds } from "@/lib/server/agent-run-canvas-snapshot";
@@ -28,7 +28,7 @@ import type { AgentFunctionCallResult } from "./agent-function-call";
 import { agentSurfaceImageSize, canvasReferenceContext, canvasReferenceSupportsTask, canvasSnapshotNodes, isMediaReferenceType, resolveAgentTaskRatio, resolveCanvasTaskTargetNodeId, selectedCanvasReferenceNodes } from "./agent-run-task-input";
 import { hasSystemAiCharge, readSystemAiBilling, systemAiBillingHeaders } from "./system-ai-billing";
 import { acceptsMediaReference, mergeTaskReferences, taskImageUrls, taskReferences, textConstraintInstruction } from "./agent-run-execution-helpers";
-import { checkEcommerceResult, ecommerceQualityGate, unavailableEcommerceQualityCheck } from "./ecommerce-quality-check";
+import { checkEcommerceResultWithFallback, ecommerceQualityGate, unavailableEcommerceQualityCheck } from "./ecommerce-quality-check";
 import { buildEcommerceGenerationTrace } from "./ecommerce-generation-trace";
 
 export { planToOps, taskResultOps } from "./agent-run-canvas-ops";
@@ -727,20 +727,31 @@ export async function runTaskWithRetry(runId: string, task: AgentRunTask, origin
     }
 }
 
+function uniqueEcommerceRoleCandidates(candidates: Array<EcommerceRoleCandidate | null>): EcommerceRoleCandidate[] {
+    const seen = new Set<string>();
+    return candidates.filter((candidate): candidate is EcommerceRoleCandidate => {
+        if (!candidate) return false;
+        const key = `${candidate.logicalModelId}\u0000${candidate.channelId}\u0000${candidate.upstreamModel}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
 async function checkAndRecordEcommerceResult(run: AgentRun, task: AgentRunTask, result: unknown, sourceTaskIds: string[], origin: string, cookie: string, settings: Awaited<ReturnType<typeof getAuthSettings>>, executionId: string) {
     if (!(await updateAgentRunById(run.id, {}, { type: "ecommerce.progress", data: { stage: "checking_result", text: publicEcommerceProgress("checking_result") } }, ["running"], executionId))) {
         throw new Error("Agent Run 已暂停、取消或已由新执行器接管");
     }
     const snapshot = run.ecommerceSnapshot;
     const routeSnapshot = snapshot?.modelRouteSnapshots?.quality_check;
-    const candidate = routeSnapshot ? routeEcommerceRole(settings, "quality_check", routeSnapshot) : null;
+    const frozenCandidate = routeSnapshot ? routeEcommerceRole(settings, "quality_check", routeSnapshot) : null;
+    const candidates = uniqueEcommerceRoleCandidates([frozenCandidate, ...resolveEcommerceRoleCandidates(settings, "quality_check", "text")]);
     const productReference = task.references?.find((item) => item.ecommerceRole === "product" && item.assetId && item.url);
     const imageUrls = taskImageUrls(result);
     const resultImages = imageUrls.map((url, index) => ({ resultId: sourceTaskIds[index] || `${task.id}-${index + 1}`, url }));
-    const fallbackRole = routeSnapshot || ({ logicalRole: "quality_check", capability: "text", logicalModelId: "", channelId: "", upstreamModel: "", apiFormat: "openai" } as const);
+    const fallbackRole = routeSnapshot || candidates[0]?.snapshot || ({ logicalRole: "quality_check", capability: "text", logicalModelId: "", channelId: "", upstreamModel: "", apiFormat: "openai" } as const);
     const qualityCheck =
-        snapshot?.plan && candidate && productReference
-            ? await checkEcommerceResult(
+        snapshot?.plan && candidates.length && productReference
+            ? await checkEcommerceResultWithFallback(
                   {
                       origin,
                       cookie,
@@ -750,9 +761,9 @@ async function checkAndRecordEcommerceResult(run: AgentRun, task: AgentRunTask, 
                       productReference: { assetId: productReference.assetId!, url: productReference.url },
                       resultImages,
                   },
-                  candidate,
+                  candidates,
               )
-            : unavailableEcommerceQualityCheck(!snapshot?.plan ? "电商编辑计划缺失" : !candidate ? "结果验收模型快照不可用" : "商品参考图不可用", fallbackRole);
+            : unavailableEcommerceQualityCheck(!snapshot?.plan ? "电商编辑计划缺失" : !candidates.length ? "结果验收模型快照不可用" : "商品参考图不可用", fallbackRole);
     const gate = ecommerceQualityGate(qualityCheck);
     const ecommerceSnapshot = snapshot ? { ...snapshot, qualityCheck } : snapshot;
     if (!ecommerceSnapshot || !(await updateAgentRunById(run.id, { ecommerceSnapshot }, { type: "ecommerce.quality", data: { status: gate.publicStatus, text: gate.publicMessage } }, ["running"], executionId))) {

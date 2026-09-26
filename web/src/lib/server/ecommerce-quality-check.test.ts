@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import type { EcommerceRoleCandidate } from "./ecommerce-model-routing";
-import { ECOMMERCE_QUALITY_CHECK_KEYS, checkEcommerceResult, ecommerceQualityGate, shouldBlockEcommerceResult, unavailableEcommerceQualityCheck } from "./ecommerce-quality-check";
+import { ECOMMERCE_QUALITY_CHECK_KEYS, checkEcommerceResult, checkEcommerceResultWithFallback, ecommerceQualityGate, shouldBlockEcommerceResult, unavailableEcommerceQualityCheck } from "./ecommerce-quality-check";
 
 const mocks = vi.hoisted(() => ({
     requestStructuredText: vi.fn(),
@@ -79,6 +79,19 @@ describe("ecommerce quality check", () => {
         expect(ecommerceQualityGate(checked).action).toBe("pause");
     });
 
+    it("uses the next quality-check candidate only when the preferred candidate is unavailable", async () => {
+        const preferred = candidate("quality-primary", "gemini-3.8-flash-high", "quality-primary-channel");
+        const fallback = candidate("quality-fallback", "gpt-5.6-sol", "quality-fallback-channel");
+        mocks.requestStructuredText.mockRejectedValueOnce(new Error("Verify your account to continue.")).mockResolvedValueOnce(modelCall(modelResult()));
+
+        const checked = await checkEcommerceResultWithFallback(request(), [preferred, fallback]);
+
+        expect(checked.status).toBe("passed");
+        expect(checked.modelRole).toEqual(fallback.snapshot);
+        expect(mocks.requestStructuredText).toHaveBeenCalledTimes(2);
+        expect(mocks.requestStructuredText.mock.calls.map(([input]) => input.candidate.snapshot)).toEqual([preferred.snapshot, fallback.snapshot]);
+    });
+
     it("does not turn an unavailable snapshot into a pass", () => {
         const checked = unavailableEcommerceQualityCheck("quality route missing", candidate().snapshot);
 
@@ -100,20 +113,20 @@ function request() {
     };
 }
 
-function candidate(): EcommerceRoleCandidate {
+function candidate(logicalModelId = "quality-model", upstreamModel = "gpt-5.6-sol", channelId = "quality-channel"): EcommerceRoleCandidate {
     return {
         logicalRole: "quality_check",
         capability: "text",
-        logicalModelId: "quality-model",
-        channelId: "quality-channel",
-        upstreamModel: "gpt-5.6-sol",
-        channel: { id: "quality-channel", name: "Quality", enabled: true, apiFormat: "openai", baseUrl: "https://example.com", apiKey: "secret", models: [] },
+        logicalModelId,
+        channelId,
+        upstreamModel,
+        channel: { id: channelId, name: "Quality", enabled: true, apiFormat: "openai", baseUrl: "https://example.com", apiKey: "secret", models: [] },
         snapshot: {
             logicalRole: "quality_check",
             capability: "text",
-            logicalModelId: "quality-model",
-            channelId: "quality-channel",
-            upstreamModel: "gpt-5.6-sol",
+            logicalModelId,
+            channelId,
+            upstreamModel,
             apiFormat: "openai",
         },
     } as EcommerceRoleCandidate;

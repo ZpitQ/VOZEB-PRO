@@ -58,7 +58,7 @@ vi.mock("./ecommerce-edit-planner", async (importOriginal) => {
 });
 vi.mock("./ecommerce-quality-check", async (importOriginal) => {
     const actual = await importOriginal<typeof import("./ecommerce-quality-check")>();
-    return { ...actual, checkEcommerceResult: mocks.checkEcommerceResult };
+    return { ...actual, checkEcommerceResult: mocks.checkEcommerceResult, checkEcommerceResultWithFallback: mocks.checkEcommerceResult };
 });
 vi.mock("@/lib/server/agent-run-store", async (importOriginal) => {
     const actual = await importOriginal<typeof import("@/lib/server/agent-run-store")>();
@@ -202,7 +202,7 @@ describe("executeAgentRun backend settings", () => {
                 height: 48,
             },
         ]);
-        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
+        mocks.getAuthSettings.mockResolvedValue(ecommerceSettingsWithQualityFallback());
         mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceAnalysis("product"));
         mocks.planEcommerceEdit.mockResolvedValue({
             plan: ecommercePlan(),
@@ -260,6 +260,14 @@ describe("executeAgentRun backend settings", () => {
             },
         });
         expect(mocks.checkEcommerceResult).toHaveBeenCalledOnce();
+        expect(mocks.checkEcommerceResult.mock.calls[0]?.[1]).toEqual([
+            expect.objectContaining({ logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" }),
+            expect.objectContaining({
+                logicalModelId: "quality-fallback",
+                channelId: "quality-fallback-channel",
+                upstreamModel: "gpt-5.6-sol",
+            }),
+        ]);
         expect(mocks.attachEcommerceTraceToGenerationLogs).toHaveBeenCalledWith(
             ["child-ecommerce"],
             expect.objectContaining({
@@ -1637,6 +1645,32 @@ function ecommerceSettings() {
     channel.apiFormat = "openai";
     channel.models = ["gpt-image-2.5-flare"];
     model.bindings[0].upstreamModel = "gpt-image-2.5-flare";
+    return value as never;
+}
+
+function ecommerceSettingsWithQualityFallback() {
+    const value = ecommerceSettings() as unknown as {
+        systemChannels: Array<Record<string, unknown>>;
+        logicalModels: Array<Record<string, unknown>>;
+        ecommerceModelRoles?: Record<string, string[]>;
+    };
+    value.systemChannels.push({
+        id: "quality-fallback-channel",
+        name: "Quality fallback",
+        enabled: true,
+        apiFormat: "openai",
+        baseUrl: "https://api.example.com/v1",
+        apiKey: "quality-fallback-secret",
+        models: ["gpt-5.6-sol"],
+    });
+    value.logicalModels.push({
+        id: "quality-fallback",
+        name: "Quality fallback",
+        capability: "text",
+        enabled: true,
+        bindings: [{ id: "quality-fallback-binding", channelId: "quality-fallback-channel", upstreamModel: "gpt-5.6-sol", enabled: true, priority: 1 }],
+    });
+    value.ecommerceModelRoles = { quality_check: ["planner", "quality-fallback"] };
     return value as never;
 }
 

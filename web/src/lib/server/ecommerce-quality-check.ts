@@ -7,7 +7,7 @@ import { hasSystemAiCharge, readSystemAiBilling, systemAiBillingHeaders, systemA
 import { parseValidatedAgentFunctionCall } from "./agent-function-call";
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import type { EcommerceRoleCandidate, EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
-import { requestStructuredText } from "./text-planning-runtime";
+import { rankTextPlanningCandidates, requestStructuredText } from "./text-planning-runtime";
 
 export const ECOMMERCE_QUALITY_CHECK_VERSION = "ecommerce-quality.v1" as const;
 export const ECOMMERCE_QUALITY_CHECK_KEYS = ["product_identity", "product_silhouette", "product_color_material", "product_proportions_view", "brand_logo", "packaging_text", "scene_intent", "composition_lighting"] as const;
@@ -82,6 +82,16 @@ export async function checkEcommerceResult(input: EcommerceQualityCheckRequest, 
     } catch (error) {
         return unavailableEcommerceQualityCheck(error instanceof Error ? error.message : "结果验收模型不可用", candidate.snapshot);
     }
+}
+
+export async function checkEcommerceResultWithFallback(input: EcommerceQualityCheckRequest, candidates: EcommerceRoleCandidate[]): Promise<EcommerceQualityCheck> {
+    let latest: EcommerceQualityCheck | null = null;
+    for (const candidate of rankTextPlanningCandidates(candidates)) {
+        latest = await checkEcommerceResult(input, candidate);
+        if (latest.status !== "unavailable") return latest;
+    }
+    if (latest) return latest;
+    throw new Error("结果验收角色没有可用模型");
 }
 
 function requiresVisibleProductEvidence(key: EcommerceQualityCheckKey, plan: EcommerceEditPlan) {
