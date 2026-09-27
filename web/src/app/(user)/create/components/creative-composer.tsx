@@ -15,7 +15,15 @@ import { cn } from "@/lib/utils";
 import { creativeComposerPopoverOverflow, useCreativeComposerPopoverPlacement } from "@/components/creative-composer-popover";
 import { creativeComposerToolButtonClass } from "@/components/creative-composer-styles";
 import { shouldShowVideoFrameControls } from "./creative-composer-video-mode";
-import { creativeAssetMentionAtCursor, creativeAssetMentionCandidates, creativeAssetMentionDeletionAtKey, creativeAssetMentionSegments, replaceCreativeAssetMention, type CreativeAssetMentionSegment } from "./creative-asset-mention";
+import {
+    creativeAssetMentionAtCursor,
+    creativeAssetMentionCandidates,
+    creativeAssetMentionDeletionAtKey,
+    creativeAssetMentionSegments,
+    mergeCreativeAssetMentionSources,
+    replaceCreativeAssetMention,
+    type CreativeAssetMentionSegment,
+} from "./creative-asset-mention";
 import { CreativeAssetMentionPicker } from "./creative-asset-mention-picker";
 import { CreativeGenerationControls, type CreativeModelOption } from "./creative-generation-controls";
 import { CreativeModeIcon, creativeModeOptions } from "@/components/creative-generation-preferences";
@@ -127,8 +135,8 @@ export function CreativeComposer({
     const frameAssetIds = new Set([videoPreference?.firstFrameAssetId, videoPreference?.lastFrameAssetId].filter(Boolean));
     const popoverPlacement = centered ? "bottomLeft" : "topLeft";
     const composerPopoverPlacement = useCreativeComposerPopoverPlacement(popoverPlacement);
-    const mentionCandidates = useMemo(() => creativeAssetMentionCandidates(referenceAssets, mentionQuery || ""), [mentionQuery, referenceAssets]);
-    const referenceAliasAssets = useMemo(() => Array.from(new Map([...referenceAssets, ...attachments].map((asset) => [asset.id, asset])).values()), [attachments, referenceAssets]);
+    const referenceAliasAssets = useMemo(() => mergeCreativeAssetMentionSources(referenceAssets, attachments), [attachments, referenceAssets]);
+    const mentionCandidates = useMemo(() => creativeAssetMentionCandidates(referenceAliasAssets, mentionQuery || ""), [mentionQuery, referenceAliasAssets]);
     const referenceAssetsById = useMemo(() => new Map(referenceAliasAssets.map((asset) => [asset.id, asset])), [referenceAliasAssets]);
     const referenceAliases = useMemo(() => creativeAssetReferenceAliases(referenceAliasAssets, selectedAssetIds), [referenceAliasAssets, selectedAssetIds]);
     const mentionSegments = useMemo(() => creativeAssetMentionSegments(value, referenceAliases), [referenceAliases, value]);

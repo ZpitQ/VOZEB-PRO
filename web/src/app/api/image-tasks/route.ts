@@ -18,6 +18,7 @@ import { assertReferenceCapabilities } from "@/lib/server/provider-task-config";
 import { createImageTask, getImageTask, touchImageTask, transitionImageTask, type ImageTask, type ImageTaskConfig, type ImageTaskReference, updateImageTask } from "@/lib/server/image-task-store";
 import { isGenerationSource, recordGenerationLog } from "@/lib/server/generation-log-store";
 import { writeReferenceImageDataUrl } from "@/lib/server/reference-asset-store";
+import { assertEcommerceImageExecutionSnapshot, EcommerceImageTaskPreparationError, prepareEcommerceImageTask, schedulePreparedImageTask } from "@/lib/server/ecommerce-image-task-orchestration";
 import { resolveImageTaskOptions } from "@/lib/server/image-task-config";
 import { generationCapacityRetryAfterSeconds, getStoredGenerationTaskByRequest, linkStoredGenerationTask, withGenerationConcurrencyLimit, type GenerationTaskContext } from "@/lib/server/generation-task-store";
 import { verifyCanvasImageLayerGrant } from "@/lib/server/canvas-image-layer-grant";
@@ -61,7 +62,6 @@ import {
     type ImageEditReferenceMode,
 } from "./image-task-types";
 import { runGenerationTaskRecoveryBatch } from "@/lib/server/generation-task-recovery-service";
-import { scheduleGenerationTask } from "@/lib/server/generation-task-scheduler";
 import {
     publicTask,
     sanitizeConfigs,
@@ -164,12 +164,20 @@ export async function POST(request: Request) {
     };
     const settings = await getAuthSettings();
     const createTask = async () => {
-        const configs = sanitizeConfigs(resolvedBody.config, settings);
+        const ecommerceExecution = resolvedBody.ecommerceExecution;
+        try {
+            assertEcommerceImageExecutionSnapshot(settings, ecommerceExecution);
+        } catch (error) {
+            if (error instanceof EcommerceImageTaskPreparationError) return NextResponse.json({ error: error.message }, { status: error.status });
+            throw error;
+        }
+        const configs = sanitizeConfigs(resolvedBody.config, settings, ecommerceExecution?.modelSnapshot);
         const prompt = (resolvedBody.prompt || "").trim();
         const kind = resolvedBody.kind === "edit" ? "edit" : "generation";
         if (!configs.length || !prompt) return NextResponse.json({ error: "任务参数不完整" }, { status: 400 });
         const references = Array.isArray(resolvedBody.references) ? resolvedBody.references.filter((item) => Boolean(item?.dataUrl || item?.url || item?.remoteUrl || item?.serverUrl)) : [];
-        const sourceRatio = kind === "edit" && resolvedBody.mask ? closestImageAspectRatio(references[0]?.width, references[0]?.height) : "";
+        const strictRegions = resolvedBody.productProtectionRegions;
+        const sourceRatio = kind === "edit" && (resolvedBody.mask || strictRegions) ? closestImageAspectRatio(references[0]?.width, references[0]?.height) : "";
         const requestConfigs = sourceRatio ? configs.map((config) => ({ ...config, size: sourceRatio })) : configs;
         const constrainedConfigs = requestConfigs.filter((config) => {
             try {
@@ -186,15 +194,32 @@ export async function POST(request: Request) {
         });
         const compatibleConfigs = constrainedConfigs.filter((config) => {
             try {
-                if (!customGeminiImageTaskPath(config, kind)) assertReferenceCapabilities(config.advancedConfig, [...references.map(() => ({ type: "image" })), ...(resolvedBody.mask ? [{ type: "image" }] : [])]);
+                const hasRegionMask = Boolean(strictRegions?.editableBackground?.mask);
+                if (!customGeminiImageTaskPath(config, kind)) {
+                    assertReferenceCapabilities(config.advancedConfig, [...references.map(() => ({ type: "image" })), ...(resolvedBody.mask || hasRegionMask ? [{ type: "image" }] : [])]);
+                }
                 return true;
             } catch {
                 return false;
             }
         });
         if (!compatibleConfigs.length) return NextResponse.json({ error: "当前模型能力不满足参考素材、比例或分辨率参数" }, { status: 400 });
-        const config = compatibleConfigs[0];
-        if (config.outputMode === "layers" && (kind !== "edit" || references.length !== 1)) {
+        let prepared: ReturnType<typeof prepareEcommerceImageTask>;
+        try {
+            prepared = prepareEcommerceImageTask({
+                ecommerceExecution,
+                kind,
+                prompt,
+                references,
+                mask: resolvedBody.mask?.dataUrl || resolvedBody.mask?.url || resolvedBody.mask?.remoteUrl || resolvedBody.mask?.serverUrl ? resolvedBody.mask : undefined,
+                productProtectionRegions: strictRegions,
+                compatibleConfigs,
+            });
+        } catch (error) {
+            if (error instanceof EcommerceImageTaskPreparationError) return NextResponse.json({ error: error.message }, { status: error.status });
+            throw error;
+        }
+        if (prepared.config.outputMode === "layers" && (kind !== "edit" || references.length !== 1)) {
             return NextResponse.json({ error: "电商分层需要且只能使用一张源图" }, { status: 400 });
         }
         const task = await createImageTask({
@@ -205,17 +230,28 @@ export async function POST(request: Request) {
             kind,
             source: isGenerationSource(resolvedBody.source) ? resolvedBody.source : "image-workbench",
             title: typeof resolvedBody.title === "string" ? resolvedBody.title : "",
-            config,
-            candidateConfigs: compatibleConfigs.slice(1),
-            prompt,
+            config: prepared.config,
+            candidateConfigs: prepared.candidateConfigs,
+            prompt: prepared.prompt,
             references,
-            mask: resolvedBody.mask?.dataUrl || resolvedBody.mask?.url || resolvedBody.mask?.remoteUrl || resolvedBody.mask?.serverUrl ? resolvedBody.mask : undefined,
+            mask: prepared.mask,
+            productProtection: prepared.productProtection,
+            ecommerceExecution,
         });
         await linkStoredGenerationTask("image", task.id, resolvedBody.context || {});
         const cookie = request.headers.get("cookie") || "";
         const origin = resolveInternalOrigin(new URL(request.url).origin);
         const publicOrigin = requestPublicOrigin(request);
-        await scheduleGenerationTask("image", task.id, { executionPhase: "created", channelId: task.config.channelId, provider: task.config.advancedConfig?.protocol || task.config.apiFormat, nextPollAt: Date.now(), lastUpstreamStatus: "created" });
+        const scheduled = await schedulePreparedImageTask(task, prepared.reviewReason);
+        if (scheduled.needsReview) {
+            return NextResponse.json(
+                {
+                    task: { ...publicTask(task), needsReview: true, reviewReason: scheduled.reviewReason, executionPhase: "needs_review" },
+                    warning: scheduled.reviewReason,
+                },
+                { status: 202 },
+            );
+        }
         after(() => runGenerationTaskRecoveryBatch({ origin, publicOrigin, cookie, limit: 1, taskIds: [task.id] }));
 
         return NextResponse.json({ task: publicTask(task) });

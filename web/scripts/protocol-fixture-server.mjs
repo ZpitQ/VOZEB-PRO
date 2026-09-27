@@ -110,7 +110,7 @@ async function handleFixtureRequest({ request, response, url, body, tasks, reque
         const model = requestedModel(body, request.headers["content-type"] || "");
         if (shouldFailRequest(request, model)) return sendJson(response, model.includes("-fail") ? 400 : 503, { error: { message: "fixture text failure" } });
         const toolName = selectedToolName(payload);
-        const argumentsText = toolName ? JSON.stringify(toolArguments(toolName, payload)) : "协议测试文本返回成功";
+        const argumentsText = toolName ? JSON.stringify(await toolArguments(toolName, payload)) : "协议测试文本返回成功";
         if (payload.stream === true) return sendStructuredTextStream(response, path, toolName, argumentsText);
         if (path === "/responses") {
             return sendJson(response, 200, toolName ? { output: [{ type: "function_call", name: toolName, arguments: argumentsText }] } : { output_text: argumentsText });
@@ -134,7 +134,7 @@ async function handleFixtureRequest({ request, response, url, body, tasks, reque
             return sendJson(response, 200, { candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/png", data: (await fixtureImage(options)).toString("base64") } }] } }] });
         }
         const toolName = selectedToolName(payload);
-        const text = toolName ? JSON.stringify(toolArguments(toolName, payload)) : "协议测试文本返回成功";
+        const text = toolName ? JSON.stringify(await toolArguments(toolName, payload)) : "协议测试文本返回成功";
         if (path.endsWith(":streamGenerateContent")) return sendStructuredTextStream(response, path, toolName, text, url.searchParams.get("alt") === "sse" ? "gemini-sse" : "ndjson");
         return sendJson(response, 200, { candidates: [{ content: { parts: [{ text }] } }], usageMetadata: { promptTokenCount: 8, candidatesTokenCount: 8, totalTokenCount: 16 } });
     }
@@ -279,10 +279,26 @@ function selectedToolName(payload) {
     const explicit = tool?.name || tool?.function?.name || "";
     if (explicit) return explicit;
     const source = JSON.stringify(payload);
-    return ["create_agent_plan", "plan_workbench_action", "review_creative_outputs", "analyze_drama_content", "design_drama_visuals", "decompose_ecommerce_image", "make_plan"].find((name) => source.includes(name)) || "";
+    return (
+        [
+            "create_agent_plan",
+            "plan_workbench_action",
+            "review_creative_outputs",
+            "analyze_ecommerce_references",
+            "plan_ecommerce_edit",
+            "check_ecommerce_results",
+            "analyze_drama_content",
+            "design_drama_visuals",
+            "decompose_ecommerce_image",
+            "make_plan",
+        ].find((name) => source.includes(name)) || ""
+    );
 }
 
-function toolArguments(name, payload) {
+async function toolArguments(name, payload) {
+    if (name === "analyze_ecommerce_references") return ecommerceVisualAnalysisArguments(payload);
+    if (name === "plan_ecommerce_edit") return ecommerceEditPlanArguments(payload);
+    if (name === "check_ecommerce_results") return ecommerceQualityArguments(payload);
     if (name === "decompose_ecommerce_image") {
         const { width, height } = imageRequestDimensions(payload);
         if (width === 640 && height === 960) {
@@ -500,6 +516,204 @@ function toolArguments(name, payload) {
         };
     }
     return {};
+}
+
+async function ecommerceVisualAnalysisArguments(payload) {
+    const input = structuredUserPayloads(payload).find((value) => Array.isArray(value?.assets)) || {};
+    const assets = Array.isArray(input.assets) ? input.assets : [];
+    const imageEvidence = await Promise.all(ecommerceImageDataUrls(payload).map(fixtureImageBackgroundEvidence));
+    const userRequest = String(input.userRequest || "");
+    const ambiguous = /无法判断角色/.test(userRequest) || assets.some((asset) => /ambiguous/i.test(String(asset?.title || "")));
+    const localEdit = /再亮一点|较早结果|背景改成|局部|去掉|移除/.test(userRequest);
+    return {
+        analysisVersion: "ecommerce-visual-analysis.v1",
+        references: assets.map((asset, index) => {
+            const assetId = String(asset?.id || "");
+            if (ambiguous) return unknownEcommerceReference(assetId);
+            const role = assets.length === 1 || (!localEdit && index === 0) || (localEdit && index === 1) ? "product" : "scene";
+            return role === "product" ? productEcommerceReference(assetId, imageEvidence[index]) : sceneEcommerceReference(assetId, localEdit);
+        }),
+    };
+}
+
+function productEcommerceReference(assetId, evidence) {
+    const background = evidence || { whiteBackground: false, transparentBackground: true };
+    const isolatedSubject = background.whiteBackground || background.transparentBackground;
+    return {
+        assetId,
+        role: "product",
+        confidence: isolatedSubject ? "high" : "low",
+        visualEvidence: { ...background, isolatedSubject, completeScene: false },
+        productFacts: { identity: "ecommerce fixture product", outline: "complete product silhouette", color: "original neutral color", material: "original visible material", brandText: [], view: "front three-quarter view" },
+        sceneFacts: null,
+        productCore: { x: 0.2, y: 0.15, width: 0.6, height: 0.7 },
+        fusionHalo: { x: 0.15, y: 0.1, width: 0.7, height: 0.8 },
+        editableTargets: [],
+    };
+}
+
+function ecommerceImageDataUrls(payload) {
+    const urls = [];
+    const visit = (value) => {
+        if (typeof value === "string") {
+            if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(value)) urls.push(value);
+            return;
+        }
+        if (!value || typeof value !== "object") return;
+        if (value.source?.type === "base64" && typeof value.source.media_type === "string" && typeof value.source.data === "string") {
+            urls.push(`data:${value.source.media_type};base64,${value.source.data}`);
+            return;
+        }
+        if (value.inlineData && typeof value.inlineData.mimeType === "string" && typeof value.inlineData.data === "string") {
+            urls.push(`data:${value.inlineData.mimeType};base64,${value.inlineData.data}`);
+            return;
+        }
+        for (const item of Array.isArray(value) ? value : Object.values(value)) visit(item);
+    };
+    visit(payload.input);
+    visit(payload.messages);
+    return urls;
+}
+
+async function fixtureImageBackgroundEvidence(source) {
+    const match = source.match(/^data:image\/[a-z0-9.+-]+;base64,([a-z0-9+/=\r\n]+)$/i);
+    if (!match) return null;
+    try {
+        const decoded = await sharp(Buffer.from(match[1], "base64")).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+        const { width, height, channels } = decoded.info;
+        if (!width || !height || channels !== 4) return null;
+        const border = new Set();
+        for (let x = 0; x < width; x += 1) {
+            border.add(x);
+            border.add((height - 1) * width + x);
+        }
+        for (let y = 0; y < height; y += 1) {
+            border.add(y * width);
+            border.add(y * width + width - 1);
+        }
+        let transparent = 0;
+        let white = 0;
+        for (const index of border) {
+            const offset = index * channels;
+            const alpha = decoded.data[offset + 3];
+            if (alpha <= 24) transparent += 1;
+            const red = decoded.data[offset];
+            const green = decoded.data[offset + 1];
+            const blue = decoded.data[offset + 2];
+            const minimum = Math.min(red, green, blue);
+            const maximum = Math.max(red, green, blue);
+            if (minimum >= 240 && maximum - minimum <= 10) white += 1;
+        }
+        if (transparent / border.size >= 0.9) return { whiteBackground: false, transparentBackground: true };
+        if (white / border.size >= 0.9) return { whiteBackground: true, transparentBackground: false };
+        return { whiteBackground: false, transparentBackground: false };
+    } catch {
+        return null;
+    }
+}
+
+function sceneEcommerceReference(assetId, containsProtectedProduct) {
+    return {
+        assetId,
+        role: "scene",
+        confidence: "high",
+        visualEvidence: { whiteBackground: false, transparentBackground: false, isolatedSubject: false, completeScene: true },
+        productFacts: null,
+        sceneFacts: { space: "modern European or American home interior", composition: "eye-level product-centered composition", lighting: "soft natural daylight" },
+        productCore: containsProtectedProduct ? { x: 0.35, y: 0.25, width: 0.3, height: 0.5 } : null,
+        fusionHalo: containsProtectedProduct ? { x: 0.3, y: 0.2, width: 0.4, height: 0.6 } : null,
+        editableTargets: [
+            { id: "background-main", kind: "background", label: "main room background", region: { x: 0, y: 0, width: 1, height: 1 } },
+            { id: "lighting-main", kind: "lighting", label: "room daylight", region: { x: 0, y: 0, width: 1, height: 1 } },
+            { id: "plant-right", kind: "prop", label: "right plant", region: { x: 0.75, y: 0.2, width: 0.18, height: 0.55 } },
+        ],
+    };
+}
+
+function unknownEcommerceReference(assetId) {
+    return {
+        assetId,
+        role: "unknown",
+        confidence: "low",
+        visualEvidence: { whiteBackground: false, transparentBackground: false, isolatedSubject: false, completeScene: false },
+        productFacts: null,
+        sceneFacts: null,
+        productCore: null,
+        fusionHalo: null,
+        editableTargets: [],
+    };
+}
+
+function ecommerceEditPlanArguments(payload) {
+    const input = structuredUserPayloads(payload).find((value) => value?.sources && value?.requiredModelRoles) || {};
+    const sources = input.sources || {};
+    const analysis = input.visualAnalysis || {};
+    const references = Array.isArray(analysis.references) ? analysis.references : [];
+    const product = references.find((reference) => reference?.role === "product") || {};
+    const scene = references.find((reference) => reference?.role === "scene") || {};
+    const roles = input.requiredModelRoles || {};
+    const userRequest = String(input.userRequest || "");
+    const localEdit = Boolean(sources.currentSceneBaselineId);
+    const targetId = /亮|光/.test(userRequest) ? "lighting-main" : /植物|绿植/.test(userRequest) ? "plant-right" : "background-main";
+    return {
+        planVersion: "ecommerce-edit.v1",
+        operation: localEdit ? "local_edit" : "product_to_scene",
+        source: {
+            productAnchorId: String(sources.productAnchorId || ""),
+            currentSceneBaselineId: sources.currentSceneBaselineId || null,
+            sceneReferenceIds: Array.isArray(sources.sceneReferenceIds) ? sources.sceneReferenceIds : [],
+        },
+        baseline: {
+            productFacts: product.productFacts || { identity: "ecommerce fixture product", outline: "complete product silhouette", color: "original neutral color", material: "original visible material", brandText: [], view: "front three-quarter view" },
+            sceneFacts: scene.sceneFacts || { space: "modern European or American home interior", composition: "eye-level product-centered composition", lighting: "soft natural daylight" },
+        },
+        delta: {
+            requestedChanges: [userRequest || "place product in a modern home scene"],
+            targetObjects: localEdit ? [targetId] : ["scene"],
+            targetRegions: localEdit ? [] : ["background", "environment"],
+        },
+        preserve: { productCore: ["outline", "brand_text", "color", "material", "scale", "view"], sceneElements: [] },
+        strategy: "strict_product",
+        modelRoles: {
+            visionAnalysis: String(roles.visionAnalysis || ""),
+            editPlanning: String(roles.editPlanning || ""),
+            generation: String(roles.generation || ""),
+            qualityCheck: String(roles.qualityCheck || ""),
+        },
+        continuity: { parentResultId: sources.parentResultId || null, branchId: String(input.continuity?.branchId || "ecommerce-fixture-branch") },
+        validation: { requiredChecks: ["product_identity", "product_silhouette", "product_color_material", "product_proportions_view", "scene_intent", "composition_lighting"] },
+    };
+}
+
+function ecommerceQualityArguments(payload) {
+    const input = structuredUserPayloads(payload).find((value) => Array.isArray(value?.resultIds)) || {};
+    const strictFailure = JSON.stringify(input.plan || {}).includes("故意改变商品轮廓");
+    const keys = ["product_identity", "product_silhouette", "product_color_material", "product_proportions_view", "brand_logo", "packaging_text", "scene_intent", "composition_lighting"];
+    return {
+        results: (Array.isArray(input.resultIds) ? input.resultIds : []).map((resultId) => ({
+            resultId,
+            checks: keys.map((key) => ({
+                key,
+                status: strictFailure && key === "product_silhouette" ? "failed" : ["brand_logo", "packaging_text"].includes(key) ? "not_applicable" : "passed",
+                reason: strictFailure && key === "product_silhouette" ? "fixture detected a changed product silhouette" : ["brand_logo", "packaging_text"].includes(key) ? "reference has no visible brand or packaging text" : "fixture comparison passed",
+            })),
+        })),
+    };
+}
+
+function structuredUserPayloads(payload) {
+    const messages = [...(Array.isArray(payload.input) ? payload.input : []), ...(Array.isArray(payload.messages) ? payload.messages : [])];
+    const userMessage = messages.findLast((message) => message?.role === "user");
+    const content = userMessage?.content ?? (typeof payload.input === "string" ? payload.input : "");
+    const texts = typeof content === "string" ? [content] : Array.isArray(content) ? content.map((part) => (typeof part === "string" ? part : typeof part?.text === "string" ? part.text : "")) : [];
+    return texts.flatMap((value) => {
+        try {
+            const parsed = JSON.parse(value);
+            return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? [parsed] : [];
+        } catch {
+            return [];
+        }
+    });
 }
 
 function plannerRequestText(payload) {

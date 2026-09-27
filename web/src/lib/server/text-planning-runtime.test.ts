@@ -68,6 +68,76 @@ describe("text planning runtime protocol matrix", () => {
         });
     });
 
+    it("converts canonical image content for Chat without changing text-only messages", async () => {
+        mockedFetch.mockResolvedValue(chatJsonResponse());
+
+        await requestStructuredText({ ...requestInput(candidate("newapi")), messages: multimodalMessages() });
+
+        expect(requestBody()).toMatchObject({
+            messages: expect.arrayContaining([
+                {
+                    role: "user",
+                    content: [
+                        { type: "text", text: "analyze references" },
+                        { type: "image_url", image_url: { url: "data:image/png;base64,aW1hZ2U=" } },
+                    ],
+                },
+            ]),
+        });
+    });
+
+    it("converts canonical image content for Responses", async () => {
+        mockedFetch.mockResolvedValue(Response.json({ output_text: "{}" }));
+
+        await requestStructuredText({ ...requestInput(candidate("compatible", { createPath: "/responses" })), messages: multimodalMessages() });
+
+        expect(requestBody()).toMatchObject({
+            input: expect.arrayContaining([
+                {
+                    role: "user",
+                    content: [
+                        { type: "input_text", text: "analyze references" },
+                        { type: "input_image", image_url: "data:image/png;base64,aW1hZ2U=" },
+                    ],
+                },
+            ]),
+        });
+    });
+
+    it("converts canonical image content for Gemini", async () => {
+        mockedFetch.mockResolvedValue(Response.json({ candidates: [{ content: { parts: [{ text: "{}" }] } }] }));
+
+        await requestStructuredText({
+            ...requestInput(candidate("compatible", { apiFormat: "gemini", createPath: "/models/:model:generateContent" })),
+            messages: multimodalMessages(),
+        });
+
+        expect(requestBody()).toMatchObject({
+            contents: [
+                {
+                    role: "user",
+                    parts: [{ text: "analyze references" }, { inlineData: { mimeType: "image/png", data: "aW1hZ2U=" } }],
+                },
+            ],
+        });
+    });
+
+    it("rejects multimodal input for custom templates instead of flattening it to text", async () => {
+        await expect(
+            requestStructuredText({
+                ...requestInput(
+                    candidate("custom", {
+                        createPath: "/custom",
+                        requestTemplate: '{"prompt":"{{prompt}}"}',
+                        resultField: "data.result",
+                    }),
+                ),
+                messages: multimodalMessages(),
+            }),
+        ).rejects.toThrow("不支持图片理解");
+        expect(mockedFetch).not.toHaveBeenCalled();
+    });
+
     it("原生工具被代理忽略时退款无效响应并降级到严格 JSON 提示词", async () => {
         const onInvalidResponse = vi.fn();
         mockedFetch.mockResolvedValueOnce(Response.json({ choices: [{ message: { content: '{"script":"输入回显"}' } }] })).mockResolvedValueOnce(chatJsonResponse());
@@ -90,6 +160,37 @@ describe("text planning runtime protocol matrix", () => {
         expect(new Headers(mockedFetch.mock.calls[0]?.[1]?.headers).get("x-vozeb-pro-points-idempotency-key")).toBe("billing-tool");
         expect(new Headers(mockedFetch.mock.calls[1]?.[1]?.headers).get("x-vozeb-pro-points-idempotency-key")).toBe("billing-json");
         expect(onInvalidResponse).toHaveBeenCalledOnce();
+    });
+
+    it("没有显式 fallback headers 时也为原生工具回退分配独立的计费幂等键", async () => {
+        mockedFetch.mockResolvedValueOnce(Response.json({ choices: [{ message: { content: '{"script":"输入回显"}' } }] })).mockResolvedValueOnce(chatJsonResponse());
+
+        await expect(
+            requestStructuredText({
+                ...requestInput(candidate("newapi")),
+                headers: { "x-vozeb-pro-logical-model": "planner", "x-vozeb-pro-points-idempotency-key": "billing-base" },
+                preferNativeTools: true,
+                validateArguments: (argumentsText) => !("script" in JSON.parse(argumentsText)),
+            }),
+        ).resolves.toMatchObject({ arguments: "{}" });
+
+        expect(new Headers(mockedFetch.mock.calls[0]?.[1]?.headers).get("x-vozeb-pro-points-idempotency-key")).toBe("billing-base");
+        expect(new Headers(mockedFetch.mock.calls[1]?.[1]?.headers).get("x-vozeb-pro-points-idempotency-key")).toBe("billing-base:json");
+    });
+
+    it("流式请求降级为非流式时使用不同的计费幂等键", async () => {
+        mockedFetch.mockResolvedValueOnce(Response.json({ error: "stream unsupported" }, { status: 400 })).mockResolvedValueOnce(chatJsonResponse());
+
+        await expect(
+            requestStructuredText({
+                ...requestInput(candidate("newapi")),
+                headers: { "x-vozeb-pro-logical-model": "planner", "x-vozeb-pro-points-idempotency-key": "billing-stream" },
+                stream: true,
+            }),
+        ).resolves.toMatchObject({ arguments: "{}" });
+
+        expect(new Headers(mockedFetch.mock.calls[0]?.[1]?.headers).get("x-vozeb-pro-points-idempotency-key")).toBe("billing-stream:json:stream");
+        expect(new Headers(mockedFetch.mock.calls[1]?.[1]?.headers).get("x-vozeb-pro-points-idempotency-key")).toBe("billing-stream:json");
     });
 
     it("工具和普通 JSON 都失败时只执行一次结构修复请求", async () => {
@@ -492,6 +593,18 @@ function requestInput(configured: TextPlanningCandidate) {
         messages: [{ role: "user", content: "test" }],
         tool,
     };
+}
+
+function multimodalMessages() {
+    return [
+        {
+            role: "user" as const,
+            content: [
+                { type: "text" as const, text: "analyze references" },
+                { type: "image_url" as const, image_url: { url: "data:image/png;base64,aW1hZ2U=" } },
+            ],
+        },
+    ];
 }
 
 function candidate(protocol: NonNullable<SystemChannelAdvancedConfig>["protocol"], options: Partial<SystemChannelAdvancedConfig> & { id?: string; apiFormat?: "openai" | "gemini" } = {}): TextPlanningCandidate {

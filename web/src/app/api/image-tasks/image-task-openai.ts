@@ -104,6 +104,7 @@ import {
     shouldRetryJsonImageEditPayload,
     shouldFallbackToResponsesImage,
     allowsImageProtocolFallback,
+    assertStrictProductProviderTask,
     stringField,
     delay,
     parseGeminiImagePayload,
@@ -130,6 +131,7 @@ import {
 } from "./image-task-support";
 
 export async function runOpenAiImageTask(task: ImageTask, origin: string, publicOrigin: string, cookie: string, singleStep = false): Promise<ImageTaskRunResult> {
+    assertStrictProductProviderTask(task, "openai");
     const config = task.config;
     const quality = normalizeQuality(config.quality || "");
     const requestSize = resolveRequestSize(quality, config.size || "auto");
@@ -139,7 +141,7 @@ export async function runOpenAiImageTask(task: ImageTask, origin: string, public
     const url = taskUrl(config, path, origin);
     const headers = taskHeaders(config, cookie, imagePointsIdempotencyKey(task));
     const responseFormat = await preferredImageResponseFormat(config);
-    const allowProtocolFallback = allowsImageProtocolFallback(config);
+    const allowProtocolFallback = !task.productProtection && allowsImageProtocolFallback(config);
     const useJsonImageEdit = task.kind === "edit" && (await shouldUseJsonImageEdit(config));
     if (useJsonImageEdit) return runOpenAiJsonImageEditTask(task, url, origin, publicOrigin, quality, requestSize, cookie, responseFormat, singleStep);
     let response: Response;

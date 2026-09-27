@@ -83,6 +83,56 @@ describe("protocol fixture server", () => {
         expect(JSON.parse(drama.choices[0].message.tool_calls[0].function.arguments).shots[0].sourceText).toBe(script);
     });
 
+    it("reports white and transparent ecommerce product backgrounds from image pixels", async () => {
+        const analyze = async (id, image) => {
+            const response = await fetch(`${origin}/v1/chat/completions`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                {
+                                    type: "text",
+                                    text: JSON.stringify({
+                                        userRequest: "把商品放进现代客厅",
+                                        assets: [{ id, title: "fixture-product.png", width: 16, height: 16 }],
+                                    }),
+                                },
+                                { type: "text", text: `assetId=${id}` },
+                                { type: "image_url", image_url: { url: `data:image/png;base64,${image.toString("base64")}` } },
+                            ],
+                        },
+                    ],
+                    tools: [{ type: "function", function: { name: "analyze_ecommerce_references" } }],
+                    tool_choice: { type: "function", function: { name: "analyze_ecommerce_references" } },
+                }),
+            }).then((value) => value.json());
+            return JSON.parse(response.choices[0].message.tool_calls[0].function.arguments).references[0].visualEvidence;
+        };
+        const subject = { input: { create: { width: 6, height: 8, channels: 4, background: "#252525" } }, left: 5, top: 4 };
+        const white = await sharp({ create: { width: 16, height: 16, channels: 4, background: "#ffffff" } })
+            .composite([subject])
+            .png()
+            .toBuffer();
+        const transparent = await sharp({ create: { width: 16, height: 16, channels: 4, background: "#00000000" } })
+            .composite([subject])
+            .png()
+            .toBuffer();
+
+        await expect(analyze("white-product", white)).resolves.toMatchObject({
+            whiteBackground: true,
+            transparentBackground: false,
+            isolatedSubject: true,
+        });
+        await expect(analyze("transparent-product", transparent)).resolves.toMatchObject({
+            whiteBackground: false,
+            transparentBackground: true,
+            isolatedSubject: true,
+        });
+    });
+
     it("serves OpenAI and Stable Diffusion image results", async () => {
         const openAi = await fetch(`${origin}/v1/images/generations`, { method: "POST" }).then((response) => response.json());
         const stableDiffusion = await fetch(`${origin}/sdapi/v1/txt2img`, { method: "POST" }).then((response) => response.json());

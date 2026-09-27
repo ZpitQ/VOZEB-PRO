@@ -3,6 +3,8 @@ import { toSafeGenerationErrorMessage } from "./generation-errors";
 import type { AgentRun, AgentRunTask } from "./agent-run-store";
 
 export function publicAgentRun(run: AgentRun) {
+    const ecommerceQualityStatus = run.ecommerceSnapshot?.qualityCheck?.publicStatus;
+    const blockedEcommerceResult = ecommerceQualityStatus === "needs_review";
     return {
         id: run.id,
         conversationId: run.conversationId,
@@ -16,7 +18,8 @@ export function publicAgentRun(run: AgentRun) {
         selectedSkillIds: run.selectedSkillIds,
         requestedModelIds: run.requestedModelIds,
         generationPreferences: run.generationPreferences,
-        assetIds: run.assetIds || [],
+        assetIds: blockedEcommerceResult ? [] : run.assetIds || [],
+        ...(ecommerceQualityStatus ? { ecommerceQualityStatus } : {}),
         tasks: (run.tasks || []).map(publicAgentRunTask),
         cancellation: run.cancellation ? { pendingCount: run.cancellation.pendingChildTaskIds.length } : undefined,
         timings: run.timings,
@@ -37,6 +40,12 @@ export function publicAgentRunEvent(event: CreativeRunEvent): CreativeRunEvent {
     if (event.type === "canvas.ops") {
         const data = recordValue(event.data);
         return { ...event, data: { ...(textValue(data.reply) ? { reply: textValue(data.reply) } : {}), ops: publicCanvasOps(arrayValue(data.ops)) } };
+    }
+    if (event.type === "ecommerce.quality") {
+        const data = recordValue(event.data);
+        const status = textValue(data.status);
+        const text = textValue(data.text);
+        return { ...event, data: { ...(status ? { status } : {}), ...(text ? { text } : {}) } };
     }
     return event;
 }

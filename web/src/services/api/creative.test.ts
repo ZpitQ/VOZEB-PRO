@@ -88,6 +88,23 @@ describe("统一创作 Agent 事件流", () => {
         expect(progress.join(" ")).not.toContain("must stay private");
     });
 
+    it("maps ecommerce stages from the public stage enum and ignores private payload fields", () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const progress: string[] = [];
+        watchCreativeAgentRun("run-ecommerce", {
+            onProgress: (text) => progress.push(text),
+            onTerminal: () => undefined,
+            onConnectionError: () => undefined,
+        });
+
+        FakeEventSource.instance.emit("ecommerce.progress", { data: { stage: "identifying_product", plan: "private" } });
+        FakeEventSource.instance.emit("ecommerce.progress", { data: { stage: "planning_scene", prompt: "private" } });
+        FakeEventSource.instance.emit("ecommerce.progress", { data: { stage: "generating_image", modelRoles: "private" } });
+
+        expect(progress).toEqual(["正在识别商品", "正在规划场景", "正在生成图片"]);
+        expect(progress.join(" ")).not.toContain("private");
+    });
+
     it("reports terminal failure without asking the user to choose a target", () => {
         vi.stubGlobal("EventSource", FakeEventSource);
         const terminal: unknown[] = [];
@@ -113,6 +130,25 @@ describe("统一创作 Agent 事件流", () => {
 
         expect(progress).toEqual(["上游创建状态待人工确认"]);
         expect(FakeEventSource.instance.url).toBe("/api/agent/runs/run-waiting/events");
+    });
+
+    it("keeps an actionable review reason visible after the paused snapshot", () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const progress: string[] = [];
+        const statuses: string[] = [];
+        watchCreativeAgentRun("run-review", {
+            onProgress: (text) => progress.push(text),
+            onStatus: (status) => statuses.push(status),
+            onTerminal: () => undefined,
+            onConnectionError: () => undefined,
+        });
+
+        FakeEventSource.instance.emit("task.needs_review", { data: { title: "商品图", error: "请确认这张图片是商品图还是场景参考图。" } });
+        FakeEventSource.instance.emit("run.snapshot", { status: "paused" });
+
+        expect(statuses).toContain("paused");
+        expect(progress.at(-1)).toBe("请确认这张图片是商品图还是场景参考图。");
+        expect(FakeEventSource.instance.closed).toBe(false);
     });
 
     it("forwards a persistent project handoff before the run completes", () => {
@@ -179,6 +215,41 @@ describe("统一创作 Agent 事件流", () => {
         expect(FakeEventSource.instance.closed).toBe(false);
         expect(terminal).toEqual([]);
         expect(errors).toEqual([]);
+    });
+
+    it("restores the persisted review reason after an SSE interruption", async () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () =>
+                Response.json({
+                    code: 0,
+                    data: {
+                        run: {
+                            id: "run-review-recover",
+                            conversationId: "conversation",
+                            inputMessageId: "input",
+                            assistantMessageId: "assistant",
+                            status: "paused",
+                            assetIds: [],
+                            tasks: [{ id: "image", title: "商品图", status: "needs_review", error: "请确认这张图片是商品图还是场景参考图。" }],
+                        },
+                    },
+                    msg: "OK",
+                }),
+            ),
+        );
+        const progress: string[] = [];
+        watchCreativeAgentRun("run-review-recover", {
+            onProgress: (text) => progress.push(text),
+            onTerminal: () => undefined,
+            onConnectionError: () => undefined,
+        });
+
+        FakeEventSource.instance.onerror?.();
+        await vi.waitFor(() => expect(progress.at(-1)).toBe("请确认这张图片是商品图还是场景参考图。"));
+
+        expect(FakeEventSource.instance.closed).toBe(false);
     });
 
     it("uses the persisted terminal state after an SSE interruption", async () => {

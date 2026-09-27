@@ -96,7 +96,7 @@ export function CreativeMessages({
         const assistantMessageIds = new Set<string>();
         for (const entry of entries) {
             if (entry.type !== "round") continue;
-            const outputAssets = assetsForAssistant(entry.assistant, assetsByMessage);
+            const outputAssets = assetsForAssistant(entry.assistant, assetsByMessage, entry.run);
             if (!isMediaCreativeRound(entry.run, outputAssets)) continue;
             byUserMessage.set(entry.user.id, entry);
             assistantMessageIds.add(entry.assistant.id);
@@ -123,7 +123,7 @@ export function CreativeMessages({
                 const mediaRound = mediaRounds.byUserMessage.get(item.id);
                 if (mediaRound) {
                     const referencedAssets = messageAssetIds(mediaRound.user).flatMap((id) => assetById.get(id) || []);
-                    const outputAssets = assetsForAssistant(mediaRound.assistant, assetsByMessage);
+                    const outputAssets = assetsForAssistant(mediaRound.assistant, assetsByMessage, mediaRound.run);
                     return (
                         <CreativeMediaRound
                             key={mediaRound.id}
@@ -561,8 +561,11 @@ export function creativeResultPrompt(activeAsset: CreativeAsset | undefined, out
     return task?.optimizedPrompt?.trim() || "";
 }
 
-function assetsForAssistant(message: CreativeMessage, assetsByMessage: Map<string, CreativeAsset[]>) {
-    return [...(assetsByMessage.get(message.id) || []), ...(message.runId ? assetsByMessage.get(message.runId) || [] : [])].filter((asset, index, list) => list.findIndex((current) => current.id === asset.id) === index);
+function assetsForAssistant(message: CreativeMessage, assetsByMessage: Map<string, CreativeAsset[]>, run?: CreativeAgentRun) {
+    const assets = [...(assetsByMessage.get(message.id) || []), ...(message.runId ? assetsByMessage.get(message.runId) || [] : [])].filter((asset, index, list) => list.findIndex((current) => current.id === asset.id) === index);
+    if (!run || (run.status !== "paused" && run.ecommerceQualityStatus !== "needs_review")) return assets;
+    const publishedAssetIds = new Set(run.assetIds);
+    return assets.filter((asset) => publishedAssetIds.has(asset.id));
 }
 
 function CreativeGenerationFailure({ message, onRetry }: { message: string; onRetry: () => Promise<boolean | void> }) {

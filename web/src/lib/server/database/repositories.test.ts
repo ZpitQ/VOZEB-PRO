@@ -85,6 +85,23 @@ describe("split Postgres repositories", () => {
         expect(String(queryArgs(query, 0)[0])).not.toContain("system_model_channels");
     });
 
+    it("maps and updates ecommerce model role JSON", async () => {
+        const timestamp = "2026-09-24T00:00:00.000Z";
+        const ecommerceModelRoles = {
+            vision_analysis: ["vision-fast"],
+            edit_planning: ["planner-pro"],
+            image_generation: ["gpt-image-2.5-flare", "nano-banana-2"],
+            quality_check: ["quality-pro"],
+        };
+        const { executor, query } = mockExecutor([[{ id: "default", ecommerce_model_roles: ecommerceModelRoles, created_at: timestamp, updated_at: timestamp }]]);
+
+        const settings = await createPostgresRepositories(executor).settings.updateSettings({ ecommerceModelRoles });
+
+        expect(String(queryArgs(query, 0)[0])).toContain("ecommerce_model_roles");
+        expect(queryArgs(query, 0)[1]).toEqual([JSON.stringify(ecommerceModelRoles)]);
+        expect(settings.ecommerceModelRoles).toEqual(ecommerceModelRoles);
+    });
+
     it("persists channel configuration without validation records", async () => {
         const timestamp = "2026-08-01T00:00:00.000Z";
         const { executor, query } = mockExecutor([
@@ -861,6 +878,19 @@ describe("split Postgres repositories", () => {
 
         expect(deleted).toBe(1);
         expect(query).toHaveBeenCalledWith("DELETE FROM generation_logs WHERE id = ANY($1::text[])", [["log-one", "log-three"]]);
+    });
+
+    it("attaches one private ecommerce trace to the exact image task ids", async () => {
+        const { executor, query } = mockExecutor([[]]);
+        const trace = { version: "ecommerce-generation-trace.v1", runId: "agent-run-one", stages: [] };
+
+        const updated = await createPostgresRepositories(executor).generationLogs.updateEcommerceTraceByTaskIds([" image-one ", "image-one", "image-two"], trace);
+
+        expect(updated).toBe(1);
+        const [statement, params] = queryArgs(query, 0);
+        expect(String(statement)).toContain("SET ecommerce_trace = $2::jsonb");
+        expect(String(statement)).toContain("WHERE task_id = ANY($1::text[])");
+        expect(params).toEqual([["image-one", "image-two"], JSON.stringify(trace)]);
     });
 
     it("loads one stable, parameterized generation-log deletion batch with its assets", async () => {

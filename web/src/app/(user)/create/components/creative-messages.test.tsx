@@ -432,6 +432,100 @@ describe("CreativeMessages", () => {
         expect(markup).not.toContain("shadow-[0_4px_16px_rgba(32,36,42,0.04)]");
     });
 
+    it("does not render an unpublished internal media asset while quality review is paused", () => {
+        const userMessage: CreativeMessage = {
+            id: "review-user",
+            conversationId: "conversation-one",
+            runId: "review-run",
+            sequence: 1,
+            role: "user",
+            status: "completed",
+            content: "把白底商品放进现代客厅",
+            metadata: { assetIds: ["reference-product"] },
+            createdAt: 1,
+            updatedAt: 1,
+        };
+        const assistantMessage: CreativeMessage = {
+            id: "review-assistant",
+            conversationId: "conversation-one",
+            runId: "review-run",
+            sequence: 2,
+            role: "assistant",
+            status: "completed",
+            content: "商品一致性验收未通过，请复核后重试。",
+            metadata: {},
+            createdAt: 2,
+            updatedAt: 2,
+        };
+        const reference = {
+            id: "reference-product",
+            userId: "user-one",
+            conversationId: "conversation-one",
+            sourceRunId: "upload",
+            ordinal: 0,
+            type: "image",
+            status: "ready",
+            title: "商品白底图",
+            serverUrl: "/reference-product.png",
+            metadata: {},
+            createdAt: 1,
+            updatedAt: 1,
+        } satisfies CreativeAsset;
+        const internalResult = {
+            ...reference,
+            id: "internal-result",
+            messageId: assistantMessage.id,
+            sourceRunId: "review-run",
+            sourceTaskId: "image-task",
+            title: "内部生成结果",
+            serverUrl: "/internal-result.png",
+            metadata: { agentTaskId: "image-task" },
+            createdAt: 2,
+            updatedAt: 2,
+        } satisfies CreativeAsset;
+
+        const markup = renderToStaticMarkup(
+            <App>
+                <CreativeMessages
+                    messages={[userMessage, assistantMessage]}
+                    assets={[reference, internalResult]}
+                    loading={false}
+                    projectLinks={{}}
+                    projectErrors={{}}
+                    runDetails={{
+                        "review-run": {
+                            id: "review-run",
+                            conversationId: "conversation-one",
+                            inputMessageId: userMessage.id,
+                            assistantMessageId: assistantMessage.id,
+                            status: "paused",
+                            assetIds: [],
+                            tasks: [
+                                {
+                                    id: "image-task",
+                                    title: "生成商品场景图",
+                                    type: "image",
+                                    status: "completed",
+                                },
+                            ],
+                        },
+                    }}
+                    onMaterializeProject={async () => {
+                        throw new Error("not used");
+                    }}
+                    onRetryMessage={vi.fn()}
+                    selectedAssetIds={[]}
+                    onToggleAsset={vi.fn()}
+                />
+            </App>,
+        );
+
+        expect(markup).toContain('alt="商品白底图"');
+        expect(markup).toContain("商品一致性验收未通过，请复核后重试。");
+        expect(markup).not.toContain("/internal-result.png");
+        expect(markup).not.toContain('data-testid="creative-media-result"');
+    });
+
     it("uses a warm elapsed-time status while a media result is still running", () => {
         const now = Date.now();
         const userMessage: CreativeMessage = {

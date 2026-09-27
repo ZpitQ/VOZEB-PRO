@@ -32,6 +32,8 @@ import {
     stableAssetUrl,
 } from "./generation-log-repository";
 import type { GenerationAssetStats, GenerationLogInput, GenerationLogListOptions, StoredGenerationLog } from "./generation-log-types";
+import { normalizeEcommerceGenerationTrace, type EcommerceGenerationTrace } from "./ecommerce-generation-trace";
+import { getImageTask } from "./image-task-store";
 
 export type { GenerationAssetStats, GenerationLogAsset, GenerationLogInput, GenerationLogSource, StoredGenerationLog } from "./generation-log-types";
 export { isGenerationSource } from "./generation-log-repository";
@@ -52,7 +54,8 @@ export async function listGenerationLogs(options: GenerationLogListOptions = {})
             startAt: dateFilterValue(options.start),
             endAt: dateFilterValue(options.end, true),
         });
-        return { ...result, items: result.items.map(toStoredGenerationLog) };
+        const items = result.items.map((item) => toStoredGenerationLog(item, options.includeEcommerceTrace));
+        return { ...result, items: options.includeEcommerceTrace ? await hydrateEcommerceTracesFromImageTasks(items) : items };
     }
     const db = await readGenerationLogDb();
     const page = Math.max(1, Math.floor(Number(options.page) || 1));
@@ -80,7 +83,45 @@ export async function listGenerationLogs(options: GenerationLogListOptions = {})
 
     const total = filtered.length;
     const startIndex = (page - 1) * pageSize;
-    return { items: filtered.slice(startIndex, startIndex + pageSize), total, page, pageSize };
+    const items = filtered.slice(startIndex, startIndex + pageSize).map((item) => (options.includeEcommerceTrace ? item : withoutEcommerceTrace(item)));
+    return { items: options.includeEcommerceTrace ? await hydrateEcommerceTracesFromImageTasks(items) : items, total, page, pageSize };
+}
+
+export async function hydrateEcommerceTracesFromImageTasks(logs: StoredGenerationLog[], persist: (taskIds: string[], trace: EcommerceGenerationTrace) => Promise<{ updated: number }> = attachEcommerceTraceToGenerationLogs) {
+    return Promise.all(
+        logs.map(async (log) => {
+            if (log.ecommerceTrace || !log.taskId) return log;
+            const task = await getImageTask(log.taskId);
+            const trace = normalizeEcommerceGenerationTrace(task?.ecommerceTrace);
+            if (!trace) return log;
+            try {
+                await persist([log.taskId], trace);
+            } catch (error) {
+                console.error("[ecommerce-generation-trace] pending trace reconciliation failed", error instanceof Error ? error.message : "unknown error");
+            }
+            return { ...log, ecommerceTrace: trace };
+        }),
+    );
+}
+
+export async function attachEcommerceTraceToGenerationLogs(taskIds: string[], trace: EcommerceGenerationTrace) {
+    const ids = Array.from(new Set(taskIds.map((id) => id.trim()).filter(Boolean)));
+    const normalized = normalizeEcommerceGenerationTrace(trace);
+    if (!ids.length || !normalized) return { updated: 0 };
+    if (isPostgresDatabaseEnabled()) {
+        await ensurePostgresSchema();
+        return { updated: await createPostgresRepositories().generationLogs.updateEcommerceTraceByTaskIds(ids, normalized) };
+    }
+    return mutateGenerationLogDb(async (db) => {
+        const idSet = new Set(ids);
+        let updated = 0;
+        db.logs = db.logs.map((log) => {
+            if (!log.taskId || !idSet.has(log.taskId)) return log;
+            updated += 1;
+            return { ...log, ecommerceTrace: normalized, updatedAt: new Date().toISOString() };
+        });
+        return { updated };
+    });
 }
 
 export async function listUserGenerationLogsForDelete(userId: string, ids: string[]) {
@@ -94,7 +135,7 @@ export async function listUserGenerationLogsForDelete(userId: string, ids: strin
         const requestedLogs = await repository.getByIds(Array.from(idSet), targetUserId);
         const assetUrls = Array.from(new Set(requestedLogs.flatMap((log) => log.assets.map(stableAssetUrl).filter(Boolean))));
         const sharedLogs = await repository.listByUserAndAssetUrls(targetUserId, assetUrls);
-        return uniqueGenerationLogs([...requestedLogs, ...sharedLogs]).map(toStoredGenerationLog);
+        return uniqueGenerationLogs([...requestedLogs, ...sharedLogs]).map((log) => toStoredGenerationLog(log));
     }
     const db = await readGenerationLogDb();
     const userLogs = db.logs.filter((log) => log.userId === targetUserId);
@@ -156,7 +197,7 @@ export async function deleteGenerationLogs(ids: string[], options: { cascadeUser
             const repository = createPostgresRepositories(client).generationLogs;
             const logs = await repository.getByIds(normalizedIds, undefined, true);
             await repository.delete(logs.map((log) => log.id));
-            return logs.map(toStoredGenerationLog);
+            return logs.map((log) => toStoredGenerationLog(log));
         });
         await deleteRemovedLogMedia(removed, options.cascadeUserMedia);
         return { deleted: removed.length };
@@ -185,7 +226,7 @@ export async function deleteGenerationLogsByUserId(userId: string) {
                 const logs = await repository.listByUserIdBatch(targetUserId, dataLifecycle.maintenanceBatchSize, true);
                 if (!logs.length) return [];
                 await repository.delete(logs.map((log) => log.id));
-                return logs.map(toStoredGenerationLog);
+                return logs.map((log) => toStoredGenerationLog(log));
             });
             if (!removed.length) break;
             await deleteRemovedLogMedia(removed);
@@ -279,6 +320,7 @@ function buildGenerationLog(
         failCount: normalizeNonNegativeInteger(input.failCount, existing?.failCount || (input.status === "failed" ? 1 : 0)),
         assets: assets.length ? assets : existing?.assets || [],
         requestSnapshot: normalizeGenerationLogRequestSnapshot(input.requestSnapshot) || existing?.requestSnapshot,
+        ecommerceTrace: existing?.ecommerceTrace,
         taskId: normalizeOptionalText(input.taskId, existing?.taskId, 160),
         error: normalizeOptionalText(input.error, existing?.error, 1000),
         createdAt: normalizeTime(input.createdAt, existing?.createdAt || now),
@@ -287,12 +329,20 @@ function buildGenerationLog(
     };
 }
 
-function toStoredGenerationLog(log: { source: string; requestSnapshot?: unknown } & Omit<StoredGenerationLog, "source" | "requestSnapshot">): StoredGenerationLog {
-    return {
+function toStoredGenerationLog(log: { source: string; requestSnapshot?: unknown; ecommerceTrace?: unknown } & Omit<StoredGenerationLog, "source" | "requestSnapshot" | "ecommerceTrace">, includeEcommerceTrace = true): StoredGenerationLog {
+    const stored = {
         ...log,
         source: isGenerationSource(log.source) ? log.source : "unknown",
         requestSnapshot: normalizeGenerationLogRequestSnapshot(log.requestSnapshot),
+        ecommerceTrace: normalizeEcommerceGenerationTrace(log.ecommerceTrace),
     };
+    return includeEcommerceTrace ? stored : withoutEcommerceTrace(stored);
+}
+
+export function withoutEcommerceTrace(log: StoredGenerationLog): StoredGenerationLog {
+    const publicLog = { ...log };
+    delete publicLog.ecommerceTrace;
+    return publicLog;
 }
 
 function uniqueGenerationLogs<T extends { id: string }>(logs: T[]) {

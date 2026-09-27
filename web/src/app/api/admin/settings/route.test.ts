@@ -50,6 +50,38 @@ describe("admin settings model routing", () => {
         expect(mocks.safeRecordAuditLog).toHaveBeenCalledWith(expect.objectContaining({ action: "admin.settings.update", metadata: { fields: expect.arrayContaining(["systemChannels", "logicalModels", "defaultModels"]) } }));
     });
 
+    it("persists ordered ecommerce model candidates for every execution role", async () => {
+        const ecommerceModelRoles = {
+            vision_analysis: ["writer"],
+            edit_planning: ["writer"],
+            image_generation: [],
+            quality_check: ["writer"],
+        };
+
+        const response = await PATCH(request({ ecommerceModelRoles }));
+
+        expect(response.status).toBe(200);
+        expect(mocks.setAuthSettings).toHaveBeenCalledWith({ ecommerceModelRoles });
+        expect(mocks.safeRecordAuditLog).toHaveBeenCalledWith(expect.objectContaining({ metadata: { fields: ["ecommerceModelRoles"] } }));
+    });
+
+    it("rejects an ecommerce role assignment with the wrong logical capability", async () => {
+        const response = await PATCH(
+            request({
+                ecommerceModelRoles: {
+                    vision_analysis: [],
+                    edit_planning: [],
+                    image_generation: ["writer"],
+                    quality_check: [],
+                },
+            }),
+        );
+
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toEqual({ error: expect.stringContaining("writer") });
+        expect(mocks.setAuthSettings).not.toHaveBeenCalled();
+    });
+
     it("deletes a channel together with stale logical bindings and defaults", async () => {
         const response = await PATCH(request({ systemChannels: [], logicalModels: savedSettings.logicalModels, defaultModels: savedSettings.defaultModels }));
         expect(response.status).toBe(200);
