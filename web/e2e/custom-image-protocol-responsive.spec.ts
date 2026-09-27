@@ -70,6 +70,7 @@ test.beforeEach(async ({ request }) => {
                 },
             ],
             defaultModels: { ...settings.defaultModels, imageModel: MODEL },
+            ecommerceModelRoles: { ...settings.ecommerceModelRoles, image_generation: [] },
             modelPointCosts: { ...settings.modelPointCosts, [MODEL]: 0 },
         },
     });
