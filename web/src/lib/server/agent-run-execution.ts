@@ -1,6 +1,6 @@
 import { getAuthSettings, refundUserPoints, type LogicalModelCapability } from "@/lib/auth/store";
 import { withCreativeFoundation, type CreativeReview } from "@/lib/creative-agent-contract";
-import { isCreativeAutoValue, type CreativeAsset, type CreativeGenerationPreferences, type CreativeSurface } from "@/lib/creative-runtime-contract";
+import { isCreativeAutoValue, type CreativeAsset, type CreativeGenerationMode, type CreativeGenerationPreferences, type CreativeSurface } from "@/lib/creative-runtime-contract";
 import { creativeAssetReferenceAliases } from "@/lib/creative-asset-references";
 import { fetchInternalApi } from "@/lib/server/internal-origin";
 import { resolveLogicalModel, resolveLogicalModelCandidates } from "@/lib/server/logical-model-router";
@@ -156,6 +156,31 @@ export const agentPlanTool = {
         additionalProperties: false,
     },
 };
+
+export function agentPlanToolForMode(mode?: CreativeGenerationMode) {
+    if (!mode) return agentPlanTool;
+    const deliverables = agentPlanTool.parameters.properties.deliverables;
+    const items = deliverables.items;
+    return {
+        ...agentPlanTool,
+        parameters: {
+            ...agentPlanTool.parameters,
+            properties: {
+                ...agentPlanTool.parameters.properties,
+                deliverables: {
+                    ...deliverables,
+                    items: {
+                        ...items,
+                        properties: {
+                            ...items.properties,
+                            type: { ...items.properties.type, enum: [mode] },
+                        },
+                    },
+                },
+            },
+        },
+    };
+}
 
 export function normalizeTasks(
     plan: AgentPlan,
@@ -1034,3 +1059,4 @@ function runtimeRequestHeaders(cookie: string, initial?: HeadersInit) {
     else if (cookie) headers.set("cookie", cookie);
     return headers;
 }
+

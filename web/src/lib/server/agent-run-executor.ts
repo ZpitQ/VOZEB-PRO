@@ -7,7 +7,7 @@ import { agentPlannerSystemPrompt, agentPlanReply, buildAgentPlannerInput, conve
 import { getCreativeAssetsByIds, getCreativeConversationContext, listRecentCreativeMediaAssets } from "@/lib/server/creative-runtime-store";
 import { toSafeGenerationErrorMessage } from "@/lib/server/generation-errors";
 import { parseAgentPlanCall, type AgentFunctionCallResult } from "./agent-function-call";
-import { agentModelOptions, agentPlanFallbackExample, agentPlanTool, canContinue, directAgentPlan, directGenerationPreferences, executeTasks, normalizeTasks, planToOps, refundFunctionCall, requestFunctionCall } from "./agent-run-execution";
+import { agentModelOptions, agentPlanFallbackExample, agentPlanToolForMode, canContinue, directAgentPlan, directGenerationPreferences, executeTasks, normalizeTasks, planToOps, refundFunctionCall, requestFunctionCall } from "./agent-run-execution";
 import { isExplicitProjectHandoffRequest, normalizeAgentProjectHandoff } from "./agent-run-project-handoff";
 import { normalizeCanvasPlanForSelection } from "./agent-run-task-input";
 import { GenerationSubmissionUncertainError } from "@/lib/server/generation-submission-error";
@@ -87,7 +87,8 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
         const requestedModels = (claimed.requestedModelIds || []).map((id) => requestedModelOptions.find((item) => item.id === id && item.capability !== "text")).filter((item): item is ReturnType<typeof agentModelOptions>[number] => Boolean(item));
         if (requestedModels.length !== (claimed.requestedModelIds || []).length) throw new Error("部分所选模型当前不可用，请重新选择");
         const requestedModelCapabilities = requestedModels.map((model) => model.capability);
-        const ecommerceImageRequest = isEcommerceImageRequest(claimed, requestedModelCapabilities);
+        const hasExplicitImageReference = explicitAssets.some((asset) => asset.type === "image");
+        const ecommerceImageRequest = isEcommerceImageRequest(claimed, requestedModelCapabilities, hasExplicitImageReference);
         const availableModels = claimed.surface === "chat" && requestedModels.length ? requestedModels : plannerModels;
         const skillOptions = plannerAgentSkills(settings, claimed);
         const skills = selectAgentSkills(settings, claimed.surface, claimed.selectedSkillIds);
@@ -120,7 +121,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             });
             if (!(await updateAgentRunById(run.id, { ecommerceSnapshot: shadowSnapshot }, undefined, ["running"], executionId))) return;
         }
-        if (ecommerceGenerationEnabled(process.env.ECOMMERCE_GENERATION_ROLLOUT, claimed, Boolean(continuityResult), requestedModelCapabilities)) {
+        if (ecommerceGenerationEnabled(process.env.ECOMMERCE_GENERATION_ROLLOUT, claimed, Boolean(continuityResult), requestedModelCapabilities, hasExplicitImageReference)) {
             let planningAssets = [...ecommerceAssets];
             let planningInput = buildEcommercePlanningInput(claimed, planningAssets, conversationContext);
             let snapshotInput = ecommerceSnapshotInput(planningInput);
@@ -418,7 +419,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                     cookie,
                     candidate,
                     planningInput,
-                    agentPlanTool,
+                    agentPlanToolForMode(claimed.generationPreferences?.mode),
                     "create_agent_plan",
                     controller.signal,
                     run.userId,
@@ -556,3 +557,4 @@ function ecommerceSnapshotInput(input: ReturnType<typeof buildEcommercePlanningI
         surface: input.surface,
     };
 }
+

@@ -8,6 +8,7 @@ import { parseValidatedAgentFunctionCall } from "./agent-function-call";
 import type { EcommerceProductFacts, EcommerceSceneFacts } from "./ecommerce-edit-plan";
 import type { EcommercePlanningAssetCandidate, EcommercePlanningInput } from "./ecommerce-generation-snapshot";
 import type { EcommerceRoleCandidate, EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
+import { boundEcommerceVisionImage } from "./ecommerce-vision-image";
 import { rankTextPlanningCandidates, requestStructuredText } from "./text-planning-runtime";
 
 export const ECOMMERCE_VISUAL_ANALYSIS_VERSION = "ecommerce-visual-analysis.v1" as const;
@@ -232,7 +233,7 @@ async function normalizePlanningImage(value: string, origin: string, cookie: str
     if (dataMatch) {
         const bytes = Buffer.from(dataMatch[2], "base64");
         if (!bytes.length || bytes.length > CREATIVE_UPLOAD_MAX_BYTES) throw new EcommerceVisualAnalysisError("视觉分析图片无效或过大", 413);
-        return `data:${dataMatch[1].toLowerCase()};base64,${bytes.toString("base64")}`;
+        return boundEcommerceVisionImage(`data:${dataMatch[1].toLowerCase()};base64,${bytes.toString("base64")}`);
     }
     const response = source.startsWith("/api/") ? await fetchInternalApi(`${origin}${source}`, { headers: { cookie }, cache: "no-store" }) : /^https:\/\//i.test(source) ? await fetchSafeOutbound(source, { cache: "no-store" }) : null;
     if (!response?.ok) throw new EcommerceVisualAnalysisError("无法读取视觉分析图片", 400);
@@ -241,7 +242,7 @@ async function normalizePlanningImage(value: string, origin: string, cookie: str
     if (!mimeType.startsWith("image/") || contentLength > CREATIVE_UPLOAD_MAX_BYTES) throw new EcommerceVisualAnalysisError("视觉分析图片无效或过大", 413);
     const bytes = Buffer.from(await response.arrayBuffer());
     if (!bytes.length || bytes.length > CREATIVE_UPLOAD_MAX_BYTES) throw new EcommerceVisualAnalysisError("视觉分析图片无效或过大", 413);
-    return `data:${mimeType};base64,${bytes.toString("base64")}`;
+    return boundEcommerceVisionImage(`data:${mimeType};base64,${bytes.toString("base64")}`);
 }
 
 function parseAnalysis(value: string, assets: EcommercePlanningAssetCandidate[]) {
@@ -418,3 +419,4 @@ export const ecommerceVisualAnalysisTool = {
         additionalProperties: false,
     },
 };
+

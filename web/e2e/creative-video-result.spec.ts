@@ -406,7 +406,7 @@ test("asset mentions stay as inline thumbnail references while the editor is foc
         await page.goto(`/create?conversationId=${fixture.id}`, { waitUntil: "domcontentloaded" });
 
         const composer = page.locator(".creative-composer");
-        const input = composer.getByRole("textbox", { name: "输入你的创作想法、脚本或画面要求" });
+        const input = composer.getByRole("textbox", { name: "描述你想生成或修改的图片" });
         await expect(page.getByTestId("creative-media-round")).toBeVisible({ timeout: 45_000 });
         await expect(composer).toHaveAttribute("data-ready", "true");
         await expect(input).toBeVisible();
@@ -945,3 +945,4 @@ async function expectNoHorizontalOverflow(page: Page) {
     expect(widths.document[1], JSON.stringify(widths)).toBeLessThanOrEqual(widths.document[0] + 1);
     expect(widths.body[1], JSON.stringify(widths)).toBeLessThanOrEqual(widths.body[0] + 1);
 }
+

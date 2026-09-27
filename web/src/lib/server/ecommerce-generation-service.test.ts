@@ -18,14 +18,15 @@ describe("ecommerce generation service", () => {
             generationPreferences: { mode: "image" as const },
         };
 
-        expect(ecommerceGenerationEnabled("off", run)).toBe(false);
-        expect(ecommerceGenerationEnabled("shadow", run)).toBe(false);
-        expect(ecommerceGenerationEnabled("internal", run)).toBe(true);
-        expect(ecommerceGenerationEnabled("enabled", run)).toBe(true);
-        expect(ecommerceGenerationEnabled("internal", { ...run, surface: "canvas" })).toBe(false);
-        expect(ecommerceGenerationEnabled("internal", { ...run, surface: "drama" })).toBe(false);
-        expect(ecommerceGenerationEnabled("internal", { ...run, generationPreferences: { mode: "video" } })).toBe(false);
-        expect(ecommerceGenerationEnabled("internal", { ...run, referencedAssetIds: [] })).toBe(false);
+        expect(ecommerceGenerationEnabled("off", run, false, [], true)).toBe(false);
+        expect(ecommerceGenerationEnabled("shadow", run, false, [], true)).toBe(false);
+        expect(ecommerceGenerationEnabled("internal", run, false, [], true)).toBe(true);
+        expect(ecommerceGenerationEnabled("enabled", run, false, [], true)).toBe(true);
+        expect(ecommerceGenerationEnabled("internal", { ...run, surface: "canvas" }, false, [], true)).toBe(false);
+        expect(ecommerceGenerationEnabled("internal", { ...run, surface: "drama" }, false, [], true)).toBe(false);
+        expect(ecommerceGenerationEnabled("internal", { ...run, generationPreferences: { mode: "video" } }, false, [], true)).toBe(false);
+        expect(ecommerceGenerationEnabled("internal", { ...run, referencedAssetIds: [] }, false, [], true)).toBe(false);
+        expect(ecommerceGenerationEnabled("internal", { ...run, referencedAssetIds: ["product", "scene-a", "scene-b"] }, false, [], true)).toBe(true);
     });
 
     it("infers an image request from one explicitly selected image model", () => {
@@ -34,10 +35,21 @@ describe("ecommerce generation service", () => {
             referencedAssetIds: ["scene"],
         };
 
-        expect(ecommerceGenerationEnabled("internal", run, false, ["image"])).toBe(true);
+        expect(ecommerceGenerationEnabled("internal", run, false, ["image"], true)).toBe(true);
         expect(ecommerceGenerationEnabled("internal", run, false, ["video"])).toBe(false);
         expect(ecommerceGenerationEnabled("internal", run, false, ["audio"])).toBe(false);
         expect(ecommerceGenerationEnabled("internal", run, false, ["image", "video"])).toBe(false);
+    });
+
+    it("infers an image request from a referenced image in the image-only create entry", () => {
+        const run = {
+            surface: "chat" as const,
+            referencedAssetIds: ["scene"],
+        };
+
+        expect(ecommerceGenerationEnabled("internal", run, false, [], true)).toBe(true);
+        expect(ecommerceGenerationEnabled("internal", run, false, [], false)).toBe(false);
+        expect(ecommerceGenerationEnabled("internal", { ...run, generationPreferences: { mode: "video" as const } }, false, [], true)).toBe(false);
     });
 
     it("does not infer image mode when no reference image is selected", () => {
@@ -329,3 +341,4 @@ function plan(withScene = false): EcommerceEditPlan {
         validation: { requiredChecks: ["product_identity"] },
     };
 }
+

@@ -75,7 +75,7 @@ describe("useCreateAgent submission retry", () => {
         const adjustSource = source.slice(adjustStart, source.indexOf("const uploadAttachments", adjustStart));
 
         expect(adjustSource).toContain("updatePrompt(run?.prompt?.trim() || userMessage.content)");
-        expect(adjustSource).toContain("agent.restoreAttachments(run?.referencedAssetIds || [])");
+        expect(adjustSource).toContain('agent.restoreAttachments((run?.referencedAssetIds || []).filter((id) => agent.assets.some((asset) => asset.id === id && asset.type === "image")))');
         expect(adjustSource).toContain("inputRef.current?.focus()");
     });
 
@@ -118,3 +118,4 @@ describe("useCreateAgent submission retry", () => {
         expect(statusSource).toContain("getCreativeAgentRun(run.id)");
     });
 });
+
