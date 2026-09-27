@@ -229,11 +229,11 @@ export default function CreatePage() {
     const retryRound = async (assistantMessage: CreativeMessage, run?: CreativeAgentRun) => {
         try {
             if (!run) return await agent.retrySubmission(assistantMessage.id);
-            const failedTasks = run.tasks.filter((task) => task.status === "failed");
-            if (failedTasks.length) {
+            const retryableTasks = run.tasks.filter((task) => task.status === "failed" || task.status === "needs_review");
+            if (retryableTasks.length) {
                 await agent.retryTasks(
                     run.id,
-                    failedTasks.map((task) => task.id),
+                    retryableTasks.map((task) => task.id),
                 );
                 return true;
             }
@@ -243,6 +243,13 @@ export default function CreatePage() {
             message.error(error instanceof Error ? error.message : "重试失败");
             return false;
         }
+    };
+
+    const adjustQualityReview = (userMessage: CreativeMessage, run?: CreativeAgentRun) => {
+        updatePrompt(run?.prompt?.trim() || userMessage.content);
+        agent.restoreAttachments(run?.referencedAssetIds || []);
+        window.requestAnimationFrame(() => inputRef.current?.focus());
+        message.info("已恢复原要求和参考图片，请调整后重新生成");
     };
 
     const uploadAttachments = async (files: File[], successMessage?: string) => {
@@ -692,6 +699,7 @@ export default function CreatePage() {
                                 materializingProjectId={agent.materializingProjectId}
                                 onMaterializeProject={agent.materializeProject}
                                 onRetryMessage={retryRound}
+                                onAdjustRequest={adjustQualityReview}
                                 selectedAssetIds={agent.selectedAssetIds}
                                 onToggleAsset={toggleReferencedAsset}
                                 hasOlder={agent.hasOlderMessages}

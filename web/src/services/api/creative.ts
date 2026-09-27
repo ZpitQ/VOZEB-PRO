@@ -25,6 +25,19 @@ export type CreativeAgentRun = {
     requestedModelIds?: string[];
     generationPreferences?: CreativeGenerationPreferences;
     ecommerceQualityStatus?: "passed" | "needs_adjustment" | "needs_review";
+    ecommerceQualityReview?: {
+        kind: "hard_failure" | "check_unavailable";
+        failureKeys: Array<
+            | "product_identity"
+            | "product_silhouette"
+            | "product_color_material"
+            | "product_proportions_view"
+            | "brand_logo"
+            | "packaging_text"
+            | "scene_intent"
+            | "composition_lighting"
+        >;
+    };
     createdAt?: number;
     updatedAt?: number;
     assetIds: string[];
