@@ -45,7 +45,8 @@ export type EcommerceLocalEditTargetResolution =
 export async function planEcommerceEdit(input: EcommerceEditPlanningRequest, visualAnalysis: EcommerceVisualAnalysis, candidates: EcommerceRoleCandidate[]): Promise<EcommerceEditPlanningResult> {
     assertRoleCandidates(candidates, "edit_planning");
     if (!candidates.length) throw new EcommerceEditPlanningError("编辑规划角色没有可用模型", 503);
-    if (input.sources.status !== "resolved" || !input.sources.productAnchorId) throw new EcommerceEditPlanningError("商品参考角色尚未解析完成", 409);
+    const hasSceneBaseline = Boolean(input.sources.currentSceneBaselineId);
+    if (input.sources.status !== "resolved" || (!input.sources.productAnchorId && !hasSceneBaseline)) throw new EcommerceEditPlanningError("图片参考角色尚未解析完成", 409);
     let latestError: unknown;
     for (const candidate of rankTextPlanningCandidates(candidates)) {
         const messages = editPlanningMessages(input, visualAnalysis, candidate.logicalModelId);
@@ -128,7 +129,7 @@ export function normalizePlannedEdit(value: unknown, input: EcommerceEditPlannin
 function normalizePlannerOutput(value: unknown, input: EcommerceEditPlanningRequest, visualAnalysis: EcommerceVisualAnalysis, planningLogicalModelId: string) {
     if (!isRecord(value)) return null;
     const planner = unwrapPlannerEnvelope(value);
-    if (planner.planVersion === "ecommerce-edit.v1") return planner;
+    if (planner.planVersion === "ecommerce-edit.v1") return normalizeVersionedPlannerOutput(planner, input, visualAnalysis);
 
     const source = plannerRecord(planner.source);
     const operation = plannerText(planner.operation);
@@ -221,6 +222,21 @@ function normalizePlannerOutput(value: unknown, input: EcommerceEditPlanningRequ
     };
 }
 
+function normalizeVersionedPlannerOutput(planner: Record<string, unknown>, input: EcommerceEditPlanningRequest, visualAnalysis: EcommerceVisualAnalysis) {
+    const currentSceneBaselineId = input.sources.currentSceneBaselineId;
+    const hasSceneBaseline = Boolean(currentSceneBaselineId && visualAnalysis.references.some((reference) => reference.role === "scene" && reference.assetId === currentSceneBaselineId));
+    if (plannerText(planner.operation) !== "local_edit" || input.sources.productAnchorId !== null || !hasSceneBaseline) {
+        return planner;
+    }
+    return {
+        ...planner,
+        operation: "scene_edit",
+        baseline: { ...plannerRecord(planner.baseline), productFacts: null },
+        preserve: { ...plannerRecord(planner.preserve), productCore: [] },
+        strategy: "integrated_scene",
+    };
+}
+
 function unwrapPlannerEnvelope(value: Record<string, unknown>) {
     for (const key of ["plan", "editPlan", "ecommerceEditPlan", "data", "result"]) {
         const nested = value[key];
@@ -261,11 +277,12 @@ function canonicalizeVisualBaseline(plan: EcommerceEditPlan, input: EcommerceEdi
     const productFacts = analysis.references.find((reference) => reference.role === "product" && reference.assetId === input.sources.productAnchorId)?.productFacts;
     const sceneIds = [input.sources.currentSceneBaselineId, ...input.sources.sceneReferenceIds].filter((id): id is string => Boolean(id));
     const sceneFacts = analysis.references.find((reference) => reference.role === "scene" && sceneIds.includes(reference.assetId))?.sceneFacts;
-    if (!productFacts) throw new EcommerceEditPlanningError("视觉分析没有确认商品主参考图", 409);
+    if (input.sources.productAnchorId && !productFacts) throw new EcommerceEditPlanningError("视觉分析没有确认商品主参考图", 409);
+    if (!input.sources.productAnchorId && !sceneFacts) throw new EcommerceEditPlanningError("视觉分析没有确认当前场景图", 409);
     return {
         ...plan,
         baseline: {
-            productFacts: { ...productFacts, brandText: [...productFacts.brandText] },
+            productFacts: productFacts ? { ...productFacts, brandText: [...productFacts.brandText] } : null,
             sceneFacts: sceneFacts ? { ...sceneFacts } : plan.baseline.sceneFacts,
         },
     };
@@ -275,12 +292,16 @@ function validatePlanBoundary(plan: EcommerceEditPlan, input: EcommerceEditPlann
     const product = analysis.references.find((reference) => reference.role === "product" && reference.assetId === input.sources.productAnchorId);
     const sceneSourceId = input.sources.currentSceneBaselineId || input.sources.sceneReferenceIds[0];
     const scene = sceneSourceId ? analysis.references.find((reference) => reference.role === "scene" && reference.assetId === sceneSourceId) : undefined;
-    if (!product?.productFacts) throw new EcommerceEditPlanningError("视觉分析没有确认商品主参考图", 409);
+    if (input.sources.productAnchorId && !product?.productFacts) throw new EcommerceEditPlanningError("视觉分析没有确认商品主参考图", 409);
     if (sceneSourceId && !scene?.sceneFacts) throw new EcommerceEditPlanningError("视觉分析没有确认当前场景图", 409);
     if (plan.source.productAnchorId !== input.sources.productAnchorId || plan.source.currentSceneBaselineId !== input.sources.currentSceneBaselineId || !sameStrings(plan.source.sceneReferenceIds, input.sources.sceneReferenceIds)) {
         throw new EcommerceEditPlanningError("编辑计划不得更换已解析的商品或场景来源");
     }
-    if (!sameProductFacts(plan.baseline.productFacts, product.productFacts)) throw new EcommerceEditPlanningError("编辑计划中的商品基线与视觉分析不一致");
+    if (input.sources.productAnchorId) {
+        if (!product?.productFacts || !plan.baseline.productFacts || !sameProductFacts(plan.baseline.productFacts, product.productFacts)) {
+            throw new EcommerceEditPlanningError("编辑计划中的商品基线与视觉分析不一致");
+        }
+    } else if (plan.baseline.productFacts !== null) throw new EcommerceEditPlanningError("场景编辑不能伪造商品基线");
     if (scene?.sceneFacts && !sameSceneFacts(plan.baseline.sceneFacts, scene.sceneFacts)) throw new EcommerceEditPlanningError("编辑计划中的场景基线与视觉分析不一致");
     const expectedRoles = {
         visionAnalysis: analysis.modelRole.logicalModelId,
@@ -304,7 +325,7 @@ function editPlanningMessages(input: EcommerceEditPlanningRequest, analysis: Eco
         {
             role: "system" as const,
             content:
-                "你是电商图片编辑规划模型。把用户一句话转换为基线加增量的 EcommerceEditPlan。商品主参考、场景参考和连续编辑来源由服务端确定，不得交换。local_edit 的 targetObjects 必须只填写视觉分析 editableTargets 中的精确 ID；没有唯一候选时不得猜测坐标或目标。新增到商品旁边或周围的道具属于场景增量，不得写入 product_core 或商品本体。默认 strict_product；此策略下 preserve.productCore 必须是字符串数组，并逐项包含且只能依赖以下六个商品保护项：outline、brand_text、color、material、scale、view。即使某项看似未变化，也必须保留该项。",
+                "你是电商图片编辑规划模型。把用户一句话转换为基线加增量的 EcommerceEditPlan。商品主参考、场景参考和连续编辑来源由服务端确定，不得交换。当 sources.productAnchorId 为空且 currentSceneBaselineId 有效时，必须使用 scene_edit、strategy=integrated_scene、baseline.productFacts=null、preserve.productCore=[]；不得输出 local_edit 或 strict_product。local_edit 的 targetObjects 必须只填写视觉分析 editableTargets 中的精确 ID；没有唯一候选时不得猜测坐标或目标。新增到商品旁边或周围的道具属于场景增量，不得写入 product_core 或商品本体。默认 strict_product；此策略下 preserve.productCore 必须是字符串数组，并逐项包含且只能依赖以下六个商品保护项：outline、brand_text、color、material、scale、view。即使某项看似未变化，也必须保留该项。",
         },
         {
             role: "user" as const,
@@ -376,7 +397,7 @@ function copyRegion(region: EcommerceNormalizedRegion): EcommerceNormalizedRegio
     return { x: region.x, y: region.y, width: region.width, height: region.height };
 }
 
-function sameProductFacts(left: EcommerceEditPlan["baseline"]["productFacts"], right: EcommerceEditPlan["baseline"]["productFacts"]) {
+function sameProductFacts(left: NonNullable<EcommerceEditPlan["baseline"]["productFacts"]>, right: NonNullable<EcommerceEditPlan["baseline"]["productFacts"]>) {
     return left.identity === right.identity && left.outline === right.outline && left.color === right.color && left.material === right.material && left.view === right.view && sameStrings(left.brandText, right.brandText);
 }
 
@@ -431,11 +452,11 @@ export const ecommerceEditPlanningTool = {
         type: "object",
         properties: {
             planVersion: { type: "string", enum: ["ecommerce-edit.v1"] },
-            operation: { type: "string", enum: ["product_to_scene", "local_edit"] },
+            operation: { type: "string", enum: ["product_to_scene", "local_edit", "scene_edit"] },
             source: {
                 type: "object",
                 properties: {
-                    productAnchorId: { type: "string" },
+                    productAnchorId: { anyOf: [{ type: "string" }, { type: "null" }] },
                     currentSceneBaselineId: { anyOf: [{ type: "string" }, { type: "null" }] },
                     sceneReferenceIds: { type: "array", maxItems: 1, items: { type: "string" } },
                 },
@@ -444,7 +465,7 @@ export const ecommerceEditPlanningTool = {
             },
             baseline: {
                 type: "object",
-                properties: { productFacts, sceneFacts },
+                properties: { productFacts: { anyOf: [productFacts, { type: "null" }] }, sceneFacts },
                 required: ["productFacts", "sceneFacts"],
                 additionalProperties: false,
             },

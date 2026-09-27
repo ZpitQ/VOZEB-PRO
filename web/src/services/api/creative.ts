@@ -24,6 +24,7 @@ export type CreativeAgentRun = {
     selectedSkillIds?: string[];
     requestedModelIds?: string[];
     generationPreferences?: CreativeGenerationPreferences;
+    ecommerceQualityStatus?: "passed" | "needs_adjustment" | "needs_review";
     createdAt?: number;
     updatedAt?: number;
     assetIds: string[];

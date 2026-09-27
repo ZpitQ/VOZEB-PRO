@@ -333,6 +333,14 @@ export function useCreateAgent() {
                     if (generation === conversationGenerationRef.current && activeConversationRef.current === run.conversationId) {
                         setActiveRunStatus(status);
                         setRunDetails((current) => ({ ...current, [run.id]: { ...(current[run.id] || run), status } }));
+                        if (status === "paused") {
+                            void getCreativeAgentRun(run.id)
+                                .then((latest) => {
+                                    if (generation !== conversationGenerationRef.current || activeConversationRef.current !== run.conversationId) return;
+                                    setRunDetails((current) => ({ ...current, [run.id]: latest }));
+                                })
+                                .catch(() => undefined);
+                        }
                     }
                 },
                 onTaskCompleted: () => {

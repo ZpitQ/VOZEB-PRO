@@ -56,6 +56,19 @@ describe("ecommerce image compiler", () => {
         expect(compiled.prompt).toContain("right background");
     });
 
+    it("compiles a scene edit with only the scene baseline and no product mask", () => {
+        const profile = resolveEcommerceImageProviderProfile(snapshot("nano-banana-2", "gemini"));
+        const compiled = compileEcommerceImageRequest(sceneEditPlan(), profile!);
+
+        expect(compiled).toMatchObject({
+            state: "ready",
+            referenceRoles: [{ assetId: "scene-original", role: "scene" }],
+        });
+        expect(compiled).not.toHaveProperty("mask");
+        expect(compiled.prompt).toContain("冬日阳光");
+        expect(compiled.prompt).toContain("保持房间布局");
+    });
+
     it("does not guess a provider profile for an unknown generation model", () => {
         expect(resolveEcommerceImageProviderProfile(snapshot("future-image-model", "openai"))).toBeNull();
     });
@@ -97,4 +110,24 @@ function localEditPlan(): EcommerceEditPlan {
         source: { productAnchorId: "product", currentSceneBaselineId: "result", sceneReferenceIds: [] },
         delta: { requestedChanges: ["add a coffee table"], targetObjects: ["coffee table"], targetRegions: ["right background"] },
     };
+}
+
+function sceneEditPlan(): EcommerceEditPlan {
+    return {
+        ...plan(),
+        operation: "scene_edit",
+        source: { productAnchorId: null, currentSceneBaselineId: "scene-original", sceneReferenceIds: [] },
+        baseline: {
+            productFacts: null,
+            sceneFacts: { space: "living room", composition: "eye level", lighting: "soft daylight" },
+        },
+        delta: {
+            requestedChanges: ["改为冬日阳光"],
+            targetObjects: ["lighting-main"],
+            targetRegions: ["whole-scene"],
+        },
+        preserve: { productCore: [], sceneElements: ["保持房间布局", "保持家具和机位"] },
+        strategy: "integrated_scene",
+        validation: { requiredChecks: ["requested_edit", "scene_preservation"] },
+    } as EcommerceEditPlan;
 }

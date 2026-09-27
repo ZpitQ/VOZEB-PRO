@@ -64,6 +64,36 @@ describe("EcommerceEditPlan", () => {
         expect(() => validateEcommerceEditPlan(plan)).toThrow("商品主参考图");
     });
 
+    it("accepts a scene edit with a scene baseline and no product anchor", () => {
+        const plan = validPlan({
+            operation: "scene_edit",
+            source: { productAnchorId: null, currentSceneBaselineId: "asset-scene-001", sceneReferenceIds: [] },
+            baseline: {
+                productFacts: null,
+                sceneFacts: { space: "现代客厅", composition: "平视广角", lighting: "柔和日光" },
+            },
+            delta: { requestedChanges: ["改为冬日阳光"], targetObjects: ["lighting-main"], targetRegions: ["whole-scene"] },
+            preserve: { productCore: [], sceneElements: ["layout", "furniture", "camera"] },
+            strategy: "integrated_scene",
+            validation: { requiredChecks: ["requested_edit", "scene_preservation", "composition_lighting"] },
+        } as Partial<EcommerceEditPlan>);
+
+        expect(() => validateEcommerceEditPlan(plan)).not.toThrow();
+        expect(normalizeEcommerceEditPlan(plan)).toEqual(plan);
+    });
+
+    it("rejects a scene edit that substitutes a product anchor for the scene baseline", () => {
+        const plan = validPlan({
+            operation: "scene_edit",
+            source: { productAnchorId: "asset-product-001", currentSceneBaselineId: "asset-scene-001", sceneReferenceIds: [] },
+            baseline: { productFacts: validPlan().baseline.productFacts, sceneFacts: validPlan().baseline.sceneFacts },
+            preserve: { productCore: [], sceneElements: ["layout"] },
+            strategy: "integrated_scene",
+        } as Partial<EcommerceEditPlan>);
+
+        expect(() => validateEcommerceEditPlan(plan)).toThrow("场景编辑不能包含商品锚点");
+    });
+
     it("requires strict product core protections", () => {
         const plan = validPlan({ preserve: { productCore: ["outline"], sceneElements: [] } });
 

@@ -7,6 +7,7 @@ import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import type { EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
+import { createEcommerceSceneEditTask } from "./ecommerce-generation-service";
 import { buildWhiteBackgroundProductProtection, createEcommerceProductSceneTask, ecommerceGenerationEnabled, ecommerceRolloutStage, publicEcommerceProgress } from "./ecommerce-generation-service";
 
 describe("ecommerce generation service", () => {
@@ -25,6 +26,22 @@ describe("ecommerce generation service", () => {
         expect(ecommerceGenerationEnabled("internal", { ...run, surface: "drama" })).toBe(false);
         expect(ecommerceGenerationEnabled("internal", { ...run, generationPreferences: { mode: "video" } })).toBe(false);
         expect(ecommerceGenerationEnabled("internal", { ...run, referencedAssetIds: [] })).toBe(false);
+    });
+
+    it("infers an image request from one explicitly selected image model", () => {
+        const run = {
+            surface: "chat" as const,
+            referencedAssetIds: ["scene"],
+        };
+
+        expect(ecommerceGenerationEnabled("internal", run, false, ["image"])).toBe(true);
+        expect(ecommerceGenerationEnabled("internal", run, false, ["video"])).toBe(false);
+        expect(ecommerceGenerationEnabled("internal", run, false, ["audio"])).toBe(false);
+        expect(ecommerceGenerationEnabled("internal", run, false, ["image", "video"])).toBe(false);
+    });
+
+    it("does not infer image mode when no reference image is selected", () => {
+        expect(ecommerceGenerationEnabled("internal", { surface: "chat", referencedAssetIds: [] }, false, ["image"])).toBe(false);
     });
 
     it("keeps off and non-selected canary users on the legacy flow", () => {
@@ -86,6 +103,23 @@ describe("ecommerce generation service", () => {
 
         expect(regions.productCore.rectangles).toEqual([{ x: 18, y: 8, width: 28, height: 32 }]);
         expect(regions.editableBackground.mask?.trust).toBe("trusted");
+    });
+
+    it("keeps the fusion halo bounded for a tall narrow transparent product", async () => {
+        const source = await sharp({ create: { width: 64, height: 96, channels: 4, background: "#00000000" } })
+            .composite([{ input: { create: { width: 8, height: 80, channels: 4, background: "#252525" } }, left: 28, top: 8 }])
+            .png()
+            .toBuffer();
+
+        const regions = await buildWhiteBackgroundProductProtection(source, transparentAnalysis(), "product");
+
+        expect(regions.productCore.rectangles).toEqual([{ x: 28, y: 8, width: 8, height: 80 }]);
+        expect(regions.fusionHalo.rectangles).toEqual([
+            { x: 27, y: 1, width: 10, height: 7 },
+            { x: 27, y: 8, width: 1, height: 80 },
+            { x: 36, y: 8, width: 1, height: 80 },
+            { x: 27, y: 88, width: 10, height: 7 },
+        ]);
     });
 
     it.each([
@@ -154,6 +188,37 @@ describe("ecommerce generation service", () => {
 
         expect(task.prompt).toContain("纽约 loft 客厅，午后阳光");
         expect(task.prompt).not.toContain("明亮现代简约欧美客厅");
+    });
+
+    it("creates a scene edit task from the scene baseline without product protection", () => {
+        const scenePlan = {
+            ...plan(),
+            operation: "scene_edit",
+            source: { productAnchorId: null, currentSceneBaselineId: "scene", sceneReferenceIds: [] },
+            baseline: {
+                productFacts: null,
+                sceneFacts: { space: "living room", composition: "eye level", lighting: "soft daylight" },
+            },
+            delta: {
+                requestedChanges: ["改为冬日阳光"],
+                targetObjects: ["lighting-main"],
+                targetRegions: ["whole-scene"],
+            },
+            preserve: { productCore: [], sceneElements: ["layout", "furniture", "camera"] },
+            strategy: "integrated_scene",
+            validation: { requiredChecks: ["requested_edit", "scene_preservation"] },
+        } as EcommerceEditPlan;
+        const compiled = compileEcommerceImageRequest(scenePlan, resolveEcommerceImageProviderProfile(generationSnapshot())!);
+
+        const task = createEcommerceSceneEditTask({ id: "run", prompt: "改为冬日阳光", generationPreferences: { mode: "image", image: { count: 1 } } }, scenePlan, [asset("scene", "scene.png")], compiled);
+
+        expect(task).toMatchObject({
+            id: "ecommerce-scene-edit",
+            title: "场景图片修改",
+            referenceAssetId: "scene",
+            references: [{ assetId: "scene", ecommerceRole: "scene" }],
+        });
+        expect(task).not.toHaveProperty("productProtectionRegions");
     });
 
     it("publishes only the ecommerce phases that are actually executing", () => {

@@ -220,7 +220,7 @@ function visualAnalysisMessages(planningInput: EcommercePlanningInput, assets: E
         {
             role: "system" as const,
             content:
-                "你是电商商品视觉分析模型。逐图识别商品或场景，商品事实只能来自商品图，场景事实只能来自场景图。场景若包含本轮需要保护的商品，返回该商品的 productCore 与 fusionHalo；否则两者均为 null。场景 editableTargets 只列出可安全修改的背景、环境、道具、光线或阴影候选，并给每个候选稳定唯一 ID；商品图和 unknown 的 editableTargets 必须为空。不得把商品颜色、材质、结构或包装文字列为可编辑目标。无法可靠判断时使用 unknown，禁止为了完成任务互换角色。区域坐标使用 0 到 1 的归一化坐标。",
+                "你是电商商品视觉分析模型。逐图识别商品或场景，商品事实只能来自商品图，场景事实只能来自场景图。角色约束：role=product 时 productFacts 必须是完整商品事实，sceneFacts 必须为 null，productCore 与 fusionHalo 均不得为 null，fusionHalo 必须完整包围 productCore，editableTargets 必须为空；role=scene 时 productFacts 必须为 null，sceneFacts 必须完整，若场景包含本轮需要保护的商品则同时返回 productCore 与 fusionHalo，否则两者均为 null；role=unknown 时两类事实、两个区域均为 null 且 editableTargets 为空。场景 editableTargets 只列出可安全修改的背景、环境、道具、光线或阴影候选，并给每个候选稳定唯一 ID。不得把商品颜色、材质、结构或包装文字列为可编辑目标。无法可靠判断时使用 unknown，禁止为了完成任务互换角色。区域坐标使用 0 到 1 的归一化坐标。",
         },
         { role: "user" as const, content },
     ];

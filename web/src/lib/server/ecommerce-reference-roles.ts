@@ -101,6 +101,15 @@ export function resolveContinuitySources(run: Pick<AgentRun, "id" | "referencedA
     }
 
     const selectedResult = history[0];
+    if (!selectedResult && scene && explicitAssets.decision.ambiguityReason === "missing_product_reference") {
+        return resolvedSources({
+            productAnchorId: null,
+            currentSceneBaselineId: scene.id,
+            sceneReferenceIds: [],
+            startsNewProductAnchor: false,
+            createsBranch: false,
+        });
+    }
     if (!selectedResult) return unresolvedSources("missing_product_anchor", scene ? [scene.id] : []);
     const productAnchorId = selectedHistoryProductAnchorId(selectedResult);
     if (!productAnchorId) return unresolvedSources("missing_product_anchor", scene ? [scene.id] : []);

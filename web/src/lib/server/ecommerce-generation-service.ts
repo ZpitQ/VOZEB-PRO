@@ -31,9 +31,20 @@ export class EcommerceProductSegmentationError extends Error {
     }
 }
 
-export function ecommerceGenerationEnabled(value: unknown, run: { userId?: string; surface: CreativeSurface; referencedAssetIds: string[]; generationPreferences?: CreativeGenerationPreferences }, hasContinuityResult = false): boolean {
+export function isEcommerceImageRequest(run: { generationPreferences?: CreativeGenerationPreferences }, selectedModelCapabilities: string[] = []): boolean {
+    const explicitMode = run.generationPreferences?.mode;
+    if (explicitMode) return explicitMode === "image";
+    return selectedModelCapabilities.length > 0 && selectedModelCapabilities.every((capability) => capability === "image");
+}
+
+export function ecommerceGenerationEnabled(
+    value: unknown,
+    run: { userId?: string; surface: CreativeSurface; referencedAssetIds: string[]; generationPreferences?: CreativeGenerationPreferences },
+    hasContinuityResult = false,
+    selectedModelCapabilities: string[] = [],
+): boolean {
     const stage = ecommerceRolloutStage(value, run.userId || "");
-    return (stage === "internal" || stage === "canary") && run.surface === "chat" && run.generationPreferences?.mode === "image" && (run.referencedAssetIds.length >= 1 || hasContinuityResult) && run.referencedAssetIds.length <= 2;
+    return (stage === "internal" || stage === "canary") && run.surface === "chat" && isEcommerceImageRequest(run, selectedModelCapabilities) && (run.referencedAssetIds.length >= 1 || hasContinuityResult) && run.referencedAssetIds.length <= 2;
 }
 
 export function ecommerceRolloutStage(value: unknown, userId: string): EcommerceRolloutStage {
@@ -221,6 +232,7 @@ export function createEcommerceProductSceneTask(
     if (plan.operation !== "product_to_scene" || plan.strategy !== "strict_product") {
         throw new Error("首期商品场景生成只允许 product_to_scene + strict_product");
     }
+    if (!plan.source.productAnchorId) throw new Error("商品场景生成缺少商品锚点");
     assertReadyEcommerceExecution(plan, ecommerceExecution);
     const byId = new Map(assets.map((asset) => [asset.id, asset]));
     const product = byId.get(plan.source.productAnchorId);
@@ -277,6 +289,7 @@ export function createEcommerceLocalEditTask(
     if (plan.operation !== "local_edit" || plan.strategy !== "strict_product" || !plan.source.currentSceneBaselineId) {
         throw new Error("首期局部编辑只允许有明确场景基线的 local_edit + strict_product");
     }
+    if (!plan.source.productAnchorId) throw new Error("商品局部编辑缺少商品锚点");
     if (productProtectionRegions.productAnchorId !== plan.source.productAnchorId || productProtectionRegions.sourceAssetId !== plan.source.currentSceneBaselineId) {
         throw new Error("局部编辑保护区域与商品锚点或当前场景基线不一致");
     }
@@ -329,8 +342,49 @@ export function createEcommerceLocalEditTask(
     };
 }
 
+export function createEcommerceSceneEditTask(run: { id: string; prompt: string; generationPreferences?: CreativeGenerationPreferences }, plan: EcommerceEditPlan, assets: CreativeAsset[], ecommerceExecution: EcommerceCompiledImageRequest): AgentRunTask {
+    if (plan.operation !== "scene_edit" || plan.strategy !== "integrated_scene" || !plan.source.currentSceneBaselineId || plan.source.productAnchorId) {
+        throw new Error("场景编辑只允许无商品锚点的 scene_edit + integrated_scene");
+    }
+    assertReadyEcommerceExecution(plan, ecommerceExecution);
+    const scene = assets.find((asset) => asset.id === plan.source.currentSceneBaselineId);
+    const sceneUrl = scene ? assetAccessUrl(scene) : undefined;
+    if (!scene || scene.type !== "image" || !sceneUrl) throw new Error("当前场景基线不可用");
+    const references = [
+        {
+            assetId: scene.id,
+            url: sceneUrl,
+            type: "image" as const,
+            ecommerceRole: "scene" as const,
+            ...(Number.isFinite(scene.width) ? { width: scene.width } : {}),
+            ...(Number.isFinite(scene.height) ? { height: scene.height } : {}),
+        },
+    ];
+    assertCompiledReferences(references, ecommerceExecution);
+    const preferences = run.generationPreferences?.image;
+    return {
+        id: "ecommerce-scene-edit",
+        referenceAssetId: scene.id,
+        referenceUrl: sceneUrl,
+        referenceType: "image",
+        references,
+        title: "场景图片修改",
+        type: "image",
+        model: ecommerceExecution.modelSnapshot.logicalModelId,
+        ecommerceExecution,
+        optimizedPrompt: run.prompt.trim(),
+        prompt: ecommerceExecution.prompt,
+        count: Math.max(1, preferences?.count || 1),
+        ...(preferences?.size ? { ratio: preferences.size } : {}),
+        ...(preferences?.quality ? { quality: preferences.quality } : {}),
+        dependencies: [],
+        status: "ready",
+        attempts: 0,
+    };
+}
+
 function assertReadyEcommerceExecution(plan: EcommerceEditPlan, execution: EcommerceCompiledImageRequest) {
-    if (execution.state !== "ready") throw new Error("当前生图模型不满足 strict_product 执行要求");
+    if (execution.state !== "ready") throw new Error("当前生图模型不满足电商图片执行要求");
     if (execution.modelSnapshot.logicalRole !== "image_generation" || execution.modelSnapshot.logicalModelId !== plan.modelRoles.generation) {
         throw new Error("生图执行快照与编辑计划的模型角色不一致");
     }
@@ -422,11 +476,12 @@ function componentBounds(component: number[], width: number): ProductProtectionR
 }
 
 function expand(bounds: ProductProtectionRectangle, width: number, height: number) {
-    const padding = Math.max(1, Math.ceil(Math.max(bounds.width, bounds.height) * HALO_RATIO));
-    const left = Math.max(0, bounds.x - padding);
-    const top = Math.max(0, bounds.y - padding);
-    const right = Math.min(width, bounds.x + bounds.width + padding);
-    const bottom = Math.min(height, bounds.y + bounds.height + padding);
+    const horizontalPadding = Math.max(1, Math.ceil(bounds.width * HALO_RATIO));
+    const verticalPadding = Math.max(1, Math.ceil(bounds.height * HALO_RATIO));
+    const left = Math.max(0, bounds.x - horizontalPadding);
+    const top = Math.max(0, bounds.y - verticalPadding);
+    const right = Math.min(width, bounds.x + bounds.width + horizontalPadding);
+    const bottom = Math.min(height, bounds.y + bounds.height + verticalPadding);
     return { x: left, y: top, width: right - left, height: bottom - top };
 }
 

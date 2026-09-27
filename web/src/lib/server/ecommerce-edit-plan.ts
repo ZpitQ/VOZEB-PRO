@@ -1,6 +1,6 @@
 export const ECOMMERCE_EDIT_PLAN_VERSION = "ecommerce-edit.v1" as const;
 
-export type EcommerceOperation = "product_to_scene" | "local_edit";
+export type EcommerceOperation = "product_to_scene" | "local_edit" | "scene_edit";
 export type EcommerceStrategy = "strict_product" | "integrated_scene" | "creative_variation";
 export type EcommerceModelRoles = {
     visionAnalysis: string;
@@ -35,12 +35,12 @@ export type EcommerceEditPlan = {
     planVersion: typeof ECOMMERCE_EDIT_PLAN_VERSION;
     operation: EcommerceOperation;
     source: {
-        productAnchorId: string;
+        productAnchorId: string | null;
         currentSceneBaselineId: string | null;
         sceneReferenceIds: string[];
     };
     baseline: {
-        productFacts: EcommerceProductFacts;
+        productFacts: EcommerceProductFacts | null;
         sceneFacts: EcommerceSceneFacts;
     };
     delta: {
@@ -71,7 +71,7 @@ export type EcommerceEditPlanPublicSummary = {
     targetObjects: string[];
 };
 
-const OPERATIONS = new Set<EcommerceOperation>(["product_to_scene", "local_edit"]);
+const OPERATIONS = new Set<EcommerceOperation>(["product_to_scene", "local_edit", "scene_edit"]);
 const STRATEGIES = new Set<EcommerceStrategy>(["strict_product", "integrated_scene", "creative_variation"]);
 const STRICT_PRODUCT_CORE = ["outline", "brand_text", "color", "material", "scale", "view"];
 
@@ -92,19 +92,22 @@ export function normalizeEcommerceEditPlan(value: unknown): EcommerceEditPlan | 
         planVersion: ECOMMERCE_EDIT_PLAN_VERSION,
         operation: value.operation as EcommerceOperation,
         source: {
-            productAnchorId: normalizeId(source?.productAnchorId) || "",
+            productAnchorId: normalizeNullableId(source?.productAnchorId),
             currentSceneBaselineId: normalizeNullableId(source?.currentSceneBaselineId),
             sceneReferenceIds: normalizeStringArray(source?.sceneReferenceIds),
         },
         baseline: {
-            productFacts: {
-                identity: normalizeText(productFacts?.identity),
-                outline: normalizeText(productFacts?.outline),
-                color: normalizeText(productFacts?.color),
-                material: normalizeText(productFacts?.material),
-                brandText: normalizeStringArray(productFacts?.brandText),
-                view: normalizeText(productFacts?.view),
-            },
+            productFacts:
+                baseline?.productFacts === null
+                    ? null
+                    : {
+                          identity: normalizeText(productFacts?.identity),
+                          outline: normalizeText(productFacts?.outline),
+                          color: normalizeText(productFacts?.color),
+                          material: normalizeText(productFacts?.material),
+                          brandText: normalizeStringArray(productFacts?.brandText),
+                          view: normalizeText(productFacts?.view),
+                      },
             sceneFacts: {
                 space: normalizeText(sceneFacts?.space),
                 composition: normalizeText(sceneFacts?.composition),
@@ -151,18 +154,26 @@ export function validateEcommerceEditPlan(plan: EcommerceEditPlan): void {
     if (!STRATEGIES.has(plan.strategy)) throw new Error("商品编辑策略无效");
     if (!isRecord(plan.source)) throw new Error("商品编辑来源无效");
 
-    requireId(plan.source.productAnchorId, "商品主参考图");
+    const sceneEdit = plan.operation === "scene_edit";
+    if (sceneEdit) {
+        if (plan.source.productAnchorId !== null) throw new Error("场景编辑不能包含商品锚点");
+        if (plan.source.currentSceneBaselineId === null) throw new Error("场景编辑缺少当前场景基线");
+        if (plan.baseline?.productFacts !== null) throw new Error("场景编辑不能包含商品事实");
+        if (plan.strategy !== "integrated_scene") throw new Error("场景编辑策略必须是 integrated_scene");
+    } else {
+        requireId(plan.source.productAnchorId, "商品主参考图");
+    }
     if (!Array.isArray(plan.source.sceneReferenceIds) || plan.source.sceneReferenceIds.length > 1) throw new Error("场景参考图数量无效");
     plan.source.sceneReferenceIds.forEach((id) => {
         requireId(id, "场景参考图");
-        if (id === plan.source.productAnchorId) throw new Error("场景参考图不能作为商品主参考图");
+        if (plan.source.productAnchorId && id === plan.source.productAnchorId) throw new Error("场景参考图不能作为商品主参考图");
     });
     if (plan.source.currentSceneBaselineId !== null) {
         requireId(plan.source.currentSceneBaselineId, "当前场景基线");
-        if (plan.source.currentSceneBaselineId === plan.source.productAnchorId) throw new Error("当前场景基线不能替代商品主参考图");
+        if (plan.source.productAnchorId && plan.source.currentSceneBaselineId === plan.source.productAnchorId) throw new Error("当前场景基线不能替代商品主参考图");
     }
 
-    validateProductFacts(plan.baseline?.productFacts);
+    if (!sceneEdit) validateProductFacts(plan.baseline?.productFacts);
     validateSceneFacts(plan.baseline?.sceneFacts);
     if (!isRecord(plan.delta)) throw new Error("场景增量无效");
     requireStringArray(plan.delta.requestedChanges, "创作请求");
@@ -174,6 +185,7 @@ export function validateEcommerceEditPlan(plan: EcommerceEditPlan): void {
     if (!isRecord(plan.preserve)) throw new Error("商品保护项无效");
     requireStringArray(plan.preserve.productCore, "商品核心保护项");
     requireStringArray(plan.preserve.sceneElements, "场景保护项");
+    if (sceneEdit && plan.preserve.productCore.length) throw new Error("场景编辑不能包含商品核心保护项");
     if (plan.strategy === "strict_product" && STRICT_PRODUCT_CORE.some((key) => !plan.preserve.productCore.includes(key))) throw new Error("商品核心保护项不完整");
 
     if (!isRecord(plan.modelRoles)) throw new Error("模型角色无效");
@@ -197,7 +209,7 @@ export function planPublicSummary(plan: EcommerceEditPlan): EcommerceEditPlanPub
     };
 }
 
-function validateProductFacts(value: EcommerceProductFacts | undefined): asserts value is EcommerceProductFacts {
+function validateProductFacts(value: EcommerceProductFacts | null | undefined): asserts value is EcommerceProductFacts {
     if (!isRecord(value)) throw new Error("商品事实无效");
     [value.identity, value.outline, value.color, value.material, value.view].forEach((item) => requireText(item, "商品事实"));
     requireStringArray(value.brandText, "品牌文字");

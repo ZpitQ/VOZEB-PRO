@@ -43,7 +43,7 @@ export function resolveEcommerceImageProviderProfile(snapshot: EcommerceRoleRout
 }
 
 export function compileEcommerceImageRequest(plan: EcommerceEditPlan, profile: EcommerceImageProviderProfile): EcommerceCompiledImageRequest {
-    const referenceRoles = plan.operation === "local_edit" ? localEditReferences(plan) : productSceneReferences(plan);
+    const referenceRoles = plan.operation === "local_edit" ? localEditReferences(plan) : plan.operation === "scene_edit" ? sceneEditReferences(plan) : productSceneReferences(plan);
     const compilerVersion: EcommerceCompiledImageRequest["compilerVersion"] = profile.compilerFamily === "openai-image-2.5" ? "ecommerce-openai-image-2.5.v1" : "ecommerce-nano-banana-2.v1";
     const prompt = profile.compilerFamily === "openai-image-2.5" ? compileOpenAiPrompt(plan, referenceRoles) : compileNanoBananaPrompt(plan, referenceRoles);
     const common = {
@@ -65,15 +65,21 @@ export function compileEcommerceImageRequest(plan: EcommerceEditPlan, profile: E
 }
 
 function productSceneReferences(plan: EcommerceEditPlan) {
+    if (!plan.source.productAnchorId) throw new Error("商品场景生成缺少商品锚点");
     return uniqueReferences([{ assetId: plan.source.productAnchorId, role: "product" as const }, ...plan.source.sceneReferenceIds.map((assetId) => ({ assetId, role: "scene" as const }))]);
 }
 
 function localEditReferences(plan: EcommerceEditPlan) {
+    if (!plan.source.productAnchorId) throw new Error("商品局部编辑缺少商品锚点");
     return uniqueReferences([
         ...(plan.source.currentSceneBaselineId ? [{ assetId: plan.source.currentSceneBaselineId, role: "scene" as const }] : []),
         { assetId: plan.source.productAnchorId, role: "product" as const },
         ...plan.source.sceneReferenceIds.map((assetId) => ({ assetId, role: "scene" as const })),
     ]);
+}
+
+function sceneEditReferences(plan: EcommerceEditPlan) {
+    return uniqueReferences(plan.source.currentSceneBaselineId ? [{ assetId: plan.source.currentSceneBaselineId, role: "scene" as const }] : []);
 }
 
 function uniqueReferences(references: Array<{ assetId: string; role: "product" | "scene" }>) {
@@ -85,11 +91,15 @@ function compileOpenAiPrompt(plan: EcommerceEditPlan, references: Array<{ assetI
     return [
         `执行 ${plan.operation}，策略 ${plan.strategy}。`,
         `参考图角色：${references.map((reference) => `${reference.assetId}=${reference.role}`).join("；")}。`,
-        `商品基线：${productFacts(plan)}。`,
+        ...(plan.baseline.productFacts ? [`商品基线：${productFacts(plan)}。`] : []),
         `场景基线：${sceneFacts(plan)}。`,
         `本轮增量：${changes(plan)}。`,
         `必须保持：${[...plan.preserve.productCore, ...plan.preserve.sceneElements].join("、")}。`,
-        plan.operation === "local_edit" ? "只重绘独立蒙版允许的目标区域；商品核心、融合边缘和其他场景像素保持不变。" : "商品锚点决定商品身份；场景参考仅决定空间、构图、光线和氛围。",
+        plan.operation === "local_edit"
+            ? "只重绘独立蒙版允许的目标区域；商品核心、融合边缘和其他场景像素保持不变。"
+            : plan.operation === "scene_edit"
+              ? "以场景基线为唯一视觉参考，只执行本轮变化，保持未指定区域、物体和机位不变。"
+              : "商品锚点决定商品身份；场景参考仅决定空间、构图、光线和氛围。",
     ].join("\n");
 }
 
@@ -97,15 +107,16 @@ function compileNanoBananaPrompt(plan: EcommerceEditPlan, references: Array<{ as
     return [
         `任务：${plan.operation}；策略：${plan.strategy}。`,
         ...references.map((reference, index) => `参考图${index + 1}（${reference.role === "product" ? "商品锚点" : "场景参考"}）：${reference.assetId}。`),
-        `商品事实：${productFacts(plan)}。`,
+        ...(plan.baseline.productFacts ? [`商品事实：${productFacts(plan)}。`] : []),
         `场景事实：${sceneFacts(plan)}。`,
         `只执行本轮变化：${changes(plan)}。`,
-        `禁止改变：${plan.preserve.productCore.join("、")}。`,
+        `禁止改变：${[...plan.preserve.productCore, ...plan.preserve.sceneElements].join("、")}。`,
     ].join("\n");
 }
 
 function productFacts(plan: EcommerceEditPlan) {
     const facts = plan.baseline.productFacts;
+    if (!facts) return "";
     return [facts.identity, facts.outline, facts.color, facts.material, facts.brandText.join("、"), facts.view].filter(Boolean).join("；");
 }
 

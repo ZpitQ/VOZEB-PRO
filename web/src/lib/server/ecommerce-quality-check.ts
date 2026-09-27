@@ -35,7 +35,7 @@ export type EcommerceQualityCheckRequest = {
     userId: string;
     requestId: string;
     plan: EcommerceEditPlan;
-    productReference: { assetId: string; url: string };
+    baselineReference: { assetId: string; url: string; role: "product" | "scene" };
     resultImages: Array<{ resultId: string; url: string }>;
 };
 
@@ -60,12 +60,13 @@ export async function checkEcommerceResult(input: EcommerceQualityCheckRequest, 
             validateArguments: (argumentsText) => parseQualityResult(argumentsText, resultIds) !== null,
             onInvalidResponse: (headers) => refundInvalidResponse(input.userId, candidate.logicalModelId, headers),
         });
-        const checks = await parseValidatedAgentFunctionCall(
+        const rawChecks = await parseValidatedAgentFunctionCall(
             call,
             (value) => normalizeQualityResult(value, resultIds),
             () => refundInvalidResponse(input.userId, candidate.logicalModelId, call.headers),
             "结果验收模型返回的字段不完整",
         );
+        const checks = input.baselineReference.role === "scene" ? rawChecks.map((item) => (HARD_CHECKS.has(item.key) ? { ...item, status: "not_applicable" as const, reason: "场景编辑不适用商品检查" } : item)) : rawChecks;
         const hardFailures = checks.filter((item) => HARD_CHECKS.has(item.key) && (item.status === "failed" || (item.status === "not_applicable" && requiresVisibleProductEvidence(item.key, input.plan))));
         const failed = checks.filter((item) => item.status === "failed");
         const status = hardFailures.length ? "blocked" : failed.length ? "needs_adjustment" : "passed";
@@ -95,6 +96,7 @@ export async function checkEcommerceResultWithFallback(input: EcommerceQualityCh
 }
 
 function requiresVisibleProductEvidence(key: EcommerceQualityCheckKey, plan: EcommerceEditPlan) {
+    if (!plan.baseline.productFacts) return false;
     if (key === "brand_logo" || key === "packaging_text") return plan.baseline.productFacts.brandText.length > 0;
     return key === "product_identity" || key === "product_silhouette" || key === "product_color_material" || key === "product_proportions_view";
 }
@@ -131,8 +133,9 @@ async function qualityCheckMessages(input: EcommerceQualityCheckRequest) {
         {
             type: "text",
             text: JSON.stringify({
-                task: "compare_product_reference_with_generated_results",
-                productAssetId: input.productReference.assetId,
+                task: input.baselineReference.role === "product" ? "compare_product_reference_with_generated_results" : "compare_scene_baseline_with_generated_results",
+                baselineAssetId: input.baselineReference.assetId,
+                baselineRole: input.baselineReference.role,
                 plan: {
                     operation: input.plan.operation,
                     baseline: input.plan.baseline,
@@ -144,8 +147,8 @@ async function qualityCheckMessages(input: EcommerceQualityCheckRequest) {
                 resultIds: input.resultImages.map((item) => item.resultId),
             }),
         },
-        { type: "text", text: `productReference=${input.productReference.assetId}` },
-        { type: "image_url", image_url: { url: await normalizeQualityImage(input.productReference.url, input.origin, input.cookie) } },
+        { type: "text", text: `baselineReference=${input.baselineReference.assetId};role=${input.baselineReference.role}` },
+        { type: "image_url", image_url: { url: await normalizeQualityImage(input.baselineReference.url, input.origin, input.cookie) } },
     ];
     for (const result of input.resultImages) {
         content.push({ type: "text", text: `resultId=${result.resultId}` }, { type: "image_url", image_url: { url: await normalizeQualityImage(result.url, input.origin, input.cookie) } });
@@ -154,7 +157,9 @@ async function qualityCheckMessages(input: EcommerceQualityCheckRequest) {
         {
             role: "system" as const,
             content:
-                "你是电商商品图片结果验收模型。逐张比较生成结果与唯一商品参考图。商品身份、轮廓、颜色与材质、比例与视角、品牌 Logo、包装文字属于硬检查；场景意图、构图与光线属于软检查。只根据实际可见证据判断，无法适用时返回 not_applicable，不得用场景美感掩盖商品变化。必须调用 check_ecommerce_results，并为每个 resultId 返回全部八项检查；reason 只写简短事实，不输出推理过程。",
+                input.baselineReference.role === "product"
+                    ? "你是电商商品图片结果验收模型。逐张比较生成结果与唯一商品参考图。商品身份、轮廓、颜色与材质、比例与视角、品牌 Logo、包装文字属于硬检查；场景意图、构图与光线属于软检查。只根据实际可见证据判断，无法适用时返回 not_applicable，不得用场景美感掩盖商品变化。必须调用 check_ecommerce_results，并为每个 resultId 返回全部八项检查；reason 只写简短事实，不输出推理过程。"
+                    : "你是电商场景图片结果验收模型。逐张比较生成结果与唯一场景基线，检查用户要求是否实现、原有空间布局与非目标物体是否保持、构图和光线是否自然。六项商品检查必须返回 not_applicable。必须调用 check_ecommerce_results，并为每个 resultId 返回全部八项检查；reason 只写简短事实，不输出推理过程。",
         },
         { role: "user" as const, content },
     ];
@@ -195,7 +200,9 @@ function qualityImageRequestHeaders(credential: string): Record<string, string> 
 
 function assertQualityRequest(input: EcommerceQualityCheckRequest, candidate: EcommerceRoleCandidate) {
     if (candidate.logicalRole !== "quality_check" || candidate.capability !== "text") throw new Error("结果验收模型角色无效");
-    if (!input.productReference.assetId.trim() || !input.productReference.url.trim()) throw new Error("商品参考图不可用");
+    if (!input.baselineReference.assetId.trim() || !input.baselineReference.url.trim()) throw new Error("验收基线图片不可用");
+    const expectedRole = input.plan.operation === "scene_edit" ? "scene" : "product";
+    if (input.baselineReference.role !== expectedRole) throw new Error("验收基线角色与编辑计划不一致");
     if (!input.resultImages.length || new Set(input.resultImages.map((item) => item.resultId)).size !== input.resultImages.length || input.resultImages.some((item) => !item.resultId.trim() || !item.url.trim())) {
         throw new Error("生成结果图片不可用");
     }
@@ -245,7 +252,7 @@ async function refundInvalidResponse(userId: string, logicalModelId: string, hea
 
 export const ecommerceQualityCheckTool = {
     name: "check_ecommerce_results",
-    description: "比较商品参考图与生成结果，返回商品硬检查和场景软检查",
+    description: "比较商品或场景基线与生成结果，返回商品硬检查和场景软检查",
     parameters: {
         type: "object",
         properties: {

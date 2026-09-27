@@ -34,6 +34,16 @@ describe("ecommerce visual analysis", () => {
         expect(result.modelRole).toMatchObject({ logicalRole: "vision_analysis", logicalModelId: "vision-model", channelId: "primary" });
     });
 
+    it("requires product references to return both protection regions", async () => {
+        mockedRequest.mockResolvedValue(modelCall(analysisFixture()));
+
+        await analyzeEcommerceReferences(requestInput(), role("vision_analysis", [candidate("primary")]));
+
+        const messages = mockedRequest.mock.calls[0]?.[0].messages;
+        expect(JSON.stringify(messages)).toContain("role=product");
+        expect(JSON.stringify(messages)).toContain("productCore 与 fusionHalo 均不得为 null");
+    });
+
     it("rejects output that attaches scene facts or scene regions to a product reference", () => {
         const value = analysisFixture() as { references: Array<Record<string, unknown>> } & Record<string, unknown>;
         value.references[0] = { ...value.references[0], sceneFacts: sceneFacts(), role: "product" };

@@ -110,7 +110,7 @@ async function handleFixtureRequest({ request, response, url, body, tasks, reque
         const model = requestedModel(body, request.headers["content-type"] || "");
         if (shouldFailRequest(request, model)) return sendJson(response, model.includes("-fail") ? 400 : 503, { error: { message: "fixture text failure" } });
         const toolName = selectedToolName(payload);
-        const argumentsText = toolName ? JSON.stringify(toolArguments(toolName, payload)) : "协议测试文本返回成功";
+        const argumentsText = toolName ? JSON.stringify(await toolArguments(toolName, payload)) : "协议测试文本返回成功";
         if (payload.stream === true) return sendStructuredTextStream(response, path, toolName, argumentsText);
         if (path === "/responses") {
             return sendJson(response, 200, toolName ? { output: [{ type: "function_call", name: toolName, arguments: argumentsText }] } : { output_text: argumentsText });
@@ -134,7 +134,7 @@ async function handleFixtureRequest({ request, response, url, body, tasks, reque
             return sendJson(response, 200, { candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/png", data: (await fixtureImage(options)).toString("base64") } }] } }] });
         }
         const toolName = selectedToolName(payload);
-        const text = toolName ? JSON.stringify(toolArguments(toolName, payload)) : "协议测试文本返回成功";
+        const text = toolName ? JSON.stringify(await toolArguments(toolName, payload)) : "协议测试文本返回成功";
         if (path.endsWith(":streamGenerateContent")) return sendStructuredTextStream(response, path, toolName, text, url.searchParams.get("alt") === "sse" ? "gemini-sse" : "ndjson");
         return sendJson(response, 200, { candidates: [{ content: { parts: [{ text }] } }], usageMetadata: { promptTokenCount: 8, candidatesTokenCount: 8, totalTokenCount: 16 } });
     }
@@ -295,7 +295,7 @@ function selectedToolName(payload) {
     );
 }
 
-function toolArguments(name, payload) {
+async function toolArguments(name, payload) {
     if (name === "analyze_ecommerce_references") return ecommerceVisualAnalysisArguments(payload);
     if (name === "plan_ecommerce_edit") return ecommerceEditPlanArguments(payload);
     if (name === "check_ecommerce_results") return ecommerceQualityArguments(payload);
@@ -518,9 +518,10 @@ function toolArguments(name, payload) {
     return {};
 }
 
-function ecommerceVisualAnalysisArguments(payload) {
+async function ecommerceVisualAnalysisArguments(payload) {
     const input = structuredUserPayloads(payload).find((value) => Array.isArray(value?.assets)) || {};
     const assets = Array.isArray(input.assets) ? input.assets : [];
+    const imageEvidence = await Promise.all(ecommerceImageDataUrls(payload).map(fixtureImageBackgroundEvidence));
     const userRequest = String(input.userRequest || "");
     const ambiguous = /无法判断角色/.test(userRequest) || assets.some((asset) => /ambiguous/i.test(String(asset?.title || "")));
     const localEdit = /再亮一点|较早结果|背景改成|局部|去掉|移除/.test(userRequest);
@@ -530,23 +531,85 @@ function ecommerceVisualAnalysisArguments(payload) {
             const assetId = String(asset?.id || "");
             if (ambiguous) return unknownEcommerceReference(assetId);
             const role = assets.length === 1 || (!localEdit && index === 0) || (localEdit && index === 1) ? "product" : "scene";
-            return role === "product" ? productEcommerceReference(assetId) : sceneEcommerceReference(assetId, localEdit);
+            return role === "product" ? productEcommerceReference(assetId, imageEvidence[index]) : sceneEcommerceReference(assetId, localEdit);
         }),
     };
 }
 
-function productEcommerceReference(assetId) {
+function productEcommerceReference(assetId, evidence) {
+    const background = evidence || { whiteBackground: false, transparentBackground: true };
+    const isolatedSubject = background.whiteBackground || background.transparentBackground;
     return {
         assetId,
         role: "product",
-        confidence: "high",
-        visualEvidence: { whiteBackground: false, transparentBackground: true, isolatedSubject: true, completeScene: false },
+        confidence: isolatedSubject ? "high" : "low",
+        visualEvidence: { ...background, isolatedSubject, completeScene: false },
         productFacts: { identity: "ecommerce fixture product", outline: "complete product silhouette", color: "original neutral color", material: "original visible material", brandText: [], view: "front three-quarter view" },
         sceneFacts: null,
         productCore: { x: 0.2, y: 0.15, width: 0.6, height: 0.7 },
         fusionHalo: { x: 0.15, y: 0.1, width: 0.7, height: 0.8 },
         editableTargets: [],
     };
+}
+
+function ecommerceImageDataUrls(payload) {
+    const urls = [];
+    const visit = (value) => {
+        if (typeof value === "string") {
+            if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(value)) urls.push(value);
+            return;
+        }
+        if (!value || typeof value !== "object") return;
+        if (value.source?.type === "base64" && typeof value.source.media_type === "string" && typeof value.source.data === "string") {
+            urls.push(`data:${value.source.media_type};base64,${value.source.data}`);
+            return;
+        }
+        if (value.inlineData && typeof value.inlineData.mimeType === "string" && typeof value.inlineData.data === "string") {
+            urls.push(`data:${value.inlineData.mimeType};base64,${value.inlineData.data}`);
+            return;
+        }
+        for (const item of Array.isArray(value) ? value : Object.values(value)) visit(item);
+    };
+    visit(payload.input);
+    visit(payload.messages);
+    return urls;
+}
+
+async function fixtureImageBackgroundEvidence(source) {
+    const match = source.match(/^data:image\/[a-z0-9.+-]+;base64,([a-z0-9+/=\r\n]+)$/i);
+    if (!match) return null;
+    try {
+        const decoded = await sharp(Buffer.from(match[1], "base64")).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+        const { width, height, channels } = decoded.info;
+        if (!width || !height || channels !== 4) return null;
+        const border = new Set();
+        for (let x = 0; x < width; x += 1) {
+            border.add(x);
+            border.add((height - 1) * width + x);
+        }
+        for (let y = 0; y < height; y += 1) {
+            border.add(y * width);
+            border.add(y * width + width - 1);
+        }
+        let transparent = 0;
+        let white = 0;
+        for (const index of border) {
+            const offset = index * channels;
+            const alpha = decoded.data[offset + 3];
+            if (alpha <= 24) transparent += 1;
+            const red = decoded.data[offset];
+            const green = decoded.data[offset + 1];
+            const blue = decoded.data[offset + 2];
+            const minimum = Math.min(red, green, blue);
+            const maximum = Math.max(red, green, blue);
+            if (minimum >= 240 && maximum - minimum <= 10) white += 1;
+        }
+        if (transparent / border.size >= 0.9) return { whiteBackground: false, transparentBackground: true };
+        if (white / border.size >= 0.9) return { whiteBackground: true, transparentBackground: false };
+        return { whiteBackground: false, transparentBackground: false };
+    } catch {
+        return null;
+    }
 }
 
 function sceneEcommerceReference(assetId, containsProtectedProduct) {

@@ -294,6 +294,59 @@ describe("executeAgentRun backend settings", () => {
         expect(JSON.stringify(mocks.events)).not.toContain("vision-role-private");
     });
 
+    it("routes one uploaded scene through scene editing when an image model is selected without an explicit mode", async () => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+        mocks.run = runFixture({
+            surface: "chat",
+            projectId: undefined,
+            prompt: "把画面改成冬日阳光，其他内容保持不变",
+            requestedModelIds: ["image-model"],
+            referencedAssetIds: ["asset-scene"],
+        });
+        mocks.getCreativeAssetsByIds.mockResolvedValue([
+            {
+                ...creativeImageAsset("asset-scene", "scene.png", "https://cdn.example.com/scene.png"),
+                sourceRunId: "upload",
+                width: 1200,
+                height: 900,
+            },
+        ]);
+        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
+        mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceSceneAnalysis());
+        mocks.planEcommerceEdit.mockResolvedValue({
+            plan: ecommerceScenePlan(),
+            modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
+        });
+        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-scene-edit" } });
+            if (url.endsWith("/api/image-tasks/child-scene-edit")) {
+                return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/scene-edited.png" } } });
+            }
+            throw new Error("unexpected request: " + url);
+        });
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        expect(mocks.analyzeEcommerceReferences).toHaveBeenCalledOnce();
+        expect(mocks.planEcommerceEdit).toHaveBeenCalledOnce();
+        const createCall = mocks.fetchInternalApi.mock.calls.find(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"));
+        const body = JSON.parse(String(createCall?.[1]?.body)) as Record<string, unknown>;
+        expect(body.references).toEqual([expect.objectContaining({ id: "asset-scene", ecommerceRole: "scene" })]);
+        expect(body).not.toHaveProperty("productProtectionRegions");
+        expect(mocks.checkEcommerceResult).toHaveBeenCalledWith(
+            expect.objectContaining({
+                plan: expect.objectContaining({ operation: "scene_edit" }),
+                baselineReference: expect.objectContaining({ assetId: "asset-scene", role: "scene" }),
+            }),
+            expect.any(Array),
+        );
+        expect(mocks.run).toMatchObject({
+            status: "completed",
+            ecommerceSnapshot: { plan: { operation: "scene_edit", source: { productAnchorId: null, currentSceneBaselineId: "asset-scene" } } },
+        });
+        expect(mocks.events.filter((event) => event.type === "ecommerce.progress")).toHaveLength(4);
+    });
+
     it("keeps a hard-failed ecommerce result internal and pauses before asset publication", async () => {
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
         const source = await sharp({ create: { width: 64, height: 48, channels: 4, background: "#ffffff" } })
@@ -1799,5 +1852,53 @@ function ecommerceLocalPlan(targetObjects: string[], request = "把背景换成�
         },
         delta: { requestedChanges: [request], targetObjects, targetRegions: [] },
         continuity: { parentResultId: "scene-result", branchId: "ecommerce-agent-run" },
+    };
+}
+
+function ecommerceSceneAnalysis() {
+    return {
+        analysisVersion: "ecommerce-visual-analysis.v1" as const,
+        modelRole: {
+            logicalRole: "vision_analysis" as const,
+            logicalModelId: "planner",
+            channelId: "planner-channel",
+            upstreamModel: "vendor/planner",
+        },
+        references: [
+            {
+                assetId: "asset-scene",
+                role: "scene" as const,
+                confidence: "high" as const,
+                visualEvidence: { whiteBackground: false, transparentBackground: false, isolatedSubject: false, completeScene: true },
+                productFacts: null,
+                sceneFacts: { space: "living room", composition: "eye level", lighting: "soft daylight" },
+                productCore: null,
+                fusionHalo: null,
+                editableTargets: [
+                    {
+                        id: "lighting-main",
+                        kind: "lighting" as const,
+                        label: "main scene lighting",
+                        region: { x: 0, y: 0, width: 1, height: 1 },
+                    },
+                ],
+            },
+        ],
+    };
+}
+
+function ecommerceScenePlan() {
+    return {
+        ...ecommercePlan(),
+        operation: "scene_edit" as const,
+        source: { productAnchorId: null, currentSceneBaselineId: "asset-scene", sceneReferenceIds: [] },
+        baseline: {
+            productFacts: null,
+            sceneFacts: { space: "living room", composition: "eye level", lighting: "soft daylight" },
+        },
+        delta: { requestedChanges: ["winter sunlight"], targetObjects: ["lighting-main"], targetRegions: ["whole-scene"] },
+        preserve: { productCore: [], sceneElements: ["layout", "furniture", "camera"] },
+        strategy: "integrated_scene" as const,
+        validation: { requiredChecks: ["requested_edit", "scene_preservation", "composition_lighting"] },
     };
 }

@@ -23,8 +23,10 @@ import {
     buildWhiteBackgroundProductProtection,
     createEcommerceLocalEditTask,
     createEcommerceProductSceneTask,
+    createEcommerceSceneEditTask,
     ecommerceGenerationEnabled,
     ecommerceRolloutStage,
+    isEcommerceImageRequest,
     loadEcommercePlanningImage,
     publicEcommerceProgress,
 } from "./ecommerce-generation-service";
@@ -84,6 +86,8 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
         const requestedModelOptions = claimed.generationPreferences?.mode ? plannerModels : allModels;
         const requestedModels = (claimed.requestedModelIds || []).map((id) => requestedModelOptions.find((item) => item.id === id && item.capability !== "text")).filter((item): item is ReturnType<typeof agentModelOptions>[number] => Boolean(item));
         if (requestedModels.length !== (claimed.requestedModelIds || []).length) throw new Error("部分所选模型当前不可用，请重新选择");
+        const requestedModelCapabilities = requestedModels.map((model) => model.capability);
+        const ecommerceImageRequest = isEcommerceImageRequest(claimed, requestedModelCapabilities);
         const availableModels = claimed.surface === "chat" && requestedModels.length ? requestedModels : plannerModels;
         const skillOptions = plannerAgentSkills(settings, claimed);
         const skills = selectAgentSkills(settings, claimed.surface, claimed.selectedSkillIds);
@@ -94,7 +98,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
         const explicitHistory = explicitAssets.filter(isHistoricalGeneratedAsset);
         const ecommerceRollout = ecommerceRolloutStage(process.env.ECOMMERCE_GENERATION_ROLLOUT, claimed.userId);
         const continuityResult =
-            (ecommerceRollout === "shadow" || ecommerceRollout === "internal" || ecommerceRollout === "canary") && claimed.surface === "chat" && claimed.generationPreferences?.mode === "image"
+            (ecommerceRollout === "shadow" || ecommerceRollout === "internal" || ecommerceRollout === "canary") && claimed.surface === "chat" && ecommerceImageRequest
                 ? await selectCurrentSceneBaseline(claimed.conversationId, explicitHistory[0]?.id, claimed.userId)
                 : null;
         const ecommerceAssets = (usesMemoryCandidates ? (continuityResult ? [continuityResult] : memoryAssets) : explicitAssets).filter((asset) => asset.type === "image");
@@ -116,7 +120,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             });
             if (!(await updateAgentRunById(run.id, { ecommerceSnapshot: shadowSnapshot }, undefined, ["running"], executionId))) return;
         }
-        if (ecommerceGenerationEnabled(process.env.ECOMMERCE_GENERATION_ROLLOUT, claimed, Boolean(continuityResult))) {
+        if (ecommerceGenerationEnabled(process.env.ECOMMERCE_GENERATION_ROLLOUT, claimed, Boolean(continuityResult), requestedModelCapabilities)) {
             let planningAssets = [...ecommerceAssets];
             let planningInput = buildEcommercePlanningInput(claimed, planningAssets, conversationContext);
             let snapshotInput = ecommerceSnapshotInput(planningInput);
@@ -241,11 +245,11 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 })),
             );
             const sources = resolveDualBaseline(claimed, { assets: explicitNewImages, decision, results: continuityResult ? [continuityResult] : [] });
-            if (sources.status !== "resolved" || !sources.productAnchorId) {
+            if (sources.status !== "resolved" || (!sources.productAnchorId && !sources.currentSceneBaselineId)) {
                 await pauseForReview(sources.ambiguityReason || "reference_roles_need_review", sources.clarificationQuestion || "无法可靠区分商品图和场景参考图，请确认图片角色。");
                 return;
             }
-            if (sources.currentSceneBaselineId) {
+            if (sources.productAnchorId && sources.currentSceneBaselineId) {
                 const product = analysis.references.find((reference) => reference.assetId === sources.productAnchorId && reference.role === "product" && reference.confidence === "high");
                 const scene = analysis.references.find((reference) => reference.assetId === sources.currentSceneBaselineId && reference.role === "scene" && reference.confidence === "high");
                 if (!product?.productFacts || !scene?.sceneFacts || !scene.productCore || !scene.fusionHalo) {
@@ -288,7 +292,9 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 return;
             }
             let task;
-            if (sources.currentSceneBaselineId) {
+            if (planning.plan.operation === "scene_edit") {
+                task = createEcommerceSceneEditTask(claimed, planning.plan, planningAssets, ecommerceExecution);
+            } else if (sources.currentSceneBaselineId) {
                 const target = resolveLocalEditTarget(planning.plan, analysis);
                 if (target.state !== "resolved") {
                     await pauseForReview(target.reason, target.clarificationQuestion, true);

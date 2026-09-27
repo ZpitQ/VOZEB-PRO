@@ -103,5 +103,7 @@ describe("useCreateAgent submission retry", () => {
         expect(statusSource).toContain("setActiveRunStatus(status)");
         expect(statusSource).toContain("setRunDetails");
         expect(statusSource).toContain("[run.id]");
+        expect(statusSource).toContain('status === "paused"');
+        expect(statusSource).toContain("getCreativeAgentRun(run.id)");
     });
 });

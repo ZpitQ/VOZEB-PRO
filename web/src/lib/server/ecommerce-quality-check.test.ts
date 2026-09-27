@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import type { EcommerceRoleCandidate } from "./ecommerce-model-routing";
-import { ECOMMERCE_QUALITY_CHECK_KEYS, checkEcommerceResult, checkEcommerceResultWithFallback, ecommerceQualityGate, shouldBlockEcommerceResult, unavailableEcommerceQualityCheck } from "./ecommerce-quality-check";
+import { ECOMMERCE_QUALITY_CHECK_KEYS, checkEcommerceResult, checkEcommerceResultWithFallback, ecommerceQualityGate, shouldBlockEcommerceResult, unavailableEcommerceQualityCheck, type EcommerceQualityCheckRequest } from "./ecommerce-quality-check";
 
 const mocks = vi.hoisted(() => ({
     requestStructuredText: vi.fn(),
@@ -49,7 +49,7 @@ describe("ecommerce quality check", () => {
         mocks.requestStructuredText.mockResolvedValue(modelCall(modelResult({ brand_logo: "not_applicable", packaging_text: "not_applicable" })));
         const withoutBrandText = await checkEcommerceResult(request(), candidate());
         const brandedRequest = request();
-        brandedRequest.plan.baseline.productFacts.brandText = ["ACME"];
+        brandedRequest.plan.baseline.productFacts!.brandText = ["ACME"];
         const withBrandText = await checkEcommerceResult(brandedRequest, candidate());
 
         expect(withoutBrandText.status).toBe("passed");
@@ -67,6 +67,27 @@ describe("ecommerce quality check", () => {
         expect(checked.hardFailures).toEqual([]);
         expect(shouldBlockEcommerceResult(checked)).toBe(false);
         expect(ecommerceQualityGate(checked)).toEqual({ action: "publish", publicStatus: "needs_adjustment", publicMessage: "图片已生成，场景细节可继续调整。" });
+    });
+
+    it("checks a scene edit against its scene baseline without product hard failures", async () => {
+        mocks.requestStructuredText.mockResolvedValue(
+            modelCall(
+                modelResult({
+                    product_identity: "failed",
+                    product_silhouette: "failed",
+                    product_color_material: "failed",
+                    product_proportions_view: "failed",
+                }),
+            ),
+        );
+        const sceneRequest = request(scenePlan());
+        sceneRequest.baselineReference = { assetId: "scene-1", url: "https://cdn.example.com/scene.png", role: "scene" };
+
+        const checked = await checkEcommerceResult(sceneRequest, candidate());
+
+        expect(checked.status).toBe("passed");
+        expect(checked.hardFailures).toEqual([]);
+        expect(checked.checks.filter((item) => item.key.startsWith("product_")).every((item) => item.status === "not_applicable")).toBe(true);
     });
 
     it("fails closed when the frozen quality-check model is unavailable", async () => {
@@ -101,14 +122,14 @@ describe("ecommerce quality check", () => {
     });
 });
 
-function request() {
+function request(requestPlan = plan()): EcommerceQualityCheckRequest {
     return {
         origin: "http://localhost",
         cookie: "session=test",
         userId: "user-1",
         requestId: "run-1",
-        plan: plan(),
-        productReference: { assetId: "product-1", url: "https://cdn.example.com/product.png" },
+        plan: requestPlan,
+        baselineReference: { assetId: "product-1", url: "https://cdn.example.com/product.png", role: "product" as const },
         resultImages: [{ resultId: "result-1", url: "https://cdn.example.com/result.png" }],
     };
 }
@@ -167,4 +188,24 @@ function plan(): EcommerceEditPlan {
         continuity: { parentResultId: null, branchId: "branch-1" },
         validation: { requiredChecks: ["product_identity"] },
     };
+}
+
+function scenePlan(): EcommerceEditPlan {
+    return {
+        ...plan(),
+        operation: "scene_edit",
+        source: { productAnchorId: null, currentSceneBaselineId: "scene-1", sceneReferenceIds: [] },
+        baseline: {
+            productFacts: null,
+            sceneFacts: { space: "living room", composition: "eye level", lighting: "soft daylight" },
+        },
+        delta: {
+            requestedChanges: ["改成冬日阳光"],
+            targetObjects: ["lighting-main"],
+            targetRegions: ["whole-scene"],
+        },
+        preserve: { productCore: [], sceneElements: ["layout", "furniture", "camera"] },
+        strategy: "integrated_scene",
+        validation: { requiredChecks: ["requested_edit", "scene_preservation", "composition_lighting"] },
+    } as EcommerceEditPlan;
 }

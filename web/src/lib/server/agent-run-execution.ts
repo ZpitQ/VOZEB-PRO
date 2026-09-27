@@ -745,12 +745,13 @@ async function checkAndRecordEcommerceResult(run: AgentRun, task: AgentRunTask, 
     const routeSnapshot = snapshot?.modelRouteSnapshots?.quality_check;
     const frozenCandidate = routeSnapshot ? routeEcommerceRole(settings, "quality_check", routeSnapshot) : null;
     const candidates = uniqueEcommerceRoleCandidates([frozenCandidate, ...resolveEcommerceRoleCandidates(settings, "quality_check", "text")]);
-    const productReference = task.references?.find((item) => item.ecommerceRole === "product" && item.assetId && item.url);
+    const baselineRole = snapshot?.plan?.operation === "scene_edit" ? "scene" : "product";
+    const baselineReference = task.references?.find((item) => item.ecommerceRole === baselineRole && item.assetId && item.url);
     const imageUrls = taskImageUrls(result);
     const resultImages = imageUrls.map((url, index) => ({ resultId: sourceTaskIds[index] || `${task.id}-${index + 1}`, url }));
     const fallbackRole = routeSnapshot || candidates[0]?.snapshot || ({ logicalRole: "quality_check", capability: "text", logicalModelId: "", channelId: "", upstreamModel: "", apiFormat: "openai" } as const);
     const qualityCheck =
-        snapshot?.plan && candidates.length && productReference
+        snapshot?.plan && candidates.length && baselineReference
             ? await checkEcommerceResultWithFallback(
                   {
                       origin,
@@ -758,12 +759,12 @@ async function checkAndRecordEcommerceResult(run: AgentRun, task: AgentRunTask, 
                       userId: run.userId,
                       requestId: `${run.id}:${task.id}:${sourceTaskIds.join(",")}`,
                       plan: snapshot.plan,
-                      productReference: { assetId: productReference.assetId!, url: productReference.url },
+                      baselineReference: { assetId: baselineReference.assetId!, url: baselineReference.url, role: baselineRole },
                       resultImages,
                   },
                   candidates,
               )
-            : unavailableEcommerceQualityCheck(!snapshot?.plan ? "电商编辑计划缺失" : !candidates.length ? "结果验收模型快照不可用" : "商品参考图不可用", fallbackRole);
+            : unavailableEcommerceQualityCheck(!snapshot?.plan ? "电商编辑计划缺失" : !candidates.length ? "结果验收模型快照不可用" : "验收基线图片不可用", fallbackRole);
     const gate = ecommerceQualityGate(qualityCheck);
     const ecommerceSnapshot = snapshot ? { ...snapshot, qualityCheck } : snapshot;
     if (!ecommerceSnapshot || !(await updateAgentRunById(run.id, { ecommerceSnapshot }, { type: "ecommerce.quality", data: { status: gate.publicStatus, text: gate.publicMessage } }, ["running"], executionId))) {
