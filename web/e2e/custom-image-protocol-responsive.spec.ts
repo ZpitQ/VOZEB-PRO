@@ -87,8 +87,20 @@ test.afterEach(async ({ request }) => {
     }
 });
 
+function customImageRequestsForPrompt(prompt: string) {
+    return fixture.requests.filter((entry) => {
+        if (entry.method !== "POST" || entry.path !== "/custom/images") return false;
+        try {
+            return JSON.parse(entry.body.toString("utf8")).prompt === prompt;
+        } catch {
+            return false;
+        }
+    });
+}
+
 test("custom Gemini 4K requests preserve native pixels across image task sources and automatic ratio", async ({ request }, testInfo) => {
     test.skip(testInfo.project.name !== "chromium", "The shared server task matrix runs once; responsive creation runs on every viewport.");
+    const prompt = "Native image resolution fixture " + randomUUID();
     const cases = [
         { source: "image-workbench", size: "16:9" },
         { source: "agent", size: "16:9" },
@@ -102,7 +114,7 @@ test("custom Gemini 4K requests preserve native pixels across image task sources
             data: {
                 kind: item.reference ? "edit" : "generation",
                 config: { model: MODEL, quality: "4k", size: item.size },
-                prompt: "Native image resolution fixture",
+                prompt,
                 source: item.source,
                 context: { clientRequestId: randomUUID() },
                 references: item.reference
@@ -127,12 +139,12 @@ test("custom Gemini 4K requests preserve native pixels across image task sources
         const media = await request.get(result.serverUrl);
         expect(media.ok()).toBe(true);
         expect(await sharp(await media.body()).metadata()).toMatchObject(NATIVE_SIZE);
-        const upstream = fixture.requests.filter((entry) => entry.method === "POST" && entry.path === "/custom/images").at(-1)!;
+        const upstream = customImageRequestsForPrompt(prompt).at(-1)!;
         const payload = JSON.parse(upstream.body.toString("utf8"));
         expect(payload.model).toBe(`${MODEL}-4k${item.size === "auto" ? "" : "-16x9"}`);
         if (item.reference) expect(payload.references).toHaveLength(1);
     }
-    expect(fixture.requests.filter((entry) => entry.method === "POST" && entry.path === "/custom/images")).toHaveLength(cases.length);
+    expect(customImageRequestsForPrompt(prompt)).toHaveLength(cases.length);
 });
 
 test("custom Gemini image creation sends the 4K suffix and restores the full-size result after reload", async ({ page, request }, testInfo) => {

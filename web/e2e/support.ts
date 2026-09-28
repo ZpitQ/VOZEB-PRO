@@ -88,6 +88,7 @@ export function e2eSettingsPatch() {
         systemChannels: [channel("e2e-primary", "E2E 主渠道", "e2e-primary-secret", modelCapabilities, modelConfigs), channel("e2e-backup", "E2E 备用渠道", "e2e-backup-secret", modelCapabilities, modelConfigs)],
         logicalModels: ecommerceLogicalModels,
         defaultModels: { textModel: "e2e-text", imageModel: "e2e-image", videoModel: "e2e-video", audioModel: "e2e-audio" },
+        ecommerceGenerationEnabled: true,
         ecommerceModelRoles: {
             vision_analysis: ["e2e-ecommerce-vision"],
             edit_planning: ["e2e-ecommerce-planner"],
