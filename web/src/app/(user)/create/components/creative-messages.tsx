@@ -280,12 +280,7 @@ function CreativeMediaRound({
                         ) : null}
                         <div data-testid="creative-result-group" className="mt-3 flex w-fit max-w-full flex-col items-start">
                             {qualityReviewPending ? (
-                                <CreativeQualityReview
-                                    run={run!}
-                                    message={displayContent}
-                                    onRetry={() => onRetryMessage(assistantMessage, run)}
-                                    onAdjust={onAdjustRequest ? () => onAdjustRequest(userMessage, run) : undefined}
-                                />
+                                <CreativeQualityReview run={run!} message={displayContent} onRetry={() => onRetryMessage(assistantMessage, run)} onAdjust={onAdjustRequest ? () => onAdjustRequest(userMessage, run) : undefined} />
                             ) : isFailedMediaRound ? (
                                 <CreativeGenerationFailure message={failedTasks.length === 1 ? failedTasks[0]?.error || displayContent : displayContent} onRetry={() => onRetryMessage(assistantMessage, run)} />
                             ) : assistantMessage.status === "running" ? (
@@ -351,27 +346,14 @@ const ECOMMERCE_QUALITY_LABELS: Record<NonNullable<CreativeAgentRun["ecommerceQu
     composition_lighting: "构图或光线需要调整",
 };
 
-function CreativeQualityReview({
-    run,
-    message,
-    onRetry,
-    onAdjust,
-}: {
-    run: CreativeAgentRun;
-    message: string;
-    onRetry: () => Promise<boolean | void>;
-    onAdjust?: () => void;
-}) {
+function CreativeQualityReview({ run, message, onRetry, onAdjust }: { run: CreativeAgentRun; message: string; onRetry: () => Promise<boolean | void>; onAdjust?: () => void }) {
     const [retrying, setRetrying] = useState(false);
     const review = run.ecommerceQualityReview;
     const failures = Array.from(new Set((review?.failureKeys || []).map((key) => ECOMMERCE_QUALITY_LABELS[key])));
     const reviewItems = review?.kind === "check_unavailable" ? ["验收服务暂时不可用，结果未发布"] : failures.length ? failures : ["商品关键细节未达到发布标准"];
 
     return (
-        <div
-            data-testid="creative-quality-review"
-            className="w-full max-w-[620px] rounded-md border border-amber-200 bg-amber-50/70 p-4 text-left dark:border-amber-800/70 dark:bg-amber-950/20"
-        >
+        <div data-testid="creative-quality-review" className="w-full max-w-[620px] rounded-md border border-amber-200 bg-amber-50/70 p-4 text-left dark:border-amber-800/70 dark:bg-amber-950/20">
             <div className="flex items-start gap-3">
                 <AlertTriangle className="mt-0.5 size-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
                 <div className="min-w-0 flex-1">
@@ -384,13 +366,7 @@ function CreativeQualityReview({
                     </ul>
                     <p className="mt-2 text-xs leading-5 text-[#7c6f54] dark:text-amber-200/70">该结果没有发布。可重新生成，或调整要求后再试。</p>
                     <div className="mt-3 flex flex-wrap gap-2">
-                        <Button
-                            type="primary"
-                            icon={<RotateCw className="size-4" />}
-                            loading={retrying}
-                            onClick={() => void runRetry(onRetry, setRetrying)}
-                            aria-label="重新生成未通过的商品图"
-                        >
+                        <Button type="primary" icon={<RotateCw className="size-4" />} loading={retrying} onClick={() => void runRetry(onRetry, setRetrying)} aria-label="重新生成未通过的商品图">
                             重新生成
                         </Button>
                         {onAdjust ? (
@@ -867,3 +843,4 @@ function agentAssetDownload(asset: CreativeAsset): AgentMediaDownload {
         mimeType: asset.mimeType,
     };
 }
+

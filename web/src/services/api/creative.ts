@@ -27,16 +27,7 @@ export type CreativeAgentRun = {
     ecommerceQualityStatus?: "passed" | "needs_adjustment" | "needs_review";
     ecommerceQualityReview?: {
         kind: "hard_failure" | "check_unavailable";
-        failureKeys: Array<
-            | "product_identity"
-            | "product_silhouette"
-            | "product_color_material"
-            | "product_proportions_view"
-            | "brand_logo"
-            | "packaging_text"
-            | "scene_intent"
-            | "composition_lighting"
-        >;
+        failureKeys: Array<"product_identity" | "product_silhouette" | "product_color_material" | "product_proportions_view" | "brand_logo" | "packaging_text" | "scene_intent" | "composition_lighting">;
     };
     createdAt?: number;
     updatedAt?: number;
@@ -339,3 +330,4 @@ function count(value: unknown) {
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
 }
+

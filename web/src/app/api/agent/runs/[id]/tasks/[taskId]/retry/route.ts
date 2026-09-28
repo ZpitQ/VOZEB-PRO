@@ -28,11 +28,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (!requestedTaskIds || requestedTaskIds[0] !== taskId) return NextResponse.json({ code: 400, data: null, msg: "失败任务标识无效" }, { status: 400 });
     const requestedTaskIdSet = new Set(requestedTaskIds);
     const requestedTasks = run.tasks.filter((item) => requestedTaskIdSet.has(item.id));
-    const qualityRetry =
-        run.status === "paused" && run.ecommerceSnapshot?.qualityCheck?.publicStatus === "needs_review" && requestedTasks.length > 0 && requestedTasks.every((task) => task.status === "needs_review");
+    const qualityRetry = run.status === "paused" && run.ecommerceSnapshot?.qualityCheck?.publicStatus === "needs_review" && requestedTasks.length > 0 && requestedTasks.every((task) => task.status === "needs_review");
     const failedRetry = requestedTasks.length > 0 && requestedTasks.every((task) => task.status === "failed");
-    if (requestedTasks.length !== requestedTaskIds.length || (!failedRetry && !qualityRetry))
-        return NextResponse.json({ code: 409, data: null, msg: "只有失败任务或商品质检未通过的任务可以重新生成" }, { status: 409 });
+    if (requestedTasks.length !== requestedTaskIds.length || (!failedRetry && !qualityRetry)) return NextResponse.json({ code: 409, data: null, msg: "只有失败任务或商品质检未通过的任务可以重新生成" }, { status: 409 });
     const settings = await getAuthSettings();
     const limit = settings.generationConcurrency.agent;
     const tasks = run.tasks.map((item) => {
@@ -79,12 +77,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         10 * 60 * 1000,
         limit,
         async () => ({
-            updated: await updateAgentRunById(
-                run.id,
-                runPatch,
-                retryEvent,
-                [run.status],
-            ),
+            updated: await updateAgentRunById(run.id, runPatch, retryEvent, [run.status]),
         }),
         run.id,
     );
@@ -104,3 +97,4 @@ function normalizeTaskIds(value: unknown, fallbackTaskId: string) {
     const taskIds = Array.from(new Set(value.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean)));
     return taskIds.length ? taskIds : null;
 }
+
