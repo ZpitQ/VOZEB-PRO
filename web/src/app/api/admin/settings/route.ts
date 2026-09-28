@@ -48,6 +48,7 @@ export async function PATCH(request: Request) {
         if (body.entitlements && typeof body.entitlements === "object") patch.entitlements = body.entitlements;
         if (body.generationConcurrency && typeof body.generationConcurrency === "object") patch.generationConcurrency = body.generationConcurrency;
         if (body.generationDefaults && typeof body.generationDefaults === "object") patch.generationDefaults = body.generationDefaults;
+        if (typeof body.ecommerceGenerationEnabled === "boolean") patch.ecommerceGenerationEnabled = body.ecommerceGenerationEnabled;
         if (Array.isArray(body.systemChannels)) {
             patch.systemChannels = mergeSystemChannelSecrets(body.systemChannels, currentSettings.systemChannels);
             const webhookSecretError = patch.systemChannels.map(systemChannelWebhookSecretValidationError).find(Boolean);
@@ -115,6 +116,7 @@ const SETTINGS_PERMISSION_BY_FIELD = {
     systemChannels: "upstream.manage",
     logicalModels: "upstream.manage",
     defaultModels: "upstream.manage",
+    ecommerceGenerationEnabled: "upstream.manage",
     ecommerceModelRoles: "upstream.manage",
     agentSkills: "upstream.manage",
 } as const satisfies Partial<Record<keyof AuthSettings, AdminPermission>>;

@@ -26,7 +26,16 @@ export function AdminChannelsSection({ controller }: { controller: AdminDashboar
                         loading={settingsLoading}
                         icon={<Save className="size-4" />}
                         onClick={() =>
-                            saveSettings((current) => ({ systemChannels: current.systemChannels, logicalModels: current.logicalModels, defaultModels: current.defaultModels, ecommerceModelRoles: current.ecommerceModelRoles }), "模型渠道配置已保存")
+                            saveSettings(
+                                (current) => ({
+                                    systemChannels: current.systemChannels,
+                                    logicalModels: current.logicalModels,
+                                    defaultModels: current.defaultModels,
+                                    ecommerceGenerationEnabled: current.ecommerceGenerationEnabled,
+                                    ecommerceModelRoles: current.ecommerceModelRoles,
+                                }),
+                                "模型渠道配置已保存",
+                            )
                         }
                     >
                         保存更改
@@ -35,7 +44,13 @@ export function AdminChannelsSection({ controller }: { controller: AdminDashboar
             />
             <div className="p-3 sm:p-5">
                 <AdminChannelWorkspace
-                    settings={{ systemChannels: settings.systemChannels, logicalModels: settings.logicalModels, defaultModels: settings.defaultModels, ecommerceModelRoles: settings.ecommerceModelRoles }}
+                    settings={{
+                        systemChannels: settings.systemChannels,
+                        logicalModels: settings.logicalModels,
+                        defaultModels: settings.defaultModels,
+                        ecommerceGenerationEnabled: settings.ecommerceGenerationEnabled,
+                        ecommerceModelRoles: settings.ecommerceModelRoles,
+                    }}
                     fetchingModelId={fetchingModelId}
                     saving={settingsLoading}
                     onChange={(next) => setSettings((current) => ({ ...current, ...next }))}

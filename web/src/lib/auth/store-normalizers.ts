@@ -257,6 +257,7 @@ export function normalizeSettings(settings: AuthSettings): AuthSettings {
         systemChannels,
         logicalModels,
         defaultModels: normalizeDefaultModelsConfig(settings.defaultModels, logicalModels, systemChannels),
+        ecommerceGenerationEnabled: settings.ecommerceGenerationEnabled === true,
         ecommerceModelRoles: normalizeEcommerceModelRoles(settings.ecommerceModelRoles, logicalModels),
         agentSkills: normalizeAgentSkills(settings.agentSkills),
     };

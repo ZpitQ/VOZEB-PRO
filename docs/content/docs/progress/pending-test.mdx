@@ -5,6 +5,8 @@ description: VOZEB PRO 当前版本需要人工或真实环境确认的事项
 
 # 待测试
 
+- 管理员后台“模型渠道 -> 电商流程”的正式编排开关仍需完成桌面端与移动端人工验收：验证开启、关闭、保存和刷新回显；关闭时图生图不得产生正式电商 Trace，开启时应依次产生视觉分析、编辑规划、图片生成和结果验收四阶段 Trace。自动化已覆盖设置持久化、即时回读、运行时门禁和组件切换；浏览器自动点击因客户端授权不可用未执行，不能据此宣称真实交互已通过。
+
 - 2026-09-27 已完成 `/create` 图生图无显式 `preferences.mode` 的运行时回归。此前 Run `agent-FToMa7sFOGMmkw1r-mhRE` 因后端只接受 `mode=image` 而绕过电商编排；首轮门控修复后，Run `agent-helJVP1o8nNg9xda5zRIR` 已进入编排，但多模态 Planner 对仅含完整场景的素材返回旧式 `local_edit + productAnchorId=null`，在严格契约边界被拒绝。当前兼容逻辑只在服务端确认无商品锚点、存在当前场景基线且视觉角色为 `scene` 时把该旧式输出规范化为 `scene_edit`，不允许模型替换服务端解析的素材 ID，也不放宽缺少商品锚点的商品编辑。部署后真实 Run `agent-SHtXNpcDhjwy7-XyHoXIp` 使用场景资产 `asset-TdkcKSFyRvkjnHcAyuYXv`、`gpt-image-2.5-sunburst` 且请求中无 `mode`，成功执行 `visual_analysis -> edit_planning -> image_generation -> quality_check`；分析、规划和质检实际使用 `gpt-5.6-sol`，计划为 `scene_edit + integrated_scene`，`source.currentSceneBaselineId` 保持原场景、`productAnchorId=null`、`baseline.productFacts=null`、`preserve.productCore=[]`，图片任务 `ef20d7de-c850-4e4f-a0be-809e90bff19e` 成功并发布资产 `asset-QLI6eBO0KhLIaKssv9hN9`。质检以场景为基线，商品检查均为 `not_applicable`；由于生成结果新增右侧拱形开口并改变相机视角、构图和明暗分布，`scene_intent` 与 `composition_lighting` 判定失败，Run 最终为 `completed/needs_adjustment`。这证明编排触发、场景契约和可观测 Trace 已恢复，但也表明场景局部编辑的结构保持能力仍需后续用蒙版或更适合的编辑模型提升，不能把流程完成误报为成图合格。
 
 - 电商商品图 SOP Task 11 已完成严格商品发布门禁、固定黄金样例和开发环境真实模型验收，并进入 PR 提交流程。黄金集覆盖收纳、灯具、厨房、卫浴、软装、家具和小家电 7 类白底/透明底商品，并固定原始文件哈希；严格质检失败的内部生成资产继续保留在会话资产和 Trace 中供管理员复核，但 `run.assetIds` 是唯一正式发布清单，`needs_review` 时必须为空，统一创作前台不得展示内部结果。自动验证包括严格门禁 E2E `4 passed`、桌面 Chromium 商品矩阵 `14 passed / 1 skipped`、390/430px 移动端 `5 passed / 22 skipped`、受影响 Vitest `59/59`，以及 Format、ESLint、TypeScript、生产构建和 `git diff --check` 全部通过；Playwright 因本机 3100 被 Loki 占用而使用 `VOZEB_PRO_E2E_PORT=3199`，且每轮前执行 `pnpm run pree2e`。

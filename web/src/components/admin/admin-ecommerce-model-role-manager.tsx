@@ -1,6 +1,6 @@
 "use client";
 
-import { Button, Select, Tag, Tooltip } from "antd";
+import { Button, Select, Switch, Tag, Tooltip } from "antd";
 import { ArrowDown, ArrowUp, GitBranch, Plus, Trash2 } from "lucide-react";
 
 import { SectionTitle } from "@/components/admin/admin-settings-controls";
@@ -11,10 +11,12 @@ import { addEcommerceRoleModel, availableEcommerceRoleModels, moveEcommerceRoleM
 type Props = {
     logicalModels: LogicalModel[];
     roles: EcommerceModelRoles;
+    enabled: boolean;
+    onEnabledChange: (enabled: boolean) => void;
     onChange: (roles: EcommerceModelRoles) => void;
 };
 
-export function AdminEcommerceModelRoleManager({ logicalModels, roles, onChange }: Props) {
+export function AdminEcommerceModelRoleManager({ logicalModels, roles, enabled, onEnabledChange, onChange }: Props) {
     const configured = ECOMMERCE_MODEL_ROLE_DEFINITIONS.filter(({ role }) => roles[role].length).length;
     const updateRole = (role: EcommerceLogicalModelRole, modelIds: string[]) => onChange({ ...roles, [role]: modelIds });
 
@@ -25,6 +27,14 @@ export function AdminEcommerceModelRoleManager({ logicalModels, roles, onChange 
                 <Tag color={configured === ECOMMERCE_MODEL_ROLE_DEFINITIONS.length ? "green" : "blue"} className="m-0">
                     已配置 {configured}/{ECOMMERCE_MODEL_ROLE_DEFINITIONS.length}
                 </Tag>
+            </div>
+
+            <div className="mt-4 flex items-center justify-between gap-4 rounded-md border border-stone-200 bg-stone-50 px-4 py-3 dark:border-stone-800 dark:bg-stone-900/40">
+                <div>
+                    <div className="text-sm font-semibold text-stone-950 dark:text-stone-100">启用电商生图编排</div>
+                    <div className="mt-1 text-xs leading-5 text-stone-500 dark:text-stone-400">开启后，带图片参考的创作任务将进入视觉分析、编辑规划、图片生成与结果验收流程。</div>
+                </div>
+                <Switch aria-label="启用电商生图编排" checked={enabled} onChange={onEnabledChange} />
             </div>
 
             <div className="mt-4 divide-y divide-stone-200 border-y border-stone-200 dark:divide-stone-800 dark:border-stone-800">

@@ -154,7 +154,13 @@ export function AdminChannelWorkspace({ settings, fetchingModelId, saving, onCha
                         key: "ecommerce",
                         label: <TabLabel icon={<GitBranch className="size-4" />} text="电商流程" />,
                         children: (
-                            <AdminEcommerceModelRoleManager logicalModels={settings.logicalModels} roles={settings.ecommerceModelRoles || EMPTY_ECOMMERCE_MODEL_ROLES} onChange={(ecommerceModelRoles) => onChange({ ...settings, ecommerceModelRoles })} />
+                            <AdminEcommerceModelRoleManager
+                                logicalModels={settings.logicalModels}
+                                roles={settings.ecommerceModelRoles || EMPTY_ECOMMERCE_MODEL_ROLES}
+                                enabled={settings.ecommerceGenerationEnabled === true}
+                                onEnabledChange={(ecommerceGenerationEnabled) => onChange({ ...settings, ecommerceGenerationEnabled })}
+                                onChange={(ecommerceModelRoles) => onChange({ ...settings, ecommerceModelRoles })}
+                            />
                         ),
                     },
                 ]}

@@ -97,11 +97,10 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
         // assets linked to a real Agent Run are historical generated results.
         const isHistoricalGeneratedAsset = (asset: { type?: string; sourceRunId?: string }) => asset.type === "image" && Boolean(asset.sourceRunId && asset.sourceRunId !== "upload");
         const explicitHistory = explicitAssets.filter(isHistoricalGeneratedAsset);
+        const ecommerceOrchestrationEnabled = settings.ecommerceGenerationEnabled === true;
         const ecommerceRollout = ecommerceRolloutStage(process.env.ECOMMERCE_GENERATION_ROLLOUT, claimed.userId);
         const continuityResult =
-            (ecommerceRollout === "shadow" || ecommerceRollout === "internal" || ecommerceRollout === "canary") && claimed.surface === "chat" && ecommerceImageRequest
-                ? await selectCurrentSceneBaseline(claimed.conversationId, explicitHistory[0]?.id, claimed.userId)
-                : null;
+            (ecommerceOrchestrationEnabled || ecommerceRollout === "shadow") && claimed.surface === "chat" && ecommerceImageRequest ? await selectCurrentSceneBaseline(claimed.conversationId, explicitHistory[0]?.id, claimed.userId) : null;
         const ecommerceAssets = (usesMemoryCandidates ? (continuityResult ? [continuityResult] : memoryAssets) : explicitAssets).filter((asset) => asset.type === "image");
         if (ecommerceRollout === "shadow" && claimed.surface === "chat" && ecommerceAssets.length) {
             const planningInput = buildEcommercePlanningInput(claimed, ecommerceAssets, conversationContext);
@@ -121,7 +120,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             });
             if (!(await updateAgentRunById(run.id, { ecommerceSnapshot: shadowSnapshot }, undefined, ["running"], executionId))) return;
         }
-        if (ecommerceGenerationEnabled(process.env.ECOMMERCE_GENERATION_ROLLOUT, claimed, Boolean(continuityResult), requestedModelCapabilities, hasExplicitImageReference)) {
+        if (ecommerceOrchestrationEnabled && ecommerceGenerationEnabled("internal", claimed, Boolean(continuityResult), requestedModelCapabilities, hasExplicitImageReference)) {
             let planningAssets = [...ecommerceAssets];
             let planningInput = buildEcommercePlanningInput(claimed, planningAssets, conversationContext);
             let snapshotInput = ecommerceSnapshotInput(planningInput);

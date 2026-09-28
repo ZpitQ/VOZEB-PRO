@@ -139,7 +139,7 @@ describe("executeAgentRun backend settings", () => {
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "shadow");
         mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "把白底台灯放到明亮客厅", referencedAssetIds: ["asset-product"] });
         mocks.getCreativeAssetsByIds.mockResolvedValue([creativeImageAsset("asset-product", "白底台灯", "https://cdn.example.com/product.png")]);
-        mocks.getAuthSettings.mockResolvedValue(canvasSettings("image-default", "image-default-channel"));
+        mocks.getAuthSettings.mockResolvedValue({ ...(canvasSettings("image-default", "image-default-channel") as unknown as Record<string, unknown>), ecommerceGenerationEnabled: false } as never);
         mocks.fetchInternalApi.mockImplementation(async (url: string) => {
             if (url.endsWith("/chat/completions")) return Response.json({ output: [{ type: "function_call", name: "create_agent_plan", arguments: JSON.stringify(conversationPlan("image-default", "已按原流程处理。")) }] });
             throw new Error(`unexpected request: ${url}`);
@@ -153,6 +153,24 @@ describe("executeAgentRun backend settings", () => {
         const plannerBody = JSON.parse(String(mocks.fetchInternalApi.mock.calls.find(([url]) => url.endsWith("/chat/completions"))?.[1]?.body)) as { messages: Array<{ content: string }> };
         expect(JSON.parse(plannerBody.messages[1].content)).toMatchObject({ requirement: "把白底台灯放到明亮客厅" });
         expect(mocks.run?.tasks).toEqual([]);
+    });
+
+    it.each(["internal", "enabled"])("keeps ecommerce orchestration disabled when the administrator switch is off and rollout is %s", async (rollout) => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", rollout);
+        mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "把白底台灯放到明亮客厅", referencedAssetIds: ["asset-product"] });
+        mocks.getCreativeAssetsByIds.mockResolvedValue([creativeImageAsset("asset-product", "白底台灯", "https://cdn.example.com/product.png")]);
+        mocks.getAuthSettings.mockResolvedValue({ ...(canvasSettings("image-default", "image-default-channel") as unknown as Record<string, unknown>), ecommerceGenerationEnabled: false } as never);
+        mocks.fetchInternalApi.mockImplementation(async (url: string) => {
+            if (url.endsWith("/chat/completions")) return Response.json({ output: [{ type: "function_call", name: "create_agent_plan", arguments: JSON.stringify(conversationPlan("image-default", "已按普通图片流程处理。")) }] });
+            throw new Error("unexpected request: " + url);
+        });
+
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+
+        expect(mocks.analyzeEcommerceReferences).not.toHaveBeenCalled();
+        expect(mocks.run?.ecommerceSnapshot).toBeUndefined();
+        expect(mocks.planEcommerceEdit).not.toHaveBeenCalled();
+        expect(mocks.fetchInternalApi.mock.calls.some(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"))).toBe(false);
     });
 
     it("pauses for review when every visual-analysis candidate fails", async () => {
@@ -180,8 +198,8 @@ describe("executeAgentRun backend settings", () => {
         expect(mocks.fetchInternalApi.mock.calls.some(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"))).toBe(false);
     });
 
-    it("executes the internal product-to-scene slice and preserves strict reference metadata", async () => {
-        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+    it.each(["off", "internal", "enabled"])("executes the administrator-enabled product-to-scene slice when rollout is %s", async (rollout) => {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", rollout);
         const source = await sharp({ create: { width: 64, height: 48, channels: 4, background: "#ffffff" } })
             .composite([{ input: { create: { width: 20, height: 28, channels: 4, background: "#252525" } }, left: 22, top: 10 }])
             .png()
@@ -611,7 +629,7 @@ describe("executeAgentRun backend settings", () => {
             generationPreferences: { mode: "image" },
         });
         mocks.getCreativeAssetsByIds.mockResolvedValue([creativeImageAsset("asset-unknown", "unknown.png", "https://cdn.example.com/unknown.png")]);
-        mocks.getAuthSettings.mockResolvedValue(settings("image-model", "image-channel"));
+        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
         mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceAnalysis("unknown"));
 
         await executeAgentRun(mocks.run, "http://localhost", "session=test");
@@ -1691,7 +1709,9 @@ function ecommerceSettings() {
     const value = settings("image-model", "image-channel") as unknown as {
         systemChannels: Array<{ id: string; apiFormat?: string; models: string[] }>;
         logicalModels: Array<{ id: string; bindings: Array<{ upstreamModel: string }> }>;
+        ecommerceGenerationEnabled?: boolean;
     };
+    value.ecommerceGenerationEnabled = true;
     const channel = value.systemChannels.find((item) => item.id === "image-channel");
     const model = value.logicalModels.find((item) => item.id === "image-model");
     if (!channel || !model) throw new Error("missing ecommerce image fixture");
