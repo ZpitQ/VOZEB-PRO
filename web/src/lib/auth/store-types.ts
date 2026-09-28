@@ -484,6 +484,7 @@ export type AuthSettings = {
     systemChannels: SystemModelChannel[];
     logicalModels: LogicalModel[];
     defaultModels: SystemDefaultModels;
+    ecommerceGenerationEnabled: boolean;
     ecommerceModelRoles: EcommerceModelRoles;
     agentSkills: AgentSkill[];
 };

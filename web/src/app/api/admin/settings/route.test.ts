@@ -65,6 +65,29 @@ describe("admin settings model routing", () => {
         expect(mocks.safeRecordAuditLog).toHaveBeenCalledWith(expect.objectContaining({ metadata: { fields: ["ecommerceModelRoles"] } }));
     });
 
+    it("persists the administrator ecommerce orchestration switch", async () => {
+        const response = await PATCH(request({ ecommerceGenerationEnabled: true }));
+
+        expect(response.status).toBe(200);
+        expect(mocks.setAuthSettings).toHaveBeenCalledWith({ ecommerceGenerationEnabled: true });
+        expect(mocks.safeRecordAuditLog).toHaveBeenCalledWith(expect.objectContaining({ metadata: { fields: ["ecommerceGenerationEnabled"] } }));
+    });
+
+    it("keeps the ecommerce orchestration switch visible to an immediate fresh read", async () => {
+        let persisted = { ...savedSettings, ecommerceGenerationEnabled: false };
+        mocks.getFreshAuthSettings.mockImplementation(async () => persisted);
+        mocks.setAuthSettings.mockImplementation(async (patch) => {
+            persisted = { ...persisted, ...patch };
+            return persisted;
+        });
+
+        expect((await (await PATCH(request({ ecommerceGenerationEnabled: true }))).json()).settings.ecommerceGenerationEnabled).toBe(true);
+        expect((await (await GET()).json()).settings.ecommerceGenerationEnabled).toBe(true);
+
+        expect((await (await PATCH(request({ ecommerceGenerationEnabled: false }))).json()).settings.ecommerceGenerationEnabled).toBe(false);
+        expect((await (await GET()).json()).settings.ecommerceGenerationEnabled).toBe(false);
+    });
+
     it("rejects an ecommerce role assignment with the wrong logical capability", async () => {
         const response = await PATCH(
             request({

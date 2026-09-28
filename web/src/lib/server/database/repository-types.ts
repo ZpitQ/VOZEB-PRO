@@ -133,6 +133,7 @@ export type AppSettingsRecord = {
     paymentConfig: JsonValue;
     logicalModels: JsonValue;
     defaultModels: JsonValue;
+    ecommerceGenerationEnabled: boolean;
     ecommerceModelRoles: JsonValue;
     agentSkills: JsonValue;
     createdAt: string;
