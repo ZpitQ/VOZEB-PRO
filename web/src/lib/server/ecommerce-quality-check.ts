@@ -289,4 +289,3 @@ export const ecommerceQualityCheckTool = {
         additionalProperties: false,
     },
 };
-

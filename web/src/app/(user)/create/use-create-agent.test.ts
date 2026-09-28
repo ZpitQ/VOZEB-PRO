@@ -118,4 +118,3 @@ describe("useCreateAgent submission retry", () => {
         expect(statusSource).toContain("getCreativeAgentRun(run.id)");
     });
 });
-

@@ -419,4 +419,3 @@ export const ecommerceVisualAnalysisTool = {
         additionalProperties: false,
     },
 };
-

@@ -20,4 +20,3 @@ describe("ecommerce vision image payloads", () => {
         });
     });
 });
-

@@ -265,4 +265,3 @@ export async function openCreativeHistory(page: Page) {
     await expect.poll(async () => (await visible(desktopPanel)) || (await visible(dialog))).toBe(true);
     return (await visible(desktopPanel)) ? desktopPanel : dialog;
 }
-

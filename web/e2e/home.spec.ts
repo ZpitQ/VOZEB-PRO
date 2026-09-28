@@ -473,4 +473,3 @@ async function centerOffset(left: Locator, right: Locator) {
     if (!leftBox || !rightBox) return Number.POSITIVE_INFINITY;
     return Math.abs(leftBox.x + leftBox.width / 2 - (rightBox.x + rightBox.width / 2));
 }
-

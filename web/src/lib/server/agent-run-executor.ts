@@ -557,4 +557,3 @@ function ecommerceSnapshotInput(input: ReturnType<typeof buildEcommercePlanningI
         surface: input.surface,
     };
 }
-

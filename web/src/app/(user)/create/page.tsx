@@ -710,4 +710,3 @@ function skillVisual(skill: AgentSkillSummary, index: number) {
     if (skill.id === "drama-planning") return SKILL_VISUALS[3];
     return { ...SKILL_VISUALS[index % SKILL_VISUALS.length], icon: Sparkles };
 }
-

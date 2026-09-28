@@ -939,4 +939,3 @@ async function expectNoHorizontalOverflow(page: Page) {
     expect(widths.document[1], JSON.stringify(widths)).toBeLessThanOrEqual(widths.document[0] + 1);
     expect(widths.body[1], JSON.stringify(widths)).toBeLessThanOrEqual(widths.body[0] + 1);
 }
-

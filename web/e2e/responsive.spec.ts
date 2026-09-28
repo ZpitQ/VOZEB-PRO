@@ -839,4 +839,3 @@ test.skip("Agent text assets with emoji remain visible after hydration and refre
     await expect(page.getByRole("region", { name: "文本产物：夏日新品推文" })).toContainText("今天也要保持好心情 😊❤️🚀");
     await expectNoHorizontalOverflow(page, "Agent emoji article dark");
 });
-

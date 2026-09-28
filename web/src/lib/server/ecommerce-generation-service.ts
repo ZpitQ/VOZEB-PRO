@@ -503,4 +503,3 @@ function normalizedRectangle(region: { x: number; y: number; width: number; heig
 function containsPixel(rectangle: ProductProtectionRectangle, x: number, y: number) {
     return x >= rectangle.x && x < rectangle.x + rectangle.width && y >= rectangle.y && y < rectangle.y + rectangle.height;
 }
-

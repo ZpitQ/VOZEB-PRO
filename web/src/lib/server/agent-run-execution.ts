@@ -1059,4 +1059,3 @@ function runtimeRequestHeaders(cookie: string, initial?: HeadersInit) {
     else if (cookie) headers.set("cookie", cookie);
     return headers;
 }
-

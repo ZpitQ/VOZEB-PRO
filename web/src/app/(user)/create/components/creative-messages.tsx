@@ -843,4 +843,3 @@ function agentAssetDownload(asset: CreativeAsset): AgentMediaDownload {
         mimeType: asset.mimeType,
     };
 }
-

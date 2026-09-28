@@ -925,4 +925,3 @@ if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
     });
     fixture.server.listen(port, host, () => console.log(`Protocol fixture ready at http://${host}:${port}`));
 }
-

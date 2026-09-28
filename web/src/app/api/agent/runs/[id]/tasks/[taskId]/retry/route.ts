@@ -97,4 +97,3 @@ function normalizeTaskIds(value: unknown, fallbackTaskId: string) {
     const taskIds = Array.from(new Set(value.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean)));
     return taskIds.length ? taskIds : null;
 }
-

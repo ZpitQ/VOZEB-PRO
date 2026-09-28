@@ -190,4 +190,3 @@ function BrandIcon({ path }: { path: string }) {
         </svg>
     );
 }
-

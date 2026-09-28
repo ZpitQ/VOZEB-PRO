@@ -155,4 +155,3 @@ describe("create Agent home layout", () => {
         expect(previewModal).toContain('asset.mediaType === "image" || asset.mediaType === "video"');
     });
 });
-

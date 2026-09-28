@@ -752,4 +752,3 @@ async function postSignedWebhook(request: APIRequestContext, rawBody: string) {
     const signature = createHmac("sha256", E2E_PAYMENT_WEBHOOK_SECRET).update(rawBody).digest("hex");
     return request.post("/api/billing/webhooks/payply", { data: rawBody, headers: { "content-type": "application/json", "x-vozeb-pro-signature": signature } });
 }
-

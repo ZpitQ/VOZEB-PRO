@@ -341,4 +341,3 @@ function plan(withScene = false): EcommerceEditPlan {
         validation: { requiredChecks: ["product_identity"] },
     };
 }
-

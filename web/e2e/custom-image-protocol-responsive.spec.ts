@@ -180,4 +180,3 @@ test("custom Gemini image creation sends the 4K suffix and restores the full-siz
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath("custom-gemini-4k.png"), fullPage: true });
 });
-
