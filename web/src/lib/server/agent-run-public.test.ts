@@ -128,7 +128,7 @@ describe("publicAgentRun", () => {
         expect(publicAgentRunEvent({ id: "event-one", runId: "run-one", type: "run.planning.context_ready", data: { promptJson: "secret" }, createdAt: 1 })).toMatchObject({ type: "run.planning.context_ready", data: undefined });
     });
 
-    it("exposes only a short ecommerce quality status and hides blocked assets", () => {
+    it("exposes safe ecommerce review items and hides blocked assets and internal reasons", () => {
         const run = {
             id: "run-quality",
             userId: "user-secret",
@@ -181,7 +181,11 @@ describe("publicAgentRun", () => {
             createdAt: 2,
         });
 
-        expect(publicRun).toMatchObject({ ecommerceQualityStatus: "needs_review", assetIds: [] });
+        expect(publicRun).toMatchObject({
+            ecommerceQualityStatus: "needs_review",
+            ecommerceQualityReview: { kind: "hard_failure", failureKeys: ["product_silhouette"] },
+            assetIds: [],
+        });
         expect(event.data).toEqual({ status: "needs_review", text: "商品一致性检查未通过，需要复核。" });
         expect(JSON.stringify({ publicRun, event })).not.toContain("internal-secret");
         expect(JSON.stringify({ publicRun, event })).not.toContain("blocked-result");

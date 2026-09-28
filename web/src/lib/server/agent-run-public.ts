@@ -3,7 +3,15 @@ import { toSafeGenerationErrorMessage } from "./generation-errors";
 import type { AgentRun, AgentRunTask } from "./agent-run-store";
 
 export function publicAgentRun(run: AgentRun) {
-    const ecommerceQualityStatus = run.ecommerceSnapshot?.qualityCheck?.publicStatus;
+    const qualityCheck = run.ecommerceSnapshot?.qualityCheck;
+    const ecommerceQualityStatus = qualityCheck?.publicStatus;
+    const ecommerceQualityReview =
+        ecommerceQualityStatus === "needs_review"
+            ? {
+                  kind: qualityCheck?.status === "unavailable" ? ("check_unavailable" as const) : ("hard_failure" as const),
+                  failureKeys: Array.from(new Set((qualityCheck?.hardFailures || []).map((item) => item.key))),
+              }
+            : undefined;
     const blockedEcommerceResult = ecommerceQualityStatus === "needs_review";
     return {
         id: run.id,
@@ -20,6 +28,7 @@ export function publicAgentRun(run: AgentRun) {
         generationPreferences: run.generationPreferences,
         assetIds: blockedEcommerceResult ? [] : run.assetIds || [],
         ...(ecommerceQualityStatus ? { ecommerceQualityStatus } : {}),
+        ...(ecommerceQualityReview ? { ecommerceQualityReview } : {}),
         tasks: (run.tasks || []).map(publicAgentRunTask),
         cancellation: run.cancellation ? { pendingCount: run.cancellation.pendingChildTaskIds.length } : undefined,
         timings: run.timings,

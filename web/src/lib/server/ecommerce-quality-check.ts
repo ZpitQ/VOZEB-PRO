@@ -7,6 +7,7 @@ import { hasSystemAiCharge, readSystemAiBilling, systemAiBillingHeaders, systemA
 import { parseValidatedAgentFunctionCall } from "./agent-function-call";
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import type { EcommerceRoleCandidate, EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
+import { boundEcommerceVisionImage } from "./ecommerce-vision-image";
 import { rankTextPlanningCandidates, requestStructuredText } from "./text-planning-runtime";
 
 export const ECOMMERCE_QUALITY_CHECK_VERSION = "ecommerce-quality.v1" as const;
@@ -171,7 +172,7 @@ async function normalizeQualityImage(value: string, origin: string, cookie: stri
     if (dataMatch) {
         const bytes = Buffer.from(dataMatch[2], "base64");
         if (!bytes.length || bytes.length > CREATIVE_UPLOAD_MAX_BYTES) throw new Error("结果验收图片无效或过大");
-        return `data:${dataMatch[1].toLowerCase()};base64,${bytes.toString("base64")}`;
+        return boundEcommerceVisionImage(`data:${dataMatch[1].toLowerCase()};base64,${bytes.toString("base64")}`);
     }
     if (/^https:\/\//i.test(source)) return source;
     if (!source.startsWith("/api/")) throw new Error("结果验收图片地址无效");
@@ -185,7 +186,7 @@ async function normalizeQualityImage(value: string, origin: string, cookie: stri
     if (!mimeType.startsWith("image/") || contentLength > CREATIVE_UPLOAD_MAX_BYTES) throw new Error("结果验收图片无效或过大");
     const bytes = Buffer.from(await response.arrayBuffer());
     if (!bytes.length || bytes.length > CREATIVE_UPLOAD_MAX_BYTES) throw new Error("结果验收图片无效或过大");
-    return `data:${mimeType};base64,${bytes.toString("base64")}`;
+    return boundEcommerceVisionImage(`data:${mimeType};base64,${bytes.toString("base64")}`);
 }
 
 function qualityImageRequestHeaders(credential: string): Record<string, string> {

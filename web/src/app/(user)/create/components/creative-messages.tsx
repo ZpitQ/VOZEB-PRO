@@ -1,7 +1,7 @@
 "use client";
 
 import { App, Button, Dropdown, Popover, Tooltip } from "antd";
-import { Check, Clapperboard, Clock3, Copy, Download, ExternalLink, FileAudio2, Film, Info, Link2, MoreHorizontal, PanelsTopLeft, RotateCw } from "lucide-react";
+import { AlertTriangle, Check, Clapperboard, Clock3, Copy, Download, ExternalLink, FileAudio2, Film, Info, Link2, MoreHorizontal, PanelsTopLeft, PencilLine, RotateCw } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -41,6 +41,7 @@ export function CreativeMessages({
     materializingProjectId,
     onMaterializeProject,
     onRetryMessage,
+    onAdjustRequest,
     selectedAssetIds,
     onToggleAsset,
     hasOlder,
@@ -57,6 +58,7 @@ export function CreativeMessages({
     materializingProjectId?: string;
     onMaterializeProject: (handoff: CreativeProjectHandoff) => Promise<MaterializedCreativeProject>;
     onRetryMessage: (message: CreativeMessage, run?: CreativeAgentRun) => Promise<boolean | void>;
+    onAdjustRequest?: (message: CreativeMessage, run?: CreativeAgentRun) => void;
     selectedAssetIds: string[];
     onToggleAsset: (id: string) => void;
     hasOlder?: boolean;
@@ -138,6 +140,7 @@ export function CreativeMessages({
                             materializingProjectId={materializingProjectId}
                             onMaterializeProject={onMaterializeProject}
                             onRetryMessage={onRetryMessage}
+                            onAdjustRequest={onAdjustRequest}
                             selectedAssetIds={selectedAssetIds}
                             onToggleAsset={onToggleAsset}
                         />
@@ -211,6 +214,7 @@ function CreativeMediaRound({
     materializingProjectId,
     onMaterializeProject,
     onRetryMessage,
+    onAdjustRequest,
     selectedAssetIds,
     onToggleAsset,
 }: {
@@ -225,6 +229,7 @@ function CreativeMediaRound({
     materializingProjectId?: string;
     onMaterializeProject: (handoff: CreativeProjectHandoff) => Promise<MaterializedCreativeProject>;
     onRetryMessage: (message: CreativeMessage, run?: CreativeAgentRun) => Promise<boolean | void>;
+    onAdjustRequest?: (message: CreativeMessage, run?: CreativeAgentRun) => void;
     selectedAssetIds: string[];
     onToggleAsset: (id: string) => void;
 }) {
@@ -238,9 +243,10 @@ function CreativeMediaRound({
     const textOutputs = outputAssets.filter((asset) => asset.type === "text" && asset.status === "ready" && asset.textContent?.trim());
     const isFailedMediaRound = assistantMessage.status === "failed" && run?.status === "failed" && !mediaOutputs.length && !textOutputs.length;
     const showAssistantText = Boolean(displayContent.trim()) && !(assistantMessage.status === "completed" && (mediaOutputs.length || textOutputs.length));
+    const qualityReviewPending = run?.status === "paused" && run.ecommerceQualityStatus === "needs_review";
     const mode = creativeRunMode(run);
     const taskTitle = run?.tasks.find((task) => task.type === mode)?.title.trim();
-    const resultTitle = taskTitle?.startsWith("生成") ? `已为你${taskTitle}` : mode === "video" ? "已为你生成视频" : mode === "audio" ? "已为你生成音频" : "已为你生成图片";
+    const resultTitle = qualityReviewPending ? "商品图需要调整" : taskTitle?.startsWith("生成") ? `已为你${taskTitle}` : mode === "video" ? "已为你生成视频" : mode === "audio" ? "已为你生成音频" : "已为你生成图片";
     const renderRoundActions = (activeAsset: CreativeAsset) =>
         activeAsset.status === "ready" ? <CreativeRoundActions outputAssets={outputAssets} activeAsset={activeAsset} run={run} selectedAssetIds={selectedAssetIds} onToggleAsset={onToggleAsset} /> : null;
 
@@ -263,7 +269,7 @@ function CreativeMediaRound({
                 <div className="flex min-w-0 items-start gap-4 sm:gap-5">
                     <CreativeAssistantAvatar logoUrl={siteLogoUrl} />
                     <div className="min-w-0 flex-1">
-                        {!isFailedMediaRound && assistantMessage.status !== "running" ? (
+                        {!isFailedMediaRound && (assistantMessage.status !== "running" || qualityReviewPending) ? (
                             <>
                                 <div className="mb-2 flex w-fit max-w-full flex-wrap items-baseline gap-x-3 gap-y-0.5">
                                     <h2 className="truncate text-[17px] font-semibold leading-7 text-[#1f2937] dark:text-[#f3f5f7]">{resultTitle}</h2>
@@ -273,7 +279,9 @@ function CreativeMediaRound({
                             </>
                         ) : null}
                         <div data-testid="creative-result-group" className="mt-3 flex w-fit max-w-full flex-col items-start">
-                            {isFailedMediaRound ? (
+                            {qualityReviewPending ? (
+                                <CreativeQualityReview run={run!} message={displayContent} onRetry={() => onRetryMessage(assistantMessage, run)} onAdjust={onAdjustRequest ? () => onAdjustRequest(userMessage, run) : undefined} />
+                            ) : isFailedMediaRound ? (
                                 <CreativeGenerationFailure message={failedTasks.length === 1 ? failedTasks[0]?.error || displayContent : displayContent} onRetry={() => onRetryMessage(assistantMessage, run)} />
                             ) : assistantMessage.status === "running" ? (
                                 <CreativeGenerationWaiting run={run} message={assistantMessage} />
@@ -324,6 +332,52 @@ function CreativeMediaRound({
                 </div>
             </div>
         </section>
+    );
+}
+
+const ECOMMERCE_QUALITY_LABELS: Record<NonNullable<CreativeAgentRun["ecommerceQualityReview"]>["failureKeys"][number], string> = {
+    product_identity: "商品外观与原图不一致",
+    product_silhouette: "商品轮廓与原图不一致",
+    product_color_material: "商品颜色或材质与原图不一致",
+    product_proportions_view: "商品比例或视角与原图不一致",
+    brand_logo: "品牌 Logo 与原图不一致",
+    packaging_text: "包装文字与原图不一致",
+    scene_intent: "场景没有完整实现本轮要求",
+    composition_lighting: "构图或光线需要调整",
+};
+
+function CreativeQualityReview({ run, message, onRetry, onAdjust }: { run: CreativeAgentRun; message: string; onRetry: () => Promise<boolean | void>; onAdjust?: () => void }) {
+    const [retrying, setRetrying] = useState(false);
+    const review = run.ecommerceQualityReview;
+    const failures = Array.from(new Set((review?.failureKeys || []).map((key) => ECOMMERCE_QUALITY_LABELS[key])));
+    const reviewItems = review?.kind === "check_unavailable" ? ["验收服务暂时不可用，结果未发布"] : failures.length ? failures : ["商品关键细节未达到发布标准"];
+
+    return (
+        <div data-testid="creative-quality-review" className="w-full max-w-[620px] rounded-md border border-amber-200 bg-amber-50/70 p-4 text-left dark:border-amber-800/70 dark:bg-amber-950/20">
+            <div className="flex items-start gap-3">
+                <AlertTriangle className="mt-0.5 size-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+                <div className="min-w-0 flex-1">
+                    <h3 className="text-sm font-semibold leading-6 text-[#3b3321] dark:text-amber-100">商品一致性检查未通过</h3>
+                    {message ? <p className="mt-1 break-words text-sm leading-6 text-[#6f6248] dark:text-amber-200/80">{message}</p> : null}
+                    <ul className="mt-2 space-y-1 text-sm leading-5 text-[#5d5139] dark:text-amber-100/90" aria-label="未通过项">
+                        {reviewItems.map((item) => (
+                            <li key={item}>• {item}</li>
+                        ))}
+                    </ul>
+                    <p className="mt-2 text-xs leading-5 text-[#7c6f54] dark:text-amber-200/70">该结果没有发布。可重新生成，或调整要求后再试。</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                        <Button type="primary" icon={<RotateCw className="size-4" />} loading={retrying} onClick={() => void runRetry(onRetry, setRetrying)} aria-label="重新生成未通过的商品图">
+                            重新生成
+                        </Button>
+                        {onAdjust ? (
+                            <Button icon={<PencilLine className="size-4" />} onClick={onAdjust} aria-label="调整本轮创作要求">
+                                调整要求
+                            </Button>
+                        ) : null}
+                    </div>
+                </div>
+            </div>
+        </div>
     );
 }
 

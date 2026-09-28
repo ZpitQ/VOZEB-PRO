@@ -541,7 +541,7 @@ export function useCreateAgent() {
             setRunDetails((current) => ({ ...current, [runId]: result }));
             const assistantMessage = messages.find((item) => item.runId === runId && item.role === "assistant");
             if (assistantMessage) {
-                updateAssistant(assistantMessage.id, "正在重新生成失败任务…");
+                updateAssistant(assistantMessage.id, "正在重新生成图片…");
                 watchRun(result, assistantMessage.id, generation);
             }
         },
@@ -558,7 +558,7 @@ export function useCreateAgent() {
             setRunDetails((current) => ({ ...current, [runId]: result }));
             const assistantMessage = messages.find((item) => item.runId === runId && item.role === "assistant");
             if (assistantMessage) {
-                updateAssistant(assistantMessage.id, "正在重新生成失败任务…");
+                updateAssistant(assistantMessage.id, "正在重新生成图片…");
                 watchRun(result, assistantMessage.id, generation);
             }
         },

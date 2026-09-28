@@ -334,7 +334,7 @@ async function submitProductScene(page: Page, goldenCase: GoldenCase, options: {
 async function submitPrompt(page: Page, prompt: string, options: { reusePage?: boolean } = {}) {
     if (!options.reusePage) await page.goto("/create", { waitUntil: "domcontentloaded" });
     const textbox = page.getByRole("textbox", {
-        name: "输入你的创作想法、脚本或画面要求",
+        name: "描述你想生成或修改的图片",
     });
     await textbox.fill(prompt);
     const responsePromise = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/agent/runs");
@@ -349,16 +349,8 @@ async function submitPrompt(page: Page, prompt: string, options: { reusePage?: b
 }
 
 async function selectImageMode(page: Page) {
-    const agentMode = page.getByRole("button", {
-        name: "当前创作类型：Agent 模式",
-    });
-    if (await agentMode.isVisible()) {
-        await agentMode.click();
-        const picker = page.locator(".ant-popover").filter({ hasText: "创作类型" }).last();
-        await expect(picker).toBeVisible();
-        await picker.getByRole("button", { name: /图片生成/ }).click();
-    }
-    await expect(page.getByRole("button", { name: "当前创作类型：图片生成" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /当前创作类型：/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /生成模型：/ })).toBeVisible();
 }
 
 function uploadFixture(relativePath: string, name: string, expectedSha256: string) {

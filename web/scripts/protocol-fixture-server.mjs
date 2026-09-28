@@ -391,7 +391,7 @@ async function toolArguments(name, payload) {
                 ],
             };
         }
-        const imageAndVideo = /图片.*视频|视频.*图片/.test(plannerRequestText(payload));
+        const imageAndVideo = plannerGenerationMode(payload) !== "image" && /图片.*视频|视频.*图片/.test(plannerRequestText(payload));
         if (imageAndVideo) {
             return {
                 intent: "generation",

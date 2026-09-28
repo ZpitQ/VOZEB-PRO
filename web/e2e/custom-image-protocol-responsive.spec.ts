@@ -138,18 +138,12 @@ test("custom Gemini 4K requests preserve native pixels across image task sources
 test("custom Gemini image creation sends the 4K suffix and restores the full-size result after reload", async ({ page, request }, testInfo) => {
     await page.goto("/create", { waitUntil: "domcontentloaded" });
     await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
-    await page.getByRole("button", { name: "当前创作类型：Agent 模式" }).click();
-    await page
-        .locator(".ant-popover")
-        .filter({ hasText: "创作类型" })
-        .last()
-        .getByRole("button", { name: /图片生成/ })
-        .click();
+    await expect(page.getByRole("button", { name: /当前创作类型：/ })).toHaveCount(0);
     await page.getByRole("button", { name: /^生成参数：/ }).click();
     const preferences = page.locator("[data-creative-generation-preferences]");
     await preferences.getByRole("button", { name: "选择图片尺寸 4K 16:9", exact: true }).click();
     await page.getByRole("button", { name: /^生成参数：/ }).click();
-    await page.getByRole("textbox", { name: "输入你的创作想法、脚本或画面要求" }).fill("生成一张蓝色横版图片");
+    await page.getByRole("textbox", { name: "描述你想生成或修改的图片" }).fill("生成一张蓝色横版图片");
     const runCreated = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/agent/runs");
     await page.getByRole("button", { name: "发送", exact: true }).click();
     const response = await runCreated;

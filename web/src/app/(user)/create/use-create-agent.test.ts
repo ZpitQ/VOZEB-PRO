@@ -57,15 +57,26 @@ describe("useCreateAgent submission retry", () => {
     it("directly retries failed persisted tasks without rebuilding the composer or conversation", async () => {
         const source = await readFile(resolve(process.cwd(), "src/app/(user)/create/page.tsx"), "utf8");
         const retryStart = source.indexOf("const retryRound");
-        const retrySource = source.slice(retryStart, source.indexOf("const uploadAttachments", retryStart));
+        const retrySource = source.slice(retryStart, source.indexOf("const adjustQualityReview", retryStart));
 
         expect(retrySource).toContain("agent.retrySubmission(assistantMessage.id)");
         expect(retrySource).toContain("agent.retryTasks(");
-        expect(retrySource).toContain("failedTasks.map((task) => task.id)");
+        expect(retrySource).toContain('task.status === "failed" || task.status === "needs_review"');
+        expect(retrySource).toContain("retryableTasks.map((task) => task.id)");
         expect(retrySource).toContain("agent.retryRun(run.id)");
         expect(retrySource).not.toContain("updatePrompt");
         expect(retrySource).not.toContain("createCreativeAgentRun");
         expect(retrySource).not.toContain("createCreativeConversation");
+    });
+
+    it("restores the original request and references before a user adjusts a quality-blocked result", async () => {
+        const source = await readFile(resolve(process.cwd(), "src/app/(user)/create/page.tsx"), "utf8");
+        const adjustStart = source.indexOf("const adjustQualityReview");
+        const adjustSource = source.slice(adjustStart, source.indexOf("const uploadAttachments", adjustStart));
+
+        expect(adjustSource).toContain("updatePrompt(run?.prompt?.trim() || userMessage.content)");
+        expect(adjustSource).toContain('agent.restoreAttachments((run?.referencedAssetIds || []).filter((id) => agent.assets.some((asset) => asset.id === id && asset.type === "image")))');
+        expect(adjustSource).toContain("inputRef.current?.focus()");
     });
 
     it("keeps delayed run callbacks and controls scoped to the active conversation", async () => {

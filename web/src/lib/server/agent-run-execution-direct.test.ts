@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { directAgentPlan, directGenerationPreferences, normalizeTasks, planToOps, readFunctionCallResult, taskResultOps } from "./agent-run-execution";
+import { agentPlanToolForMode, directAgentPlan, directGenerationPreferences, normalizeTasks, planToOps, readFunctionCallResult, taskResultOps } from "./agent-run-execution";
 import { agentSurfaceImageSize, normalizeCanvasPlanForSelection, resolveAgentTaskRatio } from "./agent-run-task-input";
+
+describe("agentPlanToolForMode", () => {
+    it("将显式图片模式收紧到规划工具 schema", () => {
+        expect(agentPlanToolForMode("image").parameters.properties.deliverables.items.properties.type.enum).toEqual(["image"]);
+    });
+});
 
 describe("directAgentPlan", () => {
     it("使用用户指定的媒体模型创建单任务计划", () => {

@@ -31,10 +31,11 @@ export class EcommerceProductSegmentationError extends Error {
     }
 }
 
-export function isEcommerceImageRequest(run: { generationPreferences?: CreativeGenerationPreferences }, selectedModelCapabilities: string[] = []): boolean {
+export function isEcommerceImageRequest(run: { generationPreferences?: CreativeGenerationPreferences }, selectedModelCapabilities: string[] = [], hasReferenceImage = false): boolean {
     const explicitMode = run.generationPreferences?.mode;
     if (explicitMode) return explicitMode === "image";
-    return selectedModelCapabilities.length > 0 && selectedModelCapabilities.every((capability) => capability === "image");
+    if (selectedModelCapabilities.length) return selectedModelCapabilities.every((capability) => capability === "image");
+    return hasReferenceImage;
 }
 
 export function ecommerceGenerationEnabled(
@@ -42,9 +43,10 @@ export function ecommerceGenerationEnabled(
     run: { userId?: string; surface: CreativeSurface; referencedAssetIds: string[]; generationPreferences?: CreativeGenerationPreferences },
     hasContinuityResult = false,
     selectedModelCapabilities: string[] = [],
+    hasReferenceImage = false,
 ): boolean {
     const stage = ecommerceRolloutStage(value, run.userId || "");
-    return (stage === "internal" || stage === "canary") && run.surface === "chat" && isEcommerceImageRequest(run, selectedModelCapabilities) && (run.referencedAssetIds.length >= 1 || hasContinuityResult) && run.referencedAssetIds.length <= 2;
+    return (stage === "internal" || stage === "canary") && run.surface === "chat" && isEcommerceImageRequest(run, selectedModelCapabilities, hasReferenceImage) && ((run.referencedAssetIds.length >= 1 && hasReferenceImage) || hasContinuityResult);
 }
 
 export function ecommerceRolloutStage(value: unknown, userId: string): EcommerceRolloutStage {

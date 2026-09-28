@@ -500,6 +500,8 @@ describe("CreativeMessages", () => {
                             assistantMessageId: assistantMessage.id,
                             status: "paused",
                             assetIds: [],
+                            ecommerceQualityStatus: "needs_review",
+                            ecommerceQualityReview: { kind: "hard_failure", failureKeys: ["product_silhouette"] },
                             tasks: [
                                 {
                                     id: "image-task",
@@ -514,6 +516,7 @@ describe("CreativeMessages", () => {
                         throw new Error("not used");
                     }}
                     onRetryMessage={vi.fn()}
+                    onAdjustRequest={vi.fn()}
                     selectedAssetIds={[]}
                     onToggleAsset={vi.fn()}
                 />
@@ -524,6 +527,10 @@ describe("CreativeMessages", () => {
         expect(markup).toContain("商品一致性验收未通过，请复核后重试。");
         expect(markup).not.toContain("/internal-result.png");
         expect(markup).not.toContain('data-testid="creative-media-result"');
+        expect(markup).toContain("商品轮廓与原图不一致");
+        expect(markup).toContain('data-testid="creative-quality-review"');
+        expect(markup).toContain('aria-label="重新生成未通过的商品图"');
+        expect(markup).toContain('aria-label="调整本轮创作要求"');
     });
 
     it("uses a warm elapsed-time status while a media result is still running", () => {
