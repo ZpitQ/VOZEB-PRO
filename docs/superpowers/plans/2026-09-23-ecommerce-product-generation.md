@@ -490,9 +490,9 @@ Expected: PASS with role failover, snapshot stability and provider-specific requ
 
 Task 9 与后台配置专项通过 `187/187`；Task 1-9 受影响回归 26 个文件 `332/332`。TypeScript 和 Prettier 通过，范围 ESLint 为 `0 error / 179 warning`；告警来自既有拆分式仓储文件未使用导入及一个后台既有未使用参数，未在 Task 9 扩大范围处理。
 
-开发环境验收已完成：`vozeb_pro_dev` 的 `vozeb_pro_app_settings.ecommerce_model_roles` 已迁移为 `jsonb`；后台“模型渠道 -> 电商流程”显示 `已配置 4/4`，视觉分析、编辑规划和结果验收按 `gpt-5.6-sol -> gemini-3.8-flash-high` 排序，图片生成按 `gpt-image-2.5-flare -> gpt-image-2.5-sunburst -> nano banana 2` 排序，刷新后顺序保持不变。app 与 generation-worker 均保持 `ECOMMERCE_GENERATION_ROLLOUT=shadow`，健康和就绪检查通过。
+开发环境验收已完成：独立开发数据库的 `vozeb_pro_app_settings.ecommerce_model_roles` 已迁移为 `jsonb`；后台“模型渠道 -> 电商流程”显示 `已配置 4/4`，视觉分析、编辑规划和结果验收按 `gpt-5.6-sol -> gemini-3.8-flash-high` 排序，图片生成按 `gpt-image-2.5-flare -> gpt-image-2.5-sunburst -> nano banana 2` 排序，刷新后顺序保持不变。app 与 generation-worker 均保持 `ECOMMERCE_GENERATION_ROLLOUT=shadow`，健康和就绪检查通过。
 
-同一白底木床参考图分别提交一次真实图片任务，三次均成功且未重试：Flare `62826d06-4a99-45e0-bbcd-3d601f8eea9c`（1024x1024 PNG，1,182,887 bytes）、Sunburst `fec9f688-5927-4e4c-83dd-f67a51fca84a`（1024x1024 PNG，1,208,353 bytes）、Nano Banana 2 `8549a602-c15a-498d-b3f7-3dc2b6e0e088`（1024x1024 JPEG，437,802 bytes）。Flare 与 Sunburst 基本保留白底和原构图，只做轻微亮度变化；Nano Banana 2 增加地面、窗光和地毯，形成基础室内环境且主体整体保持较好。该结果只证明三个真实 provider profile 的路由和图生图能力可用，不代表 Task 10 的商品保真、场景完整度或端到端 `internal` 链路已经验收。
+同一白底木床参考图分别提交一次真实图片任务，三次均成功且未重试：Flare `case-task6-flare`（1024x1024 PNG，1,182,887 bytes）、Sunburst `case-task6-sunburst`（1024x1024 PNG，1,208,353 bytes）、Nano Banana 2 `case-task6-nano-banana-2`（1024x1024 JPEG，437,802 bytes）。Flare 与 Sunburst 基本保留白底和原构图，只做轻微亮度变化；Nano Banana 2 增加地面、窗光和地毯，形成基础室内环境且主体整体保持较好。该结果只证明三个真实 provider profile 的路由和图生图能力可用，不代表 Task 10 的商品保真、场景完整度或端到端 `internal` 链路已经验收。
 
 - [ ] **Step 5: Commit**
 
@@ -583,7 +583,7 @@ Trace 使用 `ecommerce-generation-trace.v1` 契约写入 `generation_logs.ecomm
 
 - [x] **Step 5: 完成真实任务和界面验收**
 
-2026-09-25 开发环境真实任务：Run `agent-XF7fG7af1wOqk5VHePxjr`、图片任务 `e3259bac-8838-4605-8954-347b286a87b3`，实际路由为 `gpt-5.6-sol -> gpt-5.6-sol -> gpt-image-2.5-sunburst -> gemini-3.8-flash-high`，最终门禁 `passed`。PostgreSQL、管理员 API 与 1440px/390px 后台详情均确认包含完整 Trace；普通用户 API 不返回内部流水。
+2026-09-25 开发环境真实任务：Run `case-task10a-trace-run`、图片任务 `case-task10a-trace-image`，实际路由为 `gpt-5.6-sol -> gpt-5.6-sol -> gpt-image-2.5-sunburst -> gemini-3.8-flash-high`，最终门禁 `passed`。PostgreSQL、管理员 API 与 1440px/390px 后台详情均确认包含完整 Trace；普通用户 API 不返回内部流水。
 
 - [x] **Step 6: 完成回归、开发部署和提交**
 
@@ -653,3 +653,9 @@ git commit -m "test: add ecommerce product generation golden regression"
 - 占位符检查：计划没有依赖未定义的组件名称、任务编号或待补充字段；所有新接口在任务中给出名称和职责。
 - 类型一致性：后续任务使用的 `EcommerceEditPlan`、`buildProductProtectionRegions`、`routeEcommerceRole`、`compileEcommerceImageRequest`、`checkEcommerceResult` 均在前置任务中定义。
 - 范围检查：首期只覆盖 `/create`，Canvas 和短剧明确排除，商品本体修改单独延后。
+
+## 已纳入 SOP 的后续优化
+
+新增 Task12–18 已分项实现并完成独立审查，范围和证据详见[局部编辑稳定性与家居质感补充计划](2026-10-01-ecommerce-edit-quality-hardening.md)与[分项验收记录](ecommerce-edit-quality-acceptance.md)。
+
+完整分支复审发现的多结果批次证据遗漏已在本轮修复；Task1–11 与 Task10A 的历史证据继续保留，开发部署、真实供应商回归与用户验收仍待完成。

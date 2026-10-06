@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { CreativeAsset } from "@/lib/creative-runtime-contract";
-import { classifyReferenceRoles, resolveContinuitySources, type EcommerceReferenceVisualHint } from "./ecommerce-reference-roles";
+import { classifyReferenceRoles, resolveContinuitySources, resolveSourcesFromEcommerceReferenceDecision, type EcommerceReferenceVisualHint } from "./ecommerce-reference-roles";
+import type { EcommerceReferenceDecision } from "./ecommerce-reference-purpose";
 
 describe("classifyReferenceRoles", () => {
     it("classifies a high-confidence isolated white-background subject as the product reference", () => {
@@ -123,6 +124,26 @@ describe("resolveContinuitySources", () => {
         });
     });
 
+    it("keeps an explicitly selected scene result as the baseline when a new scene style reference is provided", () => {
+        const scene = imageAsset("style-scene-upload");
+        const history = imageAsset("old-scene-result", {
+            sourceRunId: "old-run",
+            parentAssetId: "old-root",
+            metadata: { ecommerceContinuity: { productAnchorId: null, sceneRootAssetId: "old-root" } },
+        });
+        const decision = classifyReferenceRoles([scene], [visualHint(scene.id, { completeScene: true })]);
+
+        expect(resolveContinuitySources(run([history.id, scene.id]), { assets: [scene], decision }, [history])).toMatchObject({
+            status: "resolved",
+            productAnchorId: null,
+            sceneRootAssetId: "old-root",
+            currentSceneBaselineId: history.id,
+            sceneReferenceIds: [scene.id],
+            parentResultId: history.id,
+            createsBranch: true,
+        });
+    });
+
     it("asks one question when selected history has no stable product anchor", () => {
         const history = imageAsset("asset-result-legacy", { sourceRunId: "run-old" });
 
@@ -130,6 +151,53 @@ describe("resolveContinuitySources", () => {
 
         expect(sources).toMatchObject({ status: "needs_clarification", ambiguityReason: "missing_product_anchor" });
         expect(sources.clarificationQuestion).toBe("无法确认这张历史结果对应的原始商品图，请重新提供商品图。");
+    });
+});
+
+describe("resolveSourcesFromEcommerceReferenceDecision", () => {
+    it("keeps a product target and a style reference without reclassifying either image", () => {
+        const product = imageAsset("product");
+        const style = imageAsset("style");
+        const decision = referenceDecision({
+            editTargetId: product.id,
+            productAnchorId: product.id,
+            bindings: [
+                { assetId: style.id, alias: "图片1", purposes: ["style"], source: "explicit" },
+                { assetId: product.id, alias: "图片2", purposes: ["edit_target", "product_identity"], source: "explicit" },
+            ],
+        });
+
+        expect(resolveSourcesFromEcommerceReferenceDecision(decision, [style, product])).toMatchObject({
+            status: "resolved",
+            productAnchorId: product.id,
+            currentSceneBaselineId: null,
+            sceneReferenceIds: [style.id],
+            startsNewProductAnchor: true,
+            createsBranch: false,
+        });
+    });
+
+    it("preserves a selected scene result as the baseline and parent branch", () => {
+        const style = imageAsset("style");
+        const history = imageAsset("scene-result", { sourceRunId: "run-old", metadata: { ecommerceContinuity: { productAnchorId: null, sceneRootAssetId: "scene-root" } } });
+        const decision = referenceDecision({
+            editTargetId: history.id,
+            currentSceneBaselineId: history.id,
+            bindings: [
+                { assetId: style.id, alias: "图片1", purposes: ["style"], source: "explicit" },
+                { assetId: history.id, alias: "图片2", purposes: ["edit_target"], source: "explicit" },
+            ],
+        });
+
+        expect(resolveSourcesFromEcommerceReferenceDecision(decision, [style, history], [history])).toMatchObject({
+            status: "resolved",
+            productAnchorId: null,
+            sceneRootAssetId: "scene-root",
+            currentSceneBaselineId: history.id,
+            sceneReferenceIds: [style.id],
+            parentResultId: history.id,
+            createsBranch: true,
+        });
     });
 });
 
@@ -170,5 +238,19 @@ function emptySelection() {
     return {
         assets: [] as CreativeAsset[],
         decision: classifyReferenceRoles([], []),
+    };
+}
+
+function referenceDecision(overrides: Partial<EcommerceReferenceDecision>): EcommerceReferenceDecision {
+    return {
+        version: "ecommerce-reference-decision.v1",
+        state: "resolved",
+        bindings: [],
+        editTargetId: null,
+        productAnchorId: null,
+        currentSceneBaselineId: null,
+        appliedCues: [],
+        issues: [],
+        ...overrides,
     };
 }

@@ -1,8 +1,90 @@
 import { describe, expect, it } from "vitest";
 
-import { buildEcommerceGenerationTrace } from "./ecommerce-generation-trace";
+import { buildEcommerceGenerationTrace, normalizeEcommerceGenerationTrace } from "./ecommerce-generation-trace";
 
 describe("ecommerce generation observability trace", () => {
+    it("records a failed analysis as failed with actual candidates rather than not_run", () => {
+        const failure = {
+            analysisVersion: "ecommerce-visual-analysis.v4",
+            kind: "invalid_structure",
+            attempts: [
+                {
+                    modelRole: { logicalRole: "vision_analysis", logicalModelId: "vision", channelId: "fixture", upstreamModel: "fixture" },
+                    kind: "invalid_structure",
+                    status: 502,
+                    elapsedMs: 10,
+                    validation: { rawAnalysis: { invalid: true, apiKey: "SECRET" }, issues: [{ code: "visual_field_invalid", path: "references[0]", message: "invalid" }], normalizationAudit: [] },
+                },
+            ],
+        };
+        const trace = buildEcommerceGenerationTrace({ runId: "run", task: { id: "task" } as never, snapshot: { visualAnalysisFailure: failure } as never, imageTaskIds: [], generationStatus: "needs_review", finalStatus: "needs_review" });
+        expect(trace.stages[0]).toMatchObject({ status: "failed", model: { channelId: "fixture" }, output: { visualAnalysisFailure: { kind: "invalid_structure", attempts: [{ validation: { issues: [{ path: "references[0]" }] } }] } } });
+        expect(JSON.stringify(trace)).not.toContain("SECRET");
+        expect(normalizeEcommerceGenerationTrace(JSON.parse(JSON.stringify(trace)))?.stages[0]).toEqual(trace.stages[0]);
+    });
+    it("round-trips photography execution targets without adding them to a v4 trace", () => {
+        const photography = {
+            materials: [{ objectId: "cabinet", textureDirection: "纵向木纹", textureScale: "细木纹", roughness: "哑光", gloss: "低光泽" }],
+            lighting: { keyLight: "柔光", fillLight: "弱补光", whiteBalance: "中性", contactShadow: "局部接触阴影" },
+            composition: { focalSubject: "边柜", depth: "纵深", negativeSpace: "留白" },
+        };
+        const trace = buildEcommerceGenerationTrace({
+            runId: "run",
+            task: { id: "task", ecommerceExecution: { photography } } as never,
+            snapshot: { plan: { planVersion: "ecommerce-edit.v5", photography } } as never,
+            imageTaskIds: [],
+            generationStatus: "completed",
+            finalStatus: "completed",
+        });
+        expect(normalizeEcommerceGenerationTrace(JSON.parse(JSON.stringify(trace)))?.stages[2].output).toMatchObject({ photography });
+        expect(trace.stages[1].output).toMatchObject({ photography });
+        const old = buildEcommerceGenerationTrace({ runId: "run", task: { id: "task" } as never, snapshot: { plan: { planVersion: "ecommerce-edit.v4" } } as never, imageTaskIds: [], generationStatus: "completed", finalStatus: "completed" });
+        expect(JSON.stringify(old)).not.toContain("photography");
+    });
+    it("preserves the snapshot rollout mode without manufacturing old trace modes", () => {
+        const trace = buildEcommerceGenerationTrace({ runId: "run", task: { id: "task" } as never, snapshot: { mode: "shadow" } as never, imageTaskIds: [], generationStatus: "completed", finalStatus: "completed" });
+        expect(normalizeEcommerceGenerationTrace(trace)?.mode).toBe("shadow");
+        const { mode: _mode, ...old } = trace;
+        expect(_mode).toBe("shadow");
+        expect(normalizeEcommerceGenerationTrace(old)).not.toHaveProperty("mode");
+    });
+    it("round-trips independent QA and partial canvas evidence without inventing missing facts", () => {
+        const quality = {
+            status: "blocked",
+            publicStatus: "needs_review",
+            checks: [],
+            hardFailures: [],
+            observations: { baseline: { readable: true, visibleStructure: [] } },
+            contradictions: [{ source: "plan", observedCount: 3, reportedCount: 2 }],
+            sceneProtectionEvidence: [{ resultId: "result", evidence: { outsideMaskMatches: false } }],
+            visionEvidence: { imageCount: 2, transmissions: [], images: [] },
+            canvasEvidence: [{ resultId: "result", nativeStatus: "readable", nativeSize: { width: 1254, height: 1254 }, nativeMatches: false, storedStatus: "unavailable", storedMatches: null }],
+        };
+        const trace = buildEcommerceGenerationTrace({
+            runId: "run",
+            task: {
+                id: "task",
+                sceneProtection: { sourceAssetId: "scene", sourceSize: { width: 6, height: 4 }, targetRegion: { x: 2, y: 1, width: 2, height: 2 }, selectionSource: "user_selection", mask: { reference: { dataUrl: "data:SECRET" } } },
+            } as never,
+            snapshot: { qualityCheck: quality } as never,
+            imageTaskIds: ["child"],
+            generationStatus: "completed",
+            finalStatus: "needs_review",
+        });
+        const restored = normalizeEcommerceGenerationTrace(JSON.parse(JSON.stringify(trace)))!;
+        expect(restored.stages[3].output).toMatchObject(quality);
+        expect(restored.stages[2].output).toMatchObject({ sceneProtection: { sourceAssetId: "scene", targetRegion: { x: 2, y: 1, width: 2, height: 2 } } });
+        expect(JSON.stringify(restored)).not.toContain("SECRET");
+        const old = buildEcommerceGenerationTrace({
+            runId: "run",
+            task: { id: "task" } as never,
+            snapshot: { qualityCheck: { ...quality, canvasEvidence: [{ resultId: "old", nativeMatches: true, storedMatches: true }] } } as never,
+            imageTaskIds: [],
+            generationStatus: "completed",
+            finalStatus: "needs_review",
+        });
+        expect(JSON.stringify(old.stages[3].output)).not.toContain("nativeStatus");
+    });
     it("records validated outputs and actual model routes without raw media or credentials", () => {
         const trace = buildEcommerceGenerationTrace({
             runId: "agent-run-one",

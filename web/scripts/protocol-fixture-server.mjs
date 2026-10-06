@@ -80,6 +80,10 @@ async function handleFixtureRequest({ request, response, url, body, tasks, reque
         tasks.clear();
         return sendJson(response, 200, { ok: true });
     }
+    if (request.method === "POST" && path === "/__ecommerce-analysis-failure") {
+        options.failEcommerceAnalysis = jsonBody(body).enabled === true;
+        return sendJson(response, 200, { ok: true });
+    }
     if (request.method === "GET" && path === "/vendor-space/knowledge/article-947") {
         return sendBytes(
             response,
@@ -110,6 +114,7 @@ async function handleFixtureRequest({ request, response, url, body, tasks, reque
         const model = requestedModel(body, request.headers["content-type"] || "");
         if (shouldFailRequest(request, model)) return sendJson(response, model.includes("-fail") ? 400 : 503, { error: { message: "fixture text failure" } });
         const toolName = selectedToolName(payload);
+        if (toolName === "analyze_ecommerce_references" && options.failEcommerceAnalysis) return sendJson(response, 503, { error: { message: "fixture analysis service unavailable" } });
         const argumentsText = toolName ? JSON.stringify(await toolArguments(toolName, payload)) : "协议测试文本返回成功";
         if (payload.stream === true) return sendStructuredTextStream(response, path, toolName, argumentsText);
         if (path === "/responses") {
@@ -177,9 +182,20 @@ async function handleFixtureRequest({ request, response, url, body, tasks, reque
         }
         const model = requestedModel(body, request.headers["content-type"] || "");
         if (options.failImage || shouldFailRequest(request, model)) return sendJson(response, options.failImage || model.includes("-fail") ? 400 : 503, { error: { message: "fixture image failure" } });
-        const image = requestsTransparentBackground(body, request.headers["content-type"] || "") ? Buffer.from(TRANSPARENT_PNG_BASE64, "base64") : await fixtureImage(options);
+        const image = await openAiFixtureImage(body, request.headers["content-type"] || "", options);
+        if (options.ecommerceAsyncImage) {
+            const id = nextTaskId("ecommerce-image");
+            tasks.set(id, { kind: "ecommerce-image", status: "completed", image });
+            return sendJson(response, 200, { task_id: id, status: "queued", poll_url: `${url.origin}/v1/images/tasks/${id}` });
+        }
         const images = requestsLayeredOutput(body) ? await layeredFixtureImages(body, request.headers["content-type"] || "", options) : [image];
         return sendJson(response, 200, { created: Math.floor(Date.now() / 1000), data: images.map((item) => ({ b64_json: item.toString("base64"), revised_prompt: "protocol fixture" })) });
+    }
+    const ecommerceImageTaskId = path.match(/^\/images\/tasks\/(.+)$/)?.[1];
+    if (request.method === "GET" && ecommerceImageTaskId) {
+        const task = tasks.get(ecommerceImageTaskId);
+        if (!task || task.kind !== "ecommerce-image") return sendJson(response, 404, { error: { message: "ecommerce fixture task missing" } });
+        return sendJson(response, 200, { task_id: ecommerceImageTaskId, status: task.status, data: [{ b64_json: task.image.toString("base64") }] });
     }
     if (request.method === "POST" && ["/sdapi/v1/txt2img", "/sdapi/v1/img2img"].includes(path)) {
         return sendJson(response, 200, { images: [(await fixtureImage(options)).toString("base64")], info: "{}" });
@@ -525,14 +541,68 @@ async function ecommerceVisualAnalysisArguments(payload) {
     const userRequest = String(input.userRequest || "");
     const ambiguous = /无法判断角色/.test(userRequest) || assets.some((asset) => /ambiguous/i.test(String(asset?.title || "")));
     const localEdit = /再亮一点|较早结果|背景改成|局部|去掉|移除/.test(userRequest);
+    const version = ecommerceToolProperties(payload).analysisVersion?.enum?.[0] || "ecommerce-visual-analysis.v1";
+    const sceneOnly = /只加柜面花瓶|无商品锚点|场景只加花瓶/.test(userRequest);
     return {
-        analysisVersion: "ecommerce-visual-analysis.v1",
+        analysisVersion: version,
+        ...(version === "ecommerce-visual-analysis.v4" ? { purposeSuggestions: [] } : {}),
         references: assets.map((asset, index) => {
             const assetId = String(asset?.id || "");
-            if (ambiguous) return unknownEcommerceReference(assetId);
-            const role = assets.length === 1 || (!localEdit && index === 0) || (localEdit && index === 1) ? "product" : "scene";
-            return role === "product" ? productEcommerceReference(assetId, imageEvidence[index]) : sceneEcommerceReference(assetId, localEdit);
+            if (ambiguous) {
+                const unknown = { ...unknownEcommerceReference(assetId), ...(version !== "ecommerce-visual-analysis.v1" ? { visibleStructure: [] } : {}) };
+                if (version === "ecommerce-visual-analysis.v4") {
+                    delete unknown.role;
+                    return { ...unknown, contentType: "unknown", cues: [] };
+                }
+                return unknown;
+            }
+            const role = !sceneOnly && (assets.length === 1 || (!localEdit && index === 0) || (localEdit && index === 1)) ? "product" : "scene";
+            const reference = role === "product" ? productEcommerceReference(assetId, imageEvidence[index]) : sceneEcommerceReference(assetId, localEdit);
+            if (version !== "ecommerce-visual-analysis.v1") reference.visibleStructure = fixtureVisibleStructure(userRequest, asset.width, asset.height);
+            if (version === "ecommerce-visual-analysis.v3") reference.photographyFacts = fixturePhotography();
+            if (version === "ecommerce-visual-analysis.v4") {
+                delete reference.role;
+                return {
+                    ...reference,
+                    contentType: role === "product" ? "isolated_product" : "interior_scene",
+                    cues: [
+                        { id: `${assetId}-style`, facet: "style", description: "simple contemporary appearance", confidence: "high" },
+                        { id: `${assetId}-lighting`, facet: "lighting", description: "soft natural window light", confidence: "high" },
+                        { id: `${assetId}-composition`, facet: "composition", description: "eye-level composition", confidence: "high" },
+                    ],
+                };
+            }
+            return reference;
         }),
+    };
+}
+
+function ecommerceToolProperties(payload) {
+    const tool = (payload.tools || []).flatMap((item) => item.functionDeclarations || [item]).find((item) => item.name === selectedToolName(payload) || item.function?.name === selectedToolName(payload));
+    const schema = tool?.parameters || tool?.input_schema || tool?.function?.parameters;
+    if (schema) return schema.properties || {};
+    const messages = [...(Array.isArray(payload.input) ? payload.input : []), ...(Array.isArray(payload.messages) ? payload.messages : []), ...(payload.systemInstruction ? [{ role: "system", content: payload.systemInstruction.parts }] : [])];
+    const system = messages.find((item) => item.role === "system")?.content;
+    const text = typeof system === "string" ? system : Array.isArray(system) ? system.map((part) => part.text || "").join("\n") : "";
+    const schemaText = text.split("JSON 必须符合以下 Schema：")[1]?.split("\n\n")[0];
+    try {
+        return schemaText ? JSON.parse(schemaText).properties || {} : {};
+    } catch {
+        return {};
+    }
+}
+
+function fixtureVisibleStructure(request, width = 1, height = 1, count = 3) {
+    // These deterministic observations simulate the QA contract, not model vision.
+    const cabinet = /三层抽屉柜/.test(request);
+    return [{ objectId: cabinet ? "cabinet" : "fixture-subject", feature: cabinet ? "drawers" : "legs", count: cabinet ? count : 2, certainty: "confirmed", evidenceRegion: { x: 0, y: 0, width, height } }];
+}
+
+function fixturePhotography() {
+    return {
+        materials: [{ objectId: "cabinet", textureDirection: "vertical visible grain", textureScale: "fine grain", roughness: "matte", gloss: "low gloss" }],
+        lighting: { keyLight: "existing broad window light", fillLight: "existing ambient fill", whiteBalance: "neutral", contactShadow: "soft contact shadow" },
+        composition: { focalSubject: "furniture", depth: "existing room depth", negativeSpace: "existing clear area" },
     };
 }
 
@@ -572,6 +642,7 @@ function ecommerceImageDataUrls(payload) {
     };
     visit(payload.input);
     visit(payload.messages);
+    visit(payload.contents);
     return urls;
 }
 
@@ -649,36 +720,69 @@ function ecommerceEditPlanArguments(payload) {
     const sources = input.sources || {};
     const analysis = input.visualAnalysis || {};
     const references = Array.isArray(analysis.references) ? analysis.references : [];
-    const product = references.find((reference) => reference?.role === "product") || {};
-    const scene = references.find((reference) => reference?.role === "scene") || {};
+    const referenceDecision = input.referenceDecision;
+    const product = references.find((reference) => (referenceDecision ? reference.assetId === referenceDecision.productAnchorId : reference?.role === "product")) || {};
+    const scene = references.find((reference) => (referenceDecision ? reference.assetId === referenceDecision.currentSceneBaselineId : reference?.role === "scene")) || {};
     const roles = input.requiredModelRoles || {};
     const userRequest = String(input.userRequest || "");
     const localEdit = Boolean(sources.currentSceneBaselineId);
+    const version = ecommerceToolProperties(payload).planVersion?.enum?.[0] || "ecommerce-edit.v1";
+    const sceneOnly = !sources.productAnchorId;
+    const localScope = /只加柜面花瓶|场景只加花瓶/.test(userRequest);
     const targetId = /亮|光/.test(userRequest) ? "lighting-main" : /植物|绿植/.test(userRequest) ? "plant-right" : "background-main";
     return {
-        planVersion: "ecommerce-edit.v1",
-        operation: localEdit ? "local_edit" : "product_to_scene",
+        planVersion: version,
+        ...(version === "ecommerce-edit.v6"
+            ? {
+                  referenceUses: references.map((reference) => {
+                      const binding = referenceDecision?.bindings.find((item) => item.assetId === reference.assetId);
+                      return {
+                          assetId: reference.assetId,
+                          alias: binding?.alias || null,
+                          purposes: [...new Set([...(binding?.purposes || []), ...(reference.assetId === referenceDecision?.editTargetId ? ["edit_target"] : []), ...(reference.assetId === referenceDecision?.productAnchorId ? ["product_identity"] : [])])],
+                          usedCueIds: [...new Set((referenceDecision?.appliedCues || []).filter((cue) => cue.assetId === reference.assetId).flatMap((cue) => cue.cueIds))],
+                      };
+                  }),
+              }
+            : {}),
+        operation: sceneOnly ? "scene_edit" : localEdit ? "local_edit" : "product_to_scene",
+        ...(version === "ecommerce-edit.v5" ? { photography: fixturePhotography() } : {}),
+        ...(["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(version) ? { visibleStructure: (sceneOnly ? scene : product).visibleStructure || [] } : {}),
+        ...(["ecommerce-edit.v3", "ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(version) && localEdit
+            ? {
+                  protection: {
+                      scope: localScope ? "local" : "global",
+                      protectedObjectIds: (sceneOnly ? scene : product).visibleStructure?.map((fact) => fact.objectId) || [],
+                      preserveOutsideMask: localScope,
+                      allowLightingChange: !localScope && /亮|光/.test(userRequest),
+                  },
+              }
+            : {}),
         source: {
-            productAnchorId: String(sources.productAnchorId || ""),
+            productAnchorId: sources.productAnchorId || null,
             currentSceneBaselineId: sources.currentSceneBaselineId || null,
             sceneReferenceIds: Array.isArray(sources.sceneReferenceIds) ? sources.sceneReferenceIds : [],
         },
         baseline: {
-            productFacts: product.productFacts || { identity: "ecommerce fixture product", outline: "complete product silhouette", color: "original neutral color", material: "original visible material", brandText: [], view: "front three-quarter view" },
-            sceneFacts: scene.sceneFacts || { space: "modern European or American home interior", composition: "eye-level product-centered composition", lighting: "soft natural daylight" },
+            productFacts: sceneOnly
+                ? null
+                : version === "ecommerce-edit.v6"
+                  ? product.productFacts || null
+                  : product.productFacts || { identity: "ecommerce fixture product", outline: "complete product silhouette", color: "original neutral color", material: "original visible material", brandText: [], view: "front three-quarter view" },
+            sceneFacts: version === "ecommerce-edit.v6" ? scene.sceneFacts || null : scene.sceneFacts || { space: "modern European or American home interior", composition: "eye-level product-centered composition", lighting: "soft natural daylight" },
         },
         delta: {
             requestedChanges: [userRequest || "place product in a modern home scene"],
             targetObjects: localEdit ? [targetId] : ["scene"],
             targetRegions: localEdit ? [] : ["background", "environment"],
         },
-        preserve: { productCore: ["outline", "brand_text", "color", "material", "scale", "view"], sceneElements: [] },
-        strategy: "strict_product",
+        preserve: { productCore: sceneOnly ? [] : ["outline", "brand_text", "color", "material", "scale", "view"], sceneElements: sceneOnly ? ["cabinet", "room", "camera"] : [] },
+        strategy: sceneOnly ? "integrated_scene" : "strict_product",
         modelRoles: {
             visionAnalysis: String(roles.visionAnalysis || ""),
             editPlanning: String(roles.editPlanning || ""),
             generation: String(roles.generation || ""),
-            qualityCheck: String(roles.qualityCheck || ""),
+            qualityCheck: roles.qualityCheck === null ? null : String(roles.qualityCheck || ""),
         },
         continuity: { parentResultId: sources.parentResultId || null, branchId: String(input.continuity?.branchId || "ecommerce-fixture-branch") },
         validation: { requiredChecks: ["product_identity", "product_silhouette", "product_color_material", "product_proportions_view", "scene_intent", "composition_lighting"] },
@@ -687,14 +791,21 @@ function ecommerceEditPlanArguments(payload) {
 
 function ecommerceQualityArguments(payload) {
     const input = structuredUserPayloads(payload).find((value) => Array.isArray(value?.resultIds)) || {};
-    const strictFailure = JSON.stringify(input.plan || {}).includes("故意改变商品轮廓");
+    const request = JSON.stringify(input.plan?.delta || {});
+    const strictFailure = request.includes("[qa-silhouette-failure]");
+    if (/验收解析失败/.test(request)) return { results: [] };
+    const independent = Boolean(ecommerceToolProperties(payload).baselineObservation);
     const keys = ["product_identity", "product_silhouette", "product_color_material", "product_proportions_view", "brand_logo", "packaging_text", "scene_intent", "composition_lighting"];
+    if (independent) keys.push("protected_structure", "protected_material", "unmodified_region");
+    const observation = (result = false) => ({ readable: true, logo: "absent", packagingText: "absent", visibleStructure: fixtureVisibleStructure(request, 1, 1, result && /故意变成四层/.test(request) ? 4 : 3) });
     return {
+        ...(independent ? { baselineObservation: observation(), productAnchorObservation: observation() } : {}),
         results: (Array.isArray(input.resultIds) ? input.resultIds : []).map((resultId) => ({
             resultId,
+            ...(independent ? { observation: observation(true) } : {}),
             checks: keys.map((key) => ({
                 key,
-                status: strictFailure && key === "product_silhouette" ? "failed" : ["brand_logo", "packaging_text"].includes(key) ? "not_applicable" : "passed",
+                status: (strictFailure && key === "product_silhouette") || (/光线不达标/.test(request) && key === "composition_lighting") ? "failed" : ["brand_logo", "packaging_text"].includes(key) ? "not_applicable" : "passed",
                 reason: strictFailure && key === "product_silhouette" ? "fixture detected a changed product silhouette" : ["brand_logo", "packaging_text"].includes(key) ? "reference has no visible brand or packaging text" : "fixture comparison passed",
             })),
         })),
@@ -702,7 +813,11 @@ function ecommerceQualityArguments(payload) {
 }
 
 function structuredUserPayloads(payload) {
-    const messages = [...(Array.isArray(payload.input) ? payload.input : []), ...(Array.isArray(payload.messages) ? payload.messages : [])];
+    const messages = [
+        ...(Array.isArray(payload.input) ? payload.input : []),
+        ...(Array.isArray(payload.messages) ? payload.messages : []),
+        ...(Array.isArray(payload.contents) ? payload.contents.map((item) => ({ role: item.role, content: item.parts })) : []),
+    ];
     const userMessage = messages.findLast((message) => message?.role === "user");
     const content = userMessage?.content ?? (typeof payload.input === "string" ? payload.input : "");
     const texts = typeof content === "string" ? [content] : Array.isArray(content) ? content.map((part) => (typeof part === "string" ? part : typeof part?.text === "string" ? part.text : "")) : [];
@@ -802,6 +917,21 @@ function createWave() {
 
 function fixtureImage(options) {
     return options.imagePath ? readFile(options.imagePath) : Promise.resolve(Buffer.from(PNG_BASE64, "base64"));
+}
+
+async function openAiFixtureImage(body, contentType, options) {
+    const size = String(contentType).toLowerCase().startsWith("multipart/form-data") ? (await new Response(body, { headers: { "content-type": contentType } }).formData()).get("size") : jsonBody(body).size;
+    const match = typeof size === "string" ? size.match(/^(\d+)x(\d+)$/i) : null;
+    const width = Number(match?.[1]);
+    const height = Number(match?.[2]);
+    const transparent = requestsTransparentBackground(body, contentType);
+    if (!options.imagePath && Number.isSafeInteger(width) && Number.isSafeInteger(height) && width > 0 && height > 0) {
+        if (transparent) return sharp(Buffer.from(TRANSPARENT_PNG_BASE64, "base64")).resize(width, height, { fit: "fill" }).png().toBuffer();
+        return sharp({ create: { width, height, channels: 4, background: "#2e7dff" } })
+            .png()
+            .toBuffer();
+    }
+    return transparent ? Buffer.from(TRANSPARENT_PNG_BASE64, "base64") : fixtureImage(options);
 }
 
 async function layeredFixtureImages(body, contentType, options) {

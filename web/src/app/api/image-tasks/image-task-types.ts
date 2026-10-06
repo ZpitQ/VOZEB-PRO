@@ -20,7 +20,7 @@ import { linkStoredGenerationTask, type GenerationTaskContext } from "@/lib/serv
 import { registerGenerationTaskAssetsForUser } from "@/lib/server/creative-runtime-service";
 import { createSignedReferenceAssetUrl, signReferenceAssetInputUrl } from "@/lib/server/reference-asset-access";
 import { assertCapabilityConstraints } from "@/lib/server/capability-constraints";
-import type { ProductProtectionRegions } from "@/lib/server/ecommerce-product-regions";
+import type { ProductProtectionRegions, SceneEditProtection } from "@/lib/server/ecommerce-product-regions";
 import type { EcommerceCompiledImageRequest } from "@/lib/server/ecommerce-image-compiler";
 
 export type CreateImageTaskBody = {
@@ -30,6 +30,7 @@ export type CreateImageTaskBody = {
     references?: ImageTaskReference[];
     mask?: ImageTaskReference;
     productProtectionRegions?: ProductProtectionRegions;
+    sceneProtection?: SceneEditProtection;
     ecommerceExecution?: EcommerceCompiledImageRequest;
     source?: string;
     title?: string;

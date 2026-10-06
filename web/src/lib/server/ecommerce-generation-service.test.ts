@@ -1,5 +1,7 @@
 import sharp from "sharp";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import { once } from "node:events";
 
 import type { CreativeAsset } from "@/lib/creative-runtime-contract";
 
@@ -7,10 +9,63 @@ import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import type { EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
-import { createEcommerceSceneEditTask } from "./ecommerce-generation-service";
+import { createEcommerceSceneEditTask, createEcommerceLocalEditTask, loadEcommercePlanningImage } from "./ecommerce-generation-service";
+import { authorizedWorkerUserId, maintenanceWorkerContext } from "./maintenance-auth";
 import { buildWhiteBackgroundProductProtection, createEcommerceProductSceneTask, ecommerceGenerationEnabled, ecommerceRolloutStage, publicEcommerceProgress } from "./ecommerce-generation-service";
 
 describe("ecommerce generation service", () => {
+    it.each(["local_edit", "scene_edit"] as const)("retains a v6 auxiliary image in the actual %s task", async (operation) => {
+        const editPlan: EcommerceEditPlan = {
+            ...plan(),
+            planVersion: "ecommerce-edit.v6",
+            operation,
+            source: { productAnchorId: operation === "local_edit" ? "product" : null, currentSceneBaselineId: "current", sceneReferenceIds: ["style"] },
+            baseline: { productFacts: operation === "local_edit" ? plan().baseline.productFacts : null, sceneFacts: { space: "room", composition: "front", lighting: "soft" } },
+            strategy: operation === "local_edit" ? "strict_product" : "integrated_scene",
+            preserve: { productCore: operation === "local_edit" ? plan().preserve.productCore : [], sceneElements: [] },
+            referenceUses: [
+                { assetId: "current", alias: null, purposes: ["edit_target"], usedCueIds: [] },
+                ...(operation === "local_edit" ? [{ assetId: "product", alias: null, purposes: ["product_identity" as const], usedCueIds: [] }] : []),
+                { assetId: "style", alias: "图片1", purposes: ["style"], usedCueIds: ["style-cue"] },
+            ],
+        };
+        const compiled = compileEcommerceImageRequest(editPlan, resolveEcommerceImageProviderProfile(generationSnapshot())!);
+        const assets = [asset("style", "style.png"), asset("product", "product.png"), asset("current", "current.png")];
+        const regions = await buildWhiteBackgroundProductProtection(await productImage({ background: "white", products: [{ left: 22, top: 10, width: 20, height: 28 }] }), analysis(), "product");
+        regions.sourceAssetId = "current";
+        const task = operation === "local_edit" ? createEcommerceLocalEditTask({ id: "run", prompt: "edit" }, editPlan, assets, regions, compiled) : createEcommerceSceneEditTask({ id: "run", prompt: "edit" }, editPlan, assets, compiled);
+        expect(task.references?.map((reference) => reference.assetId)).toEqual(compiled.referenceRoles.map((reference) => reference.assetId));
+        expect(task.ecommerceExecution?.referenceMapping).toEqual(compiled.referenceMapping);
+    });
+    it.each(["worker", "cookie"] as const)("reads protected baseline images with %s credentials", async (credentialKind) => {
+        const bytes = await sharp({ create: { width: 32, height: 24, channels: 3, background: "white" } })
+            .png()
+            .toBuffer();
+        const server = createServer((request, response) => {
+            const worker = authorizedWorkerUserId(new Request("http://127.0.0.1", { headers: { authorization: request.headers.authorization || "", "x-vozeb-pro-worker-user-id": String(request.headers["x-vozeb-pro-worker-user-id"] || "") } }));
+            if (worker !== "worker-user" && request.headers.cookie !== "session=test") {
+                response.writeHead(401).end();
+                return;
+            }
+            response.writeHead(200, { "content-type": "image/png" }).end(bytes);
+        });
+        server.listen(0, "127.0.0.1");
+        await once(server, "listening");
+        vi.stubEnv("VOZEB_PRO_WORKER_TOKEN", "baseline-worker-test-token-32-characters");
+        vi.stubEnv("VOZEB_PRO_MAINTENANCE_TOKEN", "baseline-maintenance-test-token-32-characters");
+        try {
+            const address = server.address();
+            if (!address || typeof address === "string") throw new Error("Baseline image fixture is unavailable");
+            const credential = credentialKind === "worker" ? maintenanceWorkerContext("worker-user") : "session=test";
+            const loaded = await loadEcommercePlanningImage("/api/reference-assets/baseline.png", `http://127.0.0.1:${address.port}`, credential);
+            expect(loaded.equals(bytes)).toBe(true);
+        } finally {
+            vi.unstubAllEnvs();
+            server.closeAllConnections();
+            await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+        }
+    });
+
     it("enables only the explicit internal /create image slice", () => {
         const run = {
             surface: "chat" as const,
@@ -56,6 +111,16 @@ describe("ecommerce generation service", () => {
         expect(ecommerceGenerationEnabled("internal", { surface: "chat", referencedAssetIds: [] }, false, ["image"])).toBe(false);
     });
 
+    it.each(["audio", "video", "text"])("does not use no-attachment continuity for an explicit %s attachment", (type) => {
+        const run = { surface: "chat" as const, referencedAssetIds: [`${type}-current`] };
+
+        expect(ecommerceGenerationEnabled("internal", run, true)).toBe(false);
+        expect(ecommerceGenerationEnabled("internal", { ...run, referencedAssetIds: [] }, true)).toBe(true);
+        expect(ecommerceGenerationEnabled("internal", { ...run, generationPreferences: { mode: "image" } }, true)).toBe(true);
+        expect(ecommerceGenerationEnabled("internal", { ...run, generationPreferences: { mode: "audio" } }, true)).toBe(false);
+        expect(ecommerceGenerationEnabled("internal", { ...run, generationPreferences: { mode: "video" } }, true)).toBe(false);
+    });
+
     it("keeps off and non-selected canary users on the legacy flow", () => {
         expect(ecommerceRolloutStage({ mode: "off" }, "user-a")).toBe("default");
         expect(ecommerceRolloutStage({ mode: "shadow" }, "user-a")).toBe("shadow");
@@ -85,6 +150,32 @@ describe("ecommerce generation service", () => {
         expect(mask.info).toMatchObject({ width: 64, height: 48, channels: 4 });
         expect(mask.data[(2 * 64 + 2) * 4 + 3]).toBe(0);
         expect(mask.data[(20 * 64 + 30) * 4 + 3]).toBe(255);
+    });
+
+    it.each([false, true])("builds protection only from the explicit anchor when an auxiliary detail has product regions (reversed=%s)", async (reversed) => {
+        const source = await productImage({ background: "white", products: [{ left: 22, top: 10, width: 20, height: 28 }] });
+        const input = analysis();
+        input.references.push({ ...structuredClone(input.references[0]), assetId: "detail", confidence: "medium", visualEvidence: { whiteBackground: false, transparentBackground: false, isolatedSubject: false, completeScene: false } });
+        if (reversed) input.references.reverse();
+        const before = structuredClone(input);
+
+        const regions = await buildWhiteBackgroundProductProtection(source, input, "product");
+
+        expect(regions).toMatchObject({ productAnchorId: "product", sourceAssetId: "product", sourceSize: { width: 64, height: 48 } });
+        expect(regions.productCore.rectangles).toEqual([{ x: 22, y: 10, width: 20, height: 28 }]);
+        expect(regions.editableBackground.mask?.reference.id).toBe("product-background-mask");
+        expect(input).toEqual(before);
+    });
+
+    it.each(["missing", "duplicate"])("rejects an ambiguous explicit protection anchor: %s", async (kind) => {
+        const input = analysis();
+        if (kind === "missing") input.references[0].assetId = "other";
+        else input.references.push(structuredClone(input.references[0]));
+        const before = structuredClone(input);
+        const source = await productImage({ background: "white", products: [{ left: 22, top: 10, width: 20, height: 28 }] });
+
+        await expect(buildWhiteBackgroundProductProtection(source, input, "product")).rejects.toThrow(/商品/);
+        expect(input).toEqual(before);
     });
 
     it("computes product bounds for production-size images without overflowing the call stack", async () => {

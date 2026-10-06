@@ -1,6 +1,6 @@
 import type { ManagedMediaType } from "@/lib/local-media-storage-contract";
 
-export const DEFAULT_OBJECT_STORAGE_CDN_BASE_URL = "https://design-img.so-shine.com";
+export const DEFAULT_OBJECT_STORAGE_CDN_BASE_URL = "";
 
 export type ObjectStorageSettings = {
     enabled: boolean;

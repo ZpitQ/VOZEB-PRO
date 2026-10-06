@@ -134,6 +134,7 @@ export type AppSettingsRecord = {
     logicalModels: JsonValue;
     defaultModels: JsonValue;
     ecommerceGenerationEnabled: boolean;
+    ecommerceVisualQualityCheckEnabled: boolean;
     ecommerceModelRoles: JsonValue;
     agentSkills: JsonValue;
     createdAt: string;

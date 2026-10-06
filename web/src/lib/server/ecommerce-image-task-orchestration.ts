@@ -3,6 +3,9 @@ import { resolveEcommerceImageProviderProfile, type EcommerceCompiledImageReques
 import { routeEcommerceRole } from "./ecommerce-model-routing";
 import { compileStrictProductEdit, type ProductProtectionRegions } from "./ecommerce-product-regions";
 import { scheduleGenerationTask } from "./generation-task-scheduler";
+import type { SceneEditProtection } from "./ecommerce-product-regions";
+import { normalizeEcommerceEditProtection, normalizeEcommercePhotographyPlan } from "./ecommerce-edit-plan";
+import { ECOMMERCE_REFERENCE_PURPOSES } from "./ecommerce-reference-purpose";
 
 type EcommerceSettings = Parameters<typeof routeEcommerceRole>[0];
 
@@ -26,7 +29,7 @@ export function assertEcommerceImageExecutionSnapshot(settings: EcommerceSetting
         !exactProfile ||
         exactProfile.profileId !== execution.providerProfileId ||
         exactProfile.modelSnapshot.apiFormat !== execution.modelSnapshot.apiFormat ||
-        compilerVersionForProfile(exactProfile.compilerFamily) !== execution.compilerVersion
+        compilerVersionForProfile(exactProfile.compilerFamily, Boolean(execution.protection), Boolean(execution.photography), Boolean(execution.referenceMapping)) !== execution.compilerVersion
     ) {
         throw new EcommerceImageTaskPreparationError("电商生图执行快照已失效，请重新发起任务", 409);
     }
@@ -39,6 +42,7 @@ export function prepareEcommerceImageTask(input: {
     references: ImageTaskReference[];
     mask?: ImageTaskReference;
     productProtectionRegions?: ProductProtectionRegions;
+    sceneProtection?: SceneEditProtection;
     compatibleConfigs: ImageTaskConfig[];
 }) {
     const baseConfig = input.compatibleConfigs[0];
@@ -50,7 +54,24 @@ export function prepareEcommerceImageTask(input: {
     let prompt = input.prompt;
     let mask = input.mask;
     let productProtection: ImageTask["productProtection"];
+    let sceneProtection: SceneEditProtection | undefined;
     let reviewReason = "";
+    if (input.ecommerceExecution?.protection?.scope === "local" && !input.productProtectionRegions) {
+        if (
+            !normalizeEcommerceEditProtection(input.ecommerceExecution.protection) ||
+            input.kind !== "edit" ||
+            !ecommerceSceneProtectionReferencesMatch(input.ecommerceExecution.referenceRoles[0]?.assetId, input.references, input.ecommerceExecution) ||
+            !input.ecommerceExecution.mask?.required
+        )
+            throw new EcommerceImageTaskPreparationError("局部场景执行快照无效");
+        if (!input.sceneProtection) reviewReason = "请在原图上确认允许编辑的区域，包含新增物体及其接触阴影。";
+        else {
+            sceneProtection = structuredClone(input.sceneProtection);
+            if (sceneProtection.sourceAssetId !== input.references[0].id || sceneProtection.selectionSource !== "user_selection") throw new EcommerceImageTaskPreparationError("场景选区与原图基线不匹配");
+            mask = structuredClone(sceneProtection.mask);
+            if (baseConfig.apiFormat !== "openai" || (baseConfig.advancedConfig?.protocol && !["auto", "compatible", "openai"].includes(baseConfig.advancedConfig.protocol))) reviewReason = "当前协议不支持可信独立蒙版，请选择支持局部编辑的模型。";
+        }
+    } else if (input.sceneProtection) throw new EcommerceImageTaskPreparationError("当前执行范围不接受局部场景保护");
     if (input.productProtectionRegions) {
         if (input.kind !== "edit") throw new EcommerceImageTaskPreparationError("严格商品保护只支持图片编辑任务");
         try {
@@ -75,6 +96,7 @@ export function prepareEcommerceImageTask(input: {
         prompt,
         mask,
         productProtection,
+        sceneProtection,
         reviewReason,
     };
 }
@@ -110,12 +132,53 @@ function validExecutionShape(value: EcommerceCompiledImageRequest) {
         Boolean(value.modelSnapshot) &&
         value.modelSnapshot.logicalRole === "image_generation" &&
         value.modelSnapshot.capability === "image" &&
-        Array.isArray(value.referenceRoles)
+        (value.protection === undefined || Boolean(normalizeEcommerceEditProtection(value.protection))) &&
+        (value.photography === undefined || Boolean(normalizeEcommercePhotographyPlan(value.photography))) &&
+        Array.isArray(value.referenceRoles) &&
+        validReferenceMapping(value)
     );
 }
 
-function compilerVersionForProfile(family: "openai-image-2.5" | "nano-banana-2") {
-    return family === "openai-image-2.5" ? "ecommerce-openai-image-2.5.v1" : "ecommerce-nano-banana-2.v1";
+function compilerVersionForProfile(family: "openai-image-2.5" | "nano-banana-2", protection: boolean, photography: boolean, referencePurposes: boolean) {
+    if (referencePurposes) return family === "openai-image-2.5" ? "ecommerce-openai-image-2.5.v4" : "ecommerce-nano-banana-2.v4";
+    return family === "openai-image-2.5"
+        ? photography
+            ? "ecommerce-openai-image-2.5.v3"
+            : protection
+              ? "ecommerce-openai-image-2.5.v2"
+              : "ecommerce-openai-image-2.5.v1"
+        : photography
+          ? "ecommerce-nano-banana-2.v3"
+          : protection
+            ? "ecommerce-nano-banana-2.v2"
+            : "ecommerce-nano-banana-2.v1";
+}
+
+function validReferenceMapping(execution: EcommerceCompiledImageRequest) {
+    if (!execution.compilerVersion?.endsWith(".v4")) return execution.referenceMapping === undefined;
+    const mapping = execution.referenceMapping;
+    if (!Array.isArray(mapping) || !mapping.length || mapping.length !== execution.referenceRoles.length || new Set(mapping.map((item) => item.assetId)).size !== mapping.length) return false;
+    const aliases = mapping.flatMap((item) => (item.userAlias === null ? [] : [item.userAlias]));
+    return (
+        new Set(aliases).size === aliases.length &&
+        mapping.every(
+            (item, index) =>
+                item.assetId === execution.referenceRoles[index]?.assetId &&
+                item.providerIndex === index &&
+                (item.userAlias === null || /^图片[1-9]\d*$/.test(item.userAlias)) &&
+                Array.isArray(item.purposes) &&
+                item.purposes.length > 0 &&
+                new Set(item.purposes).size === item.purposes.length &&
+                item.purposes.every((purpose) => ECOMMERCE_REFERENCE_PURPOSES.includes(purpose)) &&
+                item.purposes.includes("edit_target") === (index === 0) &&
+                (execution.referenceRoles[index].role !== "product" || item.purposes.includes("product_identity")),
+        )
+    );
+}
+
+export function ecommerceSceneProtectionReferencesMatch(sourceAssetId: string | undefined, references: ImageTaskReference[], execution?: EcommerceCompiledImageRequest) {
+    if (!sourceAssetId || references[0]?.id !== sourceAssetId) return false;
+    return execution?.compilerVersion?.endsWith(".v4") ? validReferenceMapping(execution) && sameReferences(references, execution.referenceRoles) : references.length === 1;
 }
 
 function sameReferences(references: ImageTaskReference[], roles: EcommerceCompiledImageRequest["referenceRoles"]) {

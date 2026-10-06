@@ -91,6 +91,45 @@ describe("ecommerce dual-baseline continuity", () => {
             ambiguityReason: "missing_product_anchor",
         });
     });
+
+    it("continues a scene root without a product and branches from the selected older result", () => {
+        const metadata = { ecommerceContinuity: { productAnchorId: null, sceneRootAssetId: "scene-root", branchId: "scene-branch", parentResultId: null } };
+        const earlier = image("scene-earlier", { sourceRunId: "scene-run-earlier", parentAssetId: "scene-root", metadata, createdAt: 10 });
+        const newer = image("scene-newer", { sourceRunId: "scene-run-newer", parentAssetId: "scene-root", metadata, createdAt: 20 });
+        expect(resolveDualBaseline(run([]), { assets: [], decision: classifyReferenceRoles([], []), results: [earlier, newer] })).toMatchObject({
+            status: "resolved",
+            productAnchorId: null,
+            sceneRootAssetId: "scene-root",
+            currentSceneBaselineId: newer.id,
+            parentResultId: newer.id,
+        });
+        expect(resolveDualBaseline(run([earlier.id]), { assets: [], decision: classifyReferenceRoles([], []), results: [newer, earlier] })).toMatchObject({
+            status: "resolved",
+            productAnchorId: null,
+            sceneRootAssetId: "scene-root",
+            currentSceneBaselineId: earlier.id,
+            parentResultId: earlier.id,
+            createsBranch: true,
+        });
+    });
+
+    it("starts a new scene root on a fresh room upload after a scene-only chain", () => {
+        const prior = image("scene-prior", { sourceRunId: "scene-run", metadata: { ecommerceContinuity: { productAnchorId: null, sceneRootAssetId: "old-root" } } });
+        const room = image("new-root", { sourceRunId: "upload" });
+        const decision = classifyReferenceRoles([room], [{ assetId: room.id, confidence: "high", whiteBackground: false, transparentBackground: false, isolatedSubject: false, completeScene: true }]);
+        expect(resolveDualBaseline(run([room.id]), { assets: [room], decision, results: [prior] })).toMatchObject({
+            status: "resolved",
+            productAnchorId: null,
+            sceneRootAssetId: room.id,
+            currentSceneBaselineId: room.id,
+            parentResultId: null,
+        });
+    });
+
+    it("lets an established image chain enter orchestration with a short continuation and no media classification", () => {
+        expect(ecommerceGenerationEnabled("internal", { surface: "chat", referencedAssetIds: [] }, true)).toBe(true);
+        expect(ecommerceGenerationEnabled("internal", { surface: "chat", referencedAssetIds: [] }, false)).toBe(false);
+    });
 });
 
 function run(referencedAssetIds: string[]) {

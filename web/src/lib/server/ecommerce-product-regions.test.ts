@@ -1,7 +1,47 @@
 import { describe, expect, it } from "vitest";
+import sharp from "sharp";
 
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
-import { buildProductProtectionRegions, compileStrictProductEdit, validateProductProtectionRegions, type ProductProtectionRegions } from "./ecommerce-product-regions";
+import { buildProductProtectionRegions, buildSceneEditProtection, compositeSceneEdit, compileStrictProductEdit, validateSceneEditProtection, validateProductProtectionRegions, type ProductProtectionRegions } from "./ecommerce-product-regions";
+
+describe("local scene protection", () => {
+    const region = { x: 2, y: 1, width: 2, height: 2 };
+    const png = (color: string, width = 6, height = 4) =>
+        sharp({ create: { width, height, channels: 4, background: color } })
+            .png()
+            .toBuffer();
+    it("copies every outside pixel at its original coordinate and records exact differences", async () => {
+        const source = await png("#123456");
+        const generated = await png("#abcdef");
+        const protection = await buildSceneEditProtection(source, "scene", region, ["vase and contact shadow"], "user_selection");
+        const { bytes, evidence } = await compositeSceneEdit(source, generated, protection);
+        const raw = await sharp(bytes).ensureAlpha().raw().toBuffer();
+        const original = await sharp(source).ensureAlpha().raw().toBuffer();
+        const edited = await sharp(generated).ensureAlpha().raw().toBuffer();
+        for (let y = 0; y < 4; y++)
+            for (let x = 0; x < 6; x++) {
+                const offset = (y * 6 + x) * 4;
+                expect(raw.subarray(offset, offset + 4)).toEqual((x >= 2 && x < 4 && y >= 1 && y < 3 ? edited : original).subarray(offset, offset + 4));
+            }
+        expect(evidence).toMatchObject({ outsidePixels: 20, nativeOutsideChangedPixels: 20, compositeOutsideChangedPixels: 0, method: "source_pixels_copy", sourceSize: { width: 6, height: 4 }, maskSize: { width: 6, height: 4 }, targetRegion: region });
+    });
+    it("never promotes an automatic rectangle hint to a trusted mask", async () => {
+        await expect(buildSceneEditProtection(await png("white"), "scene", region, ["vase"], "analysis_hint")).rejects.toThrow("用户确认");
+    });
+    it("rejects reverse, corrupt and wrong-size masks and native results", async () => {
+        const source = await png("white");
+        const protection = await buildSceneEditProtection(source, "scene", region, ["vase"], "user_selection");
+        const maskBytes = Buffer.from(protection.mask.dataUrl.split(",")[1], "base64");
+        const { data, info } = await sharp(maskBytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+        for (let index = 3; index < data.length; index += 4) data[index] = 255 - data[index];
+        const reverse = await sharp(data, { raw: info }).png().toBuffer();
+        for (const bad of [reverse, Buffer.from("broken"), await png("white", 5, 4)]) {
+            await expect(validateSceneEditProtection(source, { ...protection, mask: { ...protection.mask, dataUrl: `data:image/png;base64,${bad.toString("base64")}` } })).rejects.toThrow();
+        }
+        await expect(compositeSceneEdit(source, await png("red", 5, 4), protection)).rejects.toThrow("原生");
+        await expect(buildSceneEditProtection(source, "scene", { ...region, x: 5 }, ["vase"], "user_selection")).rejects.toThrow("越界");
+    });
+});
 
 describe("ecommerce product protection regions", () => {
     it("builds a complete non-overlapping core, halo, and editable background partition", () => {

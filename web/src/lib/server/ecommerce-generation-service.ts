@@ -1,17 +1,23 @@
 import sharp from "sharp";
 
 import { CREATIVE_UPLOAD_MAX_BYTES } from "@/lib/creative-upload";
+import { extractImageSizeFromPrompt, normalizeImageSizeValue, parseImageDimensions } from "@/lib/image-size";
 import type { CreativeAsset, CreativeGenerationPreferences, CreativeSurface } from "@/lib/creative-runtime-contract";
 import { fetchInternalApi } from "@/lib/server/internal-origin";
+import { maintenanceWorkerContextHeaders } from "@/lib/server/maintenance-auth";
 import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
 
-import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
+import { ecommerceCanvasSize, validateEcommerceDimensions, type EcommerceCanvasInput, type EcommerceDimensions, type EcommerceEditPlan } from "./ecommerce-edit-plan";
+import { normalizeGeneratedImageBytes } from "./generated-image-normalizer";
 import type { EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
 import type { EcommerceResolvedLocalEditTarget } from "./ecommerce-edit-planner";
-import { buildProductProtectionRegions, buildSceneProductProtectionRegions, type ProductProtectionRectangle, type ProductProtectionRegions } from "./ecommerce-product-regions";
+import { buildProductProtectionRegions, buildSceneProductProtectionRegions, buildSceneEditProtection, type SceneEditProtection, type ProductProtectionRectangle, type ProductProtectionRegions } from "./ecommerce-product-regions";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
-import type { AgentRunTask } from "./agent-run-store";
+import type { AgentRun, AgentRunTask } from "./agent-run-store";
+import { getCreativeAssetsByIds } from "./creative-runtime-store";
 import { assetAccessUrl } from "./agent-run-surface-policy";
+import { ecommerceSceneSelectionTask } from "./ecommerce-generation-snapshot";
+import { assertEcommerceReferenceContent, EcommerceReferenceSourceReadError } from "./ecommerce-reference-recovery";
 
 const WHITE_BACKGROUND_MIN_CHANNEL = 240;
 const TRANSPARENT_BACKGROUND_MAX_ALPHA = 24;
@@ -38,6 +44,10 @@ export function isEcommerceImageRequest(run: { generationPreferences?: CreativeG
     return hasReferenceImage;
 }
 
+export function isEcommerceNoAttachmentContinuation(run: { referencedAssetIds: string[]; generationPreferences?: CreativeGenerationPreferences }, selectedModelCapabilities: string[] = []): boolean {
+    return run.referencedAssetIds.length === 0 && !run.generationPreferences?.mode && !selectedModelCapabilities.some((capability) => capability !== "image");
+}
+
 export function ecommerceGenerationEnabled(
     value: unknown,
     run: { userId?: string; surface: CreativeSurface; referencedAssetIds: string[]; generationPreferences?: CreativeGenerationPreferences },
@@ -46,7 +56,12 @@ export function ecommerceGenerationEnabled(
     hasReferenceImage = false,
 ): boolean {
     const stage = ecommerceRolloutStage(value, run.userId || "");
-    return (stage === "internal" || stage === "canary") && run.surface === "chat" && isEcommerceImageRequest(run, selectedModelCapabilities, hasReferenceImage) && ((run.referencedAssetIds.length >= 1 && hasReferenceImage) || hasContinuityResult);
+    return (
+        (stage === "internal" || stage === "canary") &&
+        run.surface === "chat" &&
+        (isEcommerceImageRequest(run, selectedModelCapabilities, hasReferenceImage) || (hasContinuityResult && isEcommerceNoAttachmentContinuation(run, selectedModelCapabilities))) &&
+        ((run.referencedAssetIds.length >= 1 && hasReferenceImage) || hasContinuityResult)
+    );
 }
 
 export function ecommerceRolloutStage(value: unknown, userId: string): EcommerceRolloutStage {
@@ -87,10 +102,19 @@ function normalizeRolloutSettings(value: unknown): EcommerceRolloutSettings {
     }
 }
 
-export async function loadEcommercePlanningImage(url: string, origin: string, cookie: string): Promise<Buffer> {
+export async function loadEcommercePlanningImage(url: string, origin: string, cookie: string, expectedSha256?: string): Promise<Buffer> {
     const source = url.trim();
-    const response = source.startsWith("/api/") ? await fetchInternalApi(`${origin}${source}`, { headers: { cookie }, cache: "no-store" }) : /^https:\/\//i.test(source) ? await fetchSafeOutbound(source, { cache: "no-store" }) : null;
-    if (!response?.ok) throw new EcommerceProductSegmentationError("无法读取商品图片");
+    let response: Response | null;
+    try {
+        response = source.startsWith("/api/")
+            ? await fetchInternalApi(`${origin}${source}`, { headers: maintenanceWorkerContextHeaders(cookie) || { cookie }, cache: "no-store" })
+            : /^https:\/\//i.test(source)
+              ? await fetchSafeOutbound(source, { cache: "no-store" })
+              : null;
+    } catch {
+        throw new EcommerceReferenceSourceReadError();
+    }
+    if (!response?.ok) throw new EcommerceReferenceSourceReadError(response?.status);
     const mimeType = response.headers.get("content-type")?.split(";")[0].toLowerCase() || "";
     const contentLength = Number(response.headers.get("content-length") || 0);
     if (!mimeType.startsWith("image/") || contentLength > CREATIVE_UPLOAD_MAX_BYTES) {
@@ -100,12 +124,40 @@ export async function loadEcommercePlanningImage(url: string, origin: string, co
     if (!bytes.length || bytes.length > CREATIVE_UPLOAD_MAX_BYTES) {
         throw new EcommerceProductSegmentationError("商品图片无效或过大");
     }
+    if (expectedSha256 !== undefined) assertEcommerceReferenceContent(bytes, expectedSha256);
     return bytes;
 }
 
+export async function decodeEcommerceCanvasSize(bytes: Buffer): Promise<EcommerceDimensions> {
+    const decoded = await normalizeGeneratedImageBytes(bytes, "image/png");
+    const size = { width: decoded.width!, height: decoded.height! };
+    validateEcommerceDimensions(size);
+    return size;
+}
+
+export function ecommerceCanvasInputFromRequest(prompt: string, configuredSize?: string, baselineSize?: EcommerceDimensions): Omit<EcommerceCanvasInput, "operation"> {
+    const requested = extractImageSizeFromPrompt(prompt);
+    const exact = parseImageDimensions(requested);
+    const ratio = !exact && requested.includes(":") ? requested.split(":") : null;
+    const scale = ratio ? 10 ** Math.max(...ratio.map((part) => part.split(".")[1]?.length || 0)) : 1;
+    const userRequest: EcommerceCanvasInput["userRequest"] = exact
+        ? { mode: "exact", size: exact }
+        : ratio
+          ? { mode: "ratio", size: { width: Math.round(Number(ratio[0]) * scale), height: Math.round(Number(ratio[1]) * scale) } }
+          : /(?:保持|保留|维持|沿用|使用|不改变|不变更).{0,8}(?:原(?:图|始)?(?:的)?尺寸|原(?:图|始)?(?:的)?分辨率)|(?:尺寸|分辨率).{0,4}(?:保持不变|不变)|(?:preserve|keep|retain|maintain)\s+(?:the\s+)?original\s+(?:size|dimensions|resolution)|same\s+(?:size|dimensions|resolution)/i.test(
+                  prompt,
+              )
+            ? { mode: "preserve" }
+            : undefined;
+    const explicitSize = parseImageDimensions(normalizeImageSizeValue(configuredSize));
+    return { ...(userRequest ? { userRequest } : {}), ...(explicitSize ? { explicitSize } : {}), ...(baselineSize ? { baselineSize } : {}) };
+}
+
 export async function buildWhiteBackgroundProductProtection(source: Buffer, analysis: EcommerceVisualAnalysis, productAssetId: string): Promise<ProductProtectionRegions> {
-    const reference = analysis.references.find((item) => item.assetId === productAssetId && item.role === "product");
-    if (!reference || reference.confidence !== "high" || !reference.visualEvidence.isolatedSubject || (!reference.visualEvidence.whiteBackground && !reference.visualEvidence.transparentBackground)) {
+    const anchors = analysis.references.filter((item) => item.assetId === productAssetId);
+    const reference = anchors.length === 1 && anchors[0].role === "product" ? anchors[0] : undefined;
+    const detailAnchorAllowed = reference?.role === "product" && reference.confidence === "medium" && reference.visualEvidence.isolatedSubject && (reference.visualEvidence.whiteBackground || reference.visualEvidence.transparentBackground);
+    if (!reference || (!detailAnchorAllowed && reference.confidence !== "high") || !reference.visualEvidence.isolatedSubject || (!reference.visualEvidence.whiteBackground && !reference.visualEvidence.transparentBackground)) {
         throw new EcommerceProductSegmentationError("商品图不是高置信度白色或透明背景单主体");
     }
 
@@ -152,15 +204,7 @@ export async function buildWhiteBackgroundProductProtection(source: Buffer, anal
     const halo = expand(bounds, width, height);
     const normalizedAnalysis: EcommerceVisualAnalysis = {
         ...analysis,
-        references: analysis.references.map((item) =>
-            item.assetId === productAssetId
-                ? {
-                      ...item,
-                      productCore: normalize(bounds, width, height),
-                      fusionHalo: normalize(halo, width, height),
-                  }
-                : item,
-        ),
+        references: [{ ...reference, productCore: normalize(bounds, width, height), fusionHalo: normalize(halo, width, height) }],
     };
     const regions = buildProductProtectionRegions(normalizedAnalysis, { width, height });
     const maskBytes = Buffer.alloc(pixels * 4, 255);
@@ -273,7 +317,7 @@ export function createEcommerceProductSceneTask(
         optimizedPrompt: userPrompt,
         prompt: ecommerceExecution.prompt,
         count: Math.max(1, preferences?.count || 1),
-        ...(preferences?.size ? { ratio: preferences.size } : {}),
+        ...(ecommerceExecution.canvas ? { ratio: ecommerceCanvasSize(ecommerceExecution.canvas) } : preferences?.size ? { ratio: preferences.size } : {}),
         ...(preferences?.quality ? { quality: preferences.quality } : {}),
         dependencies: [],
         status: "ready",
@@ -318,6 +362,14 @@ export function createEcommerceLocalEditTask(
             ...(Number.isFinite(product.width) ? { width: product.width } : {}),
             ...(Number.isFinite(product.height) ? { height: product.height } : {}),
         },
+        ...sceneReferenceAssets(plan, assets).map((asset) => ({
+            assetId: asset.id,
+            url: assetAccessUrl(asset)!,
+            type: "image" as const,
+            ecommerceRole: "scene" as const,
+            ...(Number.isFinite(asset.width) ? { width: asset.width } : {}),
+            ...(Number.isFinite(asset.height) ? { height: asset.height } : {}),
+        })),
     ];
     assertCompiledReferences(references, ecommerceExecution);
     const userPrompt = run.prompt.trim();
@@ -336,7 +388,7 @@ export function createEcommerceLocalEditTask(
         optimizedPrompt: userPrompt,
         prompt: ecommerceExecution.prompt,
         count: Math.max(1, preferences?.count || 1),
-        ...(preferences?.size ? { ratio: preferences.size } : {}),
+        ...(ecommerceExecution.canvas ? { ratio: ecommerceCanvasSize(ecommerceExecution.canvas) } : preferences?.size ? { ratio: preferences.size } : {}),
         ...(preferences?.quality ? { quality: preferences.quality } : {}),
         dependencies: [],
         status: "ready",
@@ -344,11 +396,18 @@ export function createEcommerceLocalEditTask(
     };
 }
 
-export function createEcommerceSceneEditTask(run: { id: string; prompt: string; generationPreferences?: CreativeGenerationPreferences }, plan: EcommerceEditPlan, assets: CreativeAsset[], ecommerceExecution: EcommerceCompiledImageRequest): AgentRunTask {
+export function createEcommerceSceneEditTask(
+    run: { id: string; prompt: string; generationPreferences?: CreativeGenerationPreferences },
+    plan: EcommerceEditPlan,
+    assets: CreativeAsset[],
+    ecommerceExecution: EcommerceCompiledImageRequest,
+    sceneProtection?: SceneEditProtection,
+): AgentRunTask {
     if (plan.operation !== "scene_edit" || plan.strategy !== "integrated_scene" || !plan.source.currentSceneBaselineId || plan.source.productAnchorId) {
         throw new Error("场景编辑只允许无商品锚点的 scene_edit + integrated_scene");
     }
     assertReadyEcommerceExecution(plan, ecommerceExecution);
+    if (plan.protection?.scope === "local" && (!sceneProtection || sceneProtection.sourceAssetId !== plan.source.currentSceneBaselineId)) throw new Error("局部场景编辑缺少用户确认的允许区域");
     const scene = assets.find((asset) => asset.id === plan.source.currentSceneBaselineId);
     const sceneUrl = scene ? assetAccessUrl(scene) : undefined;
     if (!scene || scene.type !== "image" || !sceneUrl) throw new Error("当前场景基线不可用");
@@ -361,6 +420,14 @@ export function createEcommerceSceneEditTask(run: { id: string; prompt: string; 
             ...(Number.isFinite(scene.width) ? { width: scene.width } : {}),
             ...(Number.isFinite(scene.height) ? { height: scene.height } : {}),
         },
+        ...sceneReferenceAssets(plan, assets).map((asset) => ({
+            assetId: asset.id,
+            url: assetAccessUrl(asset)!,
+            type: "image" as const,
+            ecommerceRole: "scene" as const,
+            ...(Number.isFinite(asset.width) ? { width: asset.width } : {}),
+            ...(Number.isFinite(asset.height) ? { height: asset.height } : {}),
+        })),
     ];
     assertCompiledReferences(references, ecommerceExecution);
     const preferences = run.generationPreferences?.image;
@@ -374,10 +441,11 @@ export function createEcommerceSceneEditTask(run: { id: string; prompt: string; 
         type: "image",
         model: ecommerceExecution.modelSnapshot.logicalModelId,
         ecommerceExecution,
+        ...(sceneProtection ? { sceneProtection: structuredClone(sceneProtection) } : {}),
         optimizedPrompt: run.prompt.trim(),
         prompt: ecommerceExecution.prompt,
         count: Math.max(1, preferences?.count || 1),
-        ...(preferences?.size ? { ratio: preferences.size } : {}),
+        ...(ecommerceExecution.canvas ? { ratio: ecommerceCanvasSize(ecommerceExecution.canvas) } : preferences?.size ? { ratio: preferences.size } : {}),
         ...(preferences?.quality ? { quality: preferences.quality } : {}),
         dependencies: [],
         status: "ready",
@@ -386,10 +454,45 @@ export function createEcommerceSceneEditTask(run: { id: string; prompt: string; 
 }
 
 function assertReadyEcommerceExecution(plan: EcommerceEditPlan, execution: EcommerceCompiledImageRequest) {
+    if (JSON.stringify(plan.canvas) !== JSON.stringify(execution.canvas)) throw new Error("生图执行快照与编辑计划的画布约束不一致");
+    if (JSON.stringify(plan.protection) !== JSON.stringify(execution.protection)) throw new Error("生图执行快照与编辑计划的保护约束不一致");
     if (execution.state !== "ready") throw new Error("当前生图模型不满足电商图片执行要求");
     if (execution.modelSnapshot.logicalRole !== "image_generation" || execution.modelSnapshot.logicalModelId !== plan.modelRoles.generation) {
         throw new Error("生图执行快照与编辑计划的模型角色不一致");
     }
+}
+
+export async function prepareEcommerceSceneSelectionResume(run: AgentRun, selection: unknown, origin: string, cookie: string, actorUserId: string): Promise<AgentRunTask[]> {
+    const plan = run.ecommerceSnapshot?.plan;
+    const task = ecommerceSceneSelectionTask(run);
+    if (!plan || !task?.ecommerceExecution) throw new Error("当前任务不能确认编辑区域");
+    if (!actorUserId?.trim() || !selection || typeof selection !== "object") throw new Error("请在原图上确认允许编辑的区域，包含新增物体及其接触阴影");
+    const input = selection as { baselineAssetId?: unknown; region?: ProductProtectionRectangle };
+    if (input.baselineAssetId !== plan.source.currentSceneBaselineId || !input.region) throw new Error("选区与任务的原图基线不匹配");
+    const ids = task.ecommerceExecution.referenceRoles.map((reference) => reference.assetId);
+    const assets = await getCreativeAssetsByIds(ids, run.userId);
+    if (ids.some((id) => !assets.some((asset) => asset.id === id && asset.userId === run.userId && asset.conversationId === run.conversationId && asset.type === "image" && asset.status === "ready" && assetAccessUrl(asset))))
+        throw new Error("参考图片不可用或没有访问权限");
+    const baseline = assets.find((asset) => asset.id === input.baselineAssetId && asset.userId === run.userId && asset.conversationId === run.conversationId && asset.type === "image" && asset.status === "ready");
+    const url = baseline ? assetAccessUrl(baseline) : undefined;
+    if (!baseline || !url) throw new Error("原图不可用或没有访问权限");
+    const source = await loadEcommercePlanningImage(url, origin, cookie);
+    const protection = await buildSceneEditProtection(source, baseline.id, input.region, plan.delta.requestedChanges, "user_selection");
+    protection.confirmation = { actorUserId, confirmedAt: Date.now() };
+    const canvas = plan.canvas;
+    if (!canvas || canvas.mode !== "exact" || canvas.size.width !== protection.sourceSize.width || canvas.size.height !== protection.sourceSize.height) throw new Error("局部编辑必须保持原图画幅，请重新发起符合原图尺寸的请求");
+    const executable = createEcommerceSceneEditTask(run, plan, assets, task.ecommerceExecution, protection);
+    return [{ ...executable, id: task.id, count: task.count, attempts: task.attempts }];
+}
+
+function sceneReferenceAssets(plan: EcommerceEditPlan, assets: CreativeAsset[]) {
+    return [...new Set(plan.source.sceneReferenceIds)]
+        .filter((id) => id !== plan.source.currentSceneBaselineId && id !== plan.source.productAnchorId)
+        .map((id) => {
+            const asset = assets.find((candidate) => candidate.id === id && candidate.type === "image" && candidate.status === "ready");
+            if (!asset || !assetAccessUrl(asset)) throw new Error("辅助参考图片不可用");
+            return asset;
+        });
 }
 
 function assertCompiledReferences(references: NonNullable<AgentRunTask["references"]>, execution: EcommerceCompiledImageRequest) {

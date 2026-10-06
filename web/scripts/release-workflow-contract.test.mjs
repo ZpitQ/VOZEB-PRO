@@ -86,6 +86,24 @@ describe("release workflow contract", () => {
         expect(step?.run).toContain("pnpm exec vitest run --no-file-parallelism");
     });
 
+    it("includes ecommerce isolated PostgreSQL process regressions without dropping existing gates", () => {
+        const step = parseDocument(workflow("quality.yml"))
+            .toJS()
+            .jobs["web-chromium"].steps.find((item) => item.name === "PostgreSQL integration tests");
+        for (const file of [
+            "database/auth-entity-concurrency.postgres.test.ts",
+            "admin-backup-store.postgres.test.ts",
+            "points-wallet-idempotency.postgres.test.ts",
+            "database/work-community-postgres.test.ts",
+            "database/create-overview-quality.postgres.test.ts",
+            "ecommerce-selection-recovery.postgres.test.ts",
+        ])
+            expect(step.run).toContain(`src/lib/server/${file}`);
+        expect(step.env.VOZEB_PRO_RUN_ECOMMERCE_POSTGRES_INTEGRATION).toBe("1");
+        expect(step.env.VOZEB_PRO_ECOMMERCE_ISOLATED_DATABASE).toBe("1");
+        expect(step.run).toContain("--no-file-parallelism");
+    });
+
     it("declares one pnpm version for the repository and both Docker builds", () => {
         const rootPackage = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8"));
         const appDockerfile = readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");

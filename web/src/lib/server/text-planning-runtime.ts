@@ -1,6 +1,7 @@
 import type { SystemModelChannel } from "@/lib/auth/store";
 import { recordChannelRuntimeFailure, recordChannelRuntimeSuccess } from "@/lib/server/channel-runtime-health";
 import { fetchInternalApi } from "@/lib/server/internal-origin";
+import { maintenanceWorkerContextHeaders } from "@/lib/server/maintenance-auth";
 import { resolveModelRequestTimeoutMs } from "@/lib/server/model-request-policy";
 import { buildProviderRequest, isProviderBusinessError, readProviderError, readProviderString, readProviderValue } from "@/lib/server/provider-task-config";
 import { extractJsonObjectText } from "@/lib/server/structured-model-output";
@@ -10,6 +11,7 @@ import { resolveChannelModelConfig } from "@/lib/channel-protocol-registry";
 import type { AiTextMessage } from "@/types/ai";
 
 export type TextPlanningProtocol = "responses" | "chat" | "gemini" | "custom";
+export type TextPlanningBodyMeasurement = { protocol: TextPlanningProtocol; bodyBytes: number; maxBytes: number };
 export type TextPlanningCandidate = {
     channelId: string;
     upstreamModel: string;
@@ -19,7 +21,9 @@ export type TextPlanningCandidate = {
 export type TextPlanningTool = { name: string; description: string; parameters: Record<string, unknown> };
 export type TextPlanningCall = { arguments: string; headers: Headers; protocol: TextPlanningProtocol; elapsedMs: number; transport?: "stream" | "complete"; fallbackReason?: string };
 export type TextPlanningMessage = { role: string; content: AiTextMessage["content"] };
-type TextPlanningRequestErrorReason = "http" | "transport" | "invalid-structure";
+export type TextPlanningValidationIssue = { code: string; path?: string; message: string };
+export type TextPlanningValidation = { valid: boolean; issues?: TextPlanningValidationIssue[] };
+type TextPlanningRequestErrorReason = "http" | "transport" | "invalid-structure" | "request-budget";
 export type StructuredTextFailureCode = "invalid-response-json" | "missing-structured-result" | "invalid-structured-result";
 
 type RuntimeState = {
@@ -45,11 +49,12 @@ export type StructuredTextRequest = {
     allowNaturalLanguage?: boolean;
     preferNativeTools?: boolean;
     allowRepair?: boolean;
-    validateArguments?: (argumentsText: string) => boolean;
+    validateArguments?: (argumentsText: string) => boolean | TextPlanningValidation;
     onInvalidResponse?: (headers: Headers) => Promise<unknown>;
     stream?: boolean;
     streamFallback?: boolean;
     onStreamStart?: () => Promise<void> | void;
+    requestBodyBudget?: { maxBytes: number; onMeasured?: (measurement: TextPlanningBodyMeasurement) => void };
 };
 
 type ProtocolRequest = {
@@ -73,6 +78,7 @@ export class TextPlanningRequestError extends Error {
         readonly retryable = status >= 500 || status === 408 || status === 429,
         readonly reason: TextPlanningRequestErrorReason = "http",
         readonly failureCode?: StructuredTextFailureCode,
+        readonly validationIssues: TextPlanningValidationIssue[] = [],
     ) {
         super(message);
         this.name = "TextPlanningRequestError";
@@ -98,13 +104,16 @@ export async function requestStructuredText(input: StructuredTextRequest): Promi
     const startedAt = Date.now();
     const messages = planningMessages(input);
     const requests = planningProtocolRequests(input, messages);
+    let validationIssues: TextPlanningValidationIssue[] = [];
     try {
-        for (const [index, request] of requests.entries()) {
+        for (const [index, prepared] of requests.entries()) {
+            const request = prepared === "repair" ? planningProtocolRequest(input.candidate, planningMessages(input, true, validationIssues), "repair") : prepared;
             try {
                 const response = await requestTextProtocol(input, request);
                 if (request.stream) await input.onStreamStart?.();
                 return await readStructuredResponse(input, request, response, startedAt);
             } catch (error) {
+                if (error instanceof TextPlanningRequestError) validationIssues = error.validationIssues;
                 if (input.stream && input.streamFallback !== false && index === 0 && shouldFallbackFromStream(error)) {
                     const fallback = await requestStructuredText({ ...input, stream: false, streamFallback: false });
                     return { ...fallback, fallbackReason: error instanceof Error ? error.message : "上游不支持流式规划" };
@@ -114,7 +123,7 @@ export async function requestStructuredText(input: StructuredTextRequest): Promi
         }
         throw new TextPlanningRequestError("模型没有返回所需的结构化结果", 502, false);
     } catch (error) {
-        recordTextFailure(input.candidate, error);
+        if (!(error instanceof TextPlanningRequestError && error.reason === "request-budget")) recordTextFailure(input.candidate, error);
         throw error;
     }
 }
@@ -133,7 +142,7 @@ function planningProtocolRequests(input: StructuredTextRequest, messages: TextPl
     if (input.allowRepair === false) {
         return input.preferNativeTools && promptRequest.protocol !== "custom" ? [planningProtocolRequest(input.candidate, messages, "tool", input.tool), promptRequest] : [promptRequest];
     }
-    const recoveryRequest = planningProtocolRequest(input.candidate, planningMessages(input, true), "repair");
+    const recoveryRequest = "repair" as const;
     if (!input.preferNativeTools || promptRequest.protocol === "custom") return [promptRequest, recoveryRequest];
     return [planningProtocolRequest(input.candidate, messages, "tool", input.tool), promptRequest, recoveryRequest];
 }
@@ -283,16 +292,24 @@ function hasImageContent(content: AiTextMessage["content"]) {
 }
 
 async function requestTextProtocol(input: StructuredTextRequest, request: ProtocolRequest) {
+    const body = JSON.stringify(request.body);
+    if (input.requestBodyBudget) {
+        const bodyBytes = Buffer.byteLength(body, "utf8");
+        input.requestBodyBudget.onMeasured?.({ protocol: request.protocol, bodyBytes, maxBytes: input.requestBodyBudget.maxBytes });
+        if (bodyBytes > input.requestBodyBudget.maxBytes) throw new TextPlanningRequestError("视觉请求正文超过现有传输限制", 413, false, "request-budget");
+    }
     const base = `${input.origin}/api/ai/system/${encodeURIComponent(input.candidate.channelId)}`;
     const headers = request.variant === "repair" ? repairRequestHeaders(input) : new Headers(request.variant !== "tool" ? fallbackRequestHeaders(input, request.stream) : input.headers);
     headers.set("content-type", "application/json");
     if (request.stream) headers.set("accept", request.streamFormat === "sse" ? "text/event-stream" : "application/x-ndjson");
-    if (input.cookie) headers.set("cookie", input.cookie);
+    const workerHeaders = maintenanceWorkerContextHeaders(input.cookie);
+    if (workerHeaders) Object.entries(workerHeaders).forEach(([key, value]) => headers.set(key, value));
+    else if (input.cookie) headers.set("cookie", input.cookie);
     scopeProtocolIdempotency(headers, request.protocol, request.variant, request.stream);
     const timeoutSignal = AbortSignal.timeout(resolveModelRequestTimeoutMs(input.candidate, "text"));
     const signal = input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal;
     try {
-        return await fetchInternalApi(`${base}${normalizePath(request.path)}`, { method: "POST", headers, body: JSON.stringify(request.body), cache: "no-store", signal });
+        return await fetchInternalApi(`${base}${normalizePath(request.path)}`, { method: "POST", headers, body, cache: "no-store", signal });
     } catch (error) {
         if (input.signal?.aborted) throw error;
         throw new TextPlanningRequestError(isTimeoutError(error) ? "文本模型规划响应超时，正在切换备用渠道" : "文本模型渠道暂时无法连接", 504, true, "transport");
@@ -367,10 +384,11 @@ async function finalizeStructuredArguments(input: StructuredTextRequest, request
         console.error("[text-planning] structured response has no readable result", JSON.stringify({ protocol: request.protocol, tool: input.tool.name, ...describeStructuredPayload(payload) }));
         throw new TextPlanningRequestError(`文本模型没有返回可识别的结构化结果（协议：${request.protocol}）`, 502, false, "invalid-structure", "missing-structured-result");
     }
-    if (!validArguments(input, argumentsText)) {
+    const validation = validArguments(input, argumentsText);
+    if (!validation.valid) {
         await input.onInvalidResponse?.(response.headers);
         console.error("[text-planning] structured response failed argument validation", JSON.stringify({ protocol: request.protocol, tool: input.tool.name, ...describeStructuredPayload(payload) }));
-        throw new TextPlanningRequestError(`文本模型返回了 JSON，但字段不符合 ${input.tool.name} 要求`, 502, false, "invalid-structure", "invalid-structured-result");
+        throw new TextPlanningRequestError(`文本模型返回了 JSON，但字段不符合 ${input.tool.name} 要求`, 502, false, "invalid-structure", "invalid-structured-result", validation.issues);
     }
     const elapsedMs = Date.now() - startedAt;
     recordTextSuccess(input.candidate, request.protocol, elapsedMs);
@@ -473,8 +491,8 @@ function readProtocolArguments(payload: Record<string, unknown>, toolName: strin
     return chatArguments(payload, toolName, allowNaturalLanguage);
 }
 
-function planningMessages(input: StructuredTextRequest, recovery = false) {
-    const instruction = `${recovery ? "上一轮响应没有通过结构校验。请重新执行，不要解释失败原因，也不要复述输入。" : "请先在模型内部完成需求理解、约束分析、模型选择、任务拆分与依赖规划，再"}只返回一个严格 JSON 对象，作为 ${input.tool.name} 的最终参数。任务用途：${input.tool.description}。不要使用 Markdown、代码围栏、解释或额外文字。JSON 必须符合以下 Schema：${JSON.stringify(input.tool.parameters)}`;
+function planningMessages(input: StructuredTextRequest, recovery = false, validationIssues: TextPlanningValidationIssue[] = []) {
+    const instruction = `${recovery ? "上一轮响应没有通过结构校验。请重新执行，不要解释失败原因，也不要复述输入。" : "请先在模型内部完成需求理解、约束分析、模型选择、任务拆分与依赖规划，再"}只返回一个严格 JSON 对象，作为 ${input.tool.name} 的最终参数。任务用途：${input.tool.description}。不要使用 Markdown、代码围栏、解释或额外文字。JSON 必须符合以下 Schema：${JSON.stringify(input.tool.parameters)}${recovery && validationIssues.length ? `\n实际校验问题：${JSON.stringify(validationIssues)}。仅修正无效字段，不能编造事实或改变原输入身份。` : ""}`;
     if (input.messages[0]?.role === "system") {
         const content = input.messages[0].content;
         return [{ ...input.messages[0], content: typeof content === "string" ? `${instruction}\n\n${content}` : [{ type: "text" as const, text: instruction }, ...content] }, ...input.messages.slice(1)];
@@ -652,12 +670,13 @@ function textContent(value: unknown) {
         .trim();
 }
 
-function validArguments(input: StructuredTextRequest, argumentsText: string) {
-    if (!input.validateArguments) return true;
+function validArguments(input: StructuredTextRequest, argumentsText: string): TextPlanningValidation {
+    if (!input.validateArguments) return { valid: true };
     try {
-        return input.validateArguments(argumentsText);
+        const result = input.validateArguments(argumentsText);
+        return typeof result === "boolean" ? { valid: result } : result;
     } catch {
-        return false;
+        return { valid: false };
     }
 }
 

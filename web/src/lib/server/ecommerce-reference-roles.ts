@@ -1,5 +1,6 @@
 import type { CreativeAsset } from "@/lib/creative-runtime-contract";
 import type { AgentRun } from "./agent-run-store";
+import type { EcommerceReferenceDecision, EcommerceReferencePurpose } from "./ecommerce-reference-purpose";
 
 export type EcommerceReferenceRole = "product" | "scene" | "unknown";
 export type EcommerceReferenceDecisionStatus = "resolved" | "needs_clarification" | "rejected";
@@ -36,6 +37,7 @@ export type EcommerceDualBaselineReference = EcommerceExplicitReferenceSelection
 export type EcommerceSources = {
     status: "resolved" | "needs_clarification";
     productAnchorId: string | null;
+    sceneRootAssetId?: string | null;
     currentSceneBaselineId: string | null;
     sceneReferenceIds: string[];
     parentResultId: string | null;
@@ -104,6 +106,7 @@ export function resolveContinuitySources(run: Pick<AgentRun, "id" | "referencedA
     if (!selectedResult && scene && explicitAssets.decision.ambiguityReason === "missing_product_reference") {
         return resolvedSources({
             productAnchorId: null,
+            sceneRootAssetId: scene.id,
             currentSceneBaselineId: scene.id,
             sceneReferenceIds: [],
             startsNewProductAnchor: false,
@@ -112,10 +115,11 @@ export function resolveContinuitySources(run: Pick<AgentRun, "id" | "referencedA
     }
     if (!selectedResult) return unresolvedSources("missing_product_anchor", scene ? [scene.id] : []);
     const productAnchorId = selectedHistoryProductAnchorId(selectedResult);
-    if (!productAnchorId) return unresolvedSources("missing_product_anchor", scene ? [scene.id] : []);
-
+    const sceneRootAssetId = selectedHistorySceneRootAssetId(selectedResult);
+    if (!productAnchorId && !sceneRootAssetId) return unresolvedSources("missing_product_anchor", scene ? [scene.id] : []);
     return resolvedSources({
-        productAnchorId,
+        productAnchorId: productAnchorId || null,
+        sceneRootAssetId: sceneRootAssetId || null,
         currentSceneBaselineId: selectedResult.id,
         sceneReferenceIds: scene ? [scene.id] : [],
         parentResultId: selectedResult.id,
@@ -129,16 +133,73 @@ export function resolveDualBaseline(run: Pick<AgentRun, "id" | "referencedAssetI
     const latestResult = selectedResults.length
         ? selectedResults[0]
         : [...explicitReference.results]
-              .filter((asset) => asset.type === "image" && asset.status === "ready" && asset.sourceRunId && selectedHistoryProductAnchorId(asset))
+              .filter((asset) => asset.type === "image" && asset.status === "ready" && asset.sourceRunId && (selectedHistoryProductAnchorId(asset) || selectedHistorySceneRootAssetId(asset)))
               .sort((left, right) => right.createdAt - left.createdAt || right.ordinal - left.ordinal)[0];
     if (explicitReference.decision.productAssetId) {
         const sources = resolveContinuitySources(run, explicitReference, []);
         return sources.status === "resolved" && explicitReference.decision.sceneAssetId && latestResult ? { ...sources, parentResultId: latestResult.id, createsBranch: true } : sources;
     }
     if (!latestResult) return resolveContinuitySources(run, explicitReference, []);
+    if (!selectedResults.length && explicitReference.decision.sceneAssetId && !selectedHistoryProductAnchorId(latestResult)) return resolveContinuitySources(run, explicitReference, []);
     const sources = resolveContinuitySources({ ...run, referencedAssetIds: [...run.referencedAssetIds, latestResult.id] }, explicitReference, selectedResults.length ? selectedResults : [latestResult]);
-    if (sources.status !== "resolved" || !explicitReference.decision.sceneAssetId) return sources;
+    if (sources.status !== "resolved" || !explicitReference.decision.sceneAssetId || !sources.productAnchorId) return sources;
     return { ...sources, currentSceneBaselineId: null, sceneReferenceIds: [explicitReference.decision.sceneAssetId] };
+}
+
+/**
+ * Preserve the v4 purpose decision as the source of truth. Re-projecting it
+ * through the legacy product/scene classifier loses a scene target and its
+ * continuity parent, which is especially common when a new style reference is
+ * paired with an existing generated scene.
+ */
+export function resolveSourcesFromEcommerceReferenceDecision(
+    decision: Pick<EcommerceReferenceDecision, "state" | "editTargetId" | "productAnchorId" | "currentSceneBaselineId"> & { bindings: Array<{ assetId: string; purposes: EcommerceReferencePurpose[] }> },
+    explicitAssets: CreativeAsset[],
+    selectedHistory: CreativeAsset[] = [],
+): EcommerceSources {
+    if (decision.state !== "resolved") return unresolvedSources("invalid_reference_selection");
+
+    const assets = uniqueReadyImages([...explicitAssets, ...selectedHistory]);
+    const assetIds = new Set(assets.map((asset) => asset.id));
+    const selectedResults = Array.from(new Map(selectedHistory.filter((asset) => assetIds.has(asset.id) && asset.type === "image" && asset.status === "ready" && Boolean(asset.sourceRunId)).map((asset) => [asset.id, asset])).values());
+    if (selectedResults.length > 1) return unresolvedSources("multiple_history_results");
+
+    const decisionIds = [decision.editTargetId, decision.productAnchorId, decision.currentSceneBaselineId, ...decision.bindings.map((binding) => binding.assetId)].filter((id): id is string => Boolean(id));
+    if (decisionIds.some((id) => !assetIds.has(id))) return unresolvedSources("invalid_reference_selection");
+
+    const sceneReferenceIds = decision.bindings
+        .filter((binding) => binding.purposes.some((purpose) => ["style", "lighting", "composition"].includes(purpose)))
+        .map((binding) => binding.assetId)
+        .filter((id) => id !== decision.productAnchorId && id !== decision.currentSceneBaselineId);
+    if (sceneReferenceIds.length > 1) return unresolvedSources("multiple_scene_candidates");
+    const selectedResult = selectedResults[0];
+    const parentResultId = selectedResult?.id || null;
+
+    if (decision.currentSceneBaselineId) {
+        const baseline = assets.find((asset) => asset.id === decision.currentSceneBaselineId);
+        if (!baseline) return unresolvedSources("invalid_reference_selection");
+        return resolvedSources({
+            productAnchorId: decision.productAnchorId && decision.productAnchorId !== decision.currentSceneBaselineId ? decision.productAnchorId : null,
+            sceneRootAssetId: selectedHistorySceneRootAssetId(baseline) || baseline.id,
+            currentSceneBaselineId: baseline.id,
+            sceneReferenceIds,
+            parentResultId,
+            startsNewProductAnchor: false,
+            createsBranch: Boolean(parentResultId),
+        });
+    }
+
+    if (decision.productAnchorId) {
+        return resolvedSources({
+            productAnchorId: decision.productAnchorId,
+            sceneReferenceIds,
+            parentResultId,
+            startsNewProductAnchor: !parentResultId,
+            createsBranch: Boolean(parentResultId),
+        });
+    }
+
+    return unresolvedSources("missing_product_anchor", sceneReferenceIds);
 }
 
 export function ecommerceProductAnchorIdFromRun(run: Pick<AgentRun, "ecommerceSnapshot">): string | undefined {
@@ -159,7 +220,13 @@ function referenceRole(hint: EcommerceReferenceVisualHint | undefined): Ecommerc
 
 function selectedHistoryProductAnchorId(asset: CreativeAsset) {
     const continuity = isRecord(asset.metadata.ecommerceContinuity) ? asset.metadata.ecommerceContinuity : undefined;
+    if (continuity?.productAnchorId === null || normalizedId(continuity?.sceneRootAssetId)) return normalizedId(continuity?.productAnchorId);
     return normalizedId(continuity?.productAnchorId) || normalizedId(asset.parentAssetId);
+}
+
+function selectedHistorySceneRootAssetId(asset: CreativeAsset) {
+    const continuity = isRecord(asset.metadata.ecommerceContinuity) ? asset.metadata.ecommerceContinuity : undefined;
+    return normalizedId(continuity?.sceneRootAssetId);
 }
 
 function unresolvedDecision(status: "needs_clarification" | "rejected", reason: EcommerceReferenceAmbiguity, roles: ReferenceRoleDecision["roles"] = []): ReferenceRoleDecision {
@@ -177,6 +244,7 @@ function resolvedSources(input: Partial<EcommerceSources> & Pick<EcommerceSource
     return {
         status: "resolved",
         productAnchorId: input.productAnchorId,
+        sceneRootAssetId: input.sceneRootAssetId || null,
         currentSceneBaselineId: input.currentSceneBaselineId || null,
         sceneReferenceIds: input.sceneReferenceIds || [],
         parentResultId: input.parentResultId || null,
@@ -191,6 +259,7 @@ function unresolvedSources(reason: EcommerceReferenceAmbiguity, sceneReferenceId
     return {
         status: "needs_clarification",
         productAnchorId: null,
+        sceneRootAssetId: null,
         currentSceneBaselineId: null,
         sceneReferenceIds,
         parentResultId: null,

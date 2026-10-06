@@ -22,6 +22,8 @@ import { registerGenerationTaskAssetsForUser } from "@/lib/server/creative-runti
 import { createSignedReferenceAssetUrl, signReferenceAssetInputUrl } from "@/lib/server/reference-asset-access";
 import { assertCapabilityConstraints } from "@/lib/server/capability-constraints";
 import { GenerationSubmissionSafeFailure } from "@/lib/server/generation-submission-error";
+import { ecommerceCanvasSize } from "@/lib/server/ecommerce-edit-plan";
+import { EcommerceCanvasAdapterReview, recordEcommerceCanvasRequest, resolveCanvasRequestSize } from "./image-task-size";
 
 import { runNativeSub2ApiImageSubmission } from "./image-task-memory";
 import {
@@ -134,14 +136,14 @@ export async function runOpenAiImageTask(task: ImageTask, origin: string, public
     assertStrictProductProviderTask(task, "openai");
     const config = task.config;
     const quality = normalizeQuality(config.quality || "");
-    const requestSize = resolveRequestSize(quality, config.size || "auto");
+    const requestSize = resolveCanvasRequestSize(task, quality);
     const globalPreset = globalAiOpcImagePreset(config);
     if (globalPreset) return runGlobalAiOpcImageTask(task, origin, publicOrigin, cookie, quality, requestSize, singleStep);
     const path = await openAiImageTaskPath(config, task.kind);
     const url = taskUrl(config, path, origin);
     const headers = taskHeaders(config, cookie, imagePointsIdempotencyKey(task));
     const responseFormat = await preferredImageResponseFormat(config);
-    const allowProtocolFallback = !task.productProtection && allowsImageProtocolFallback(config);
+    const allowProtocolFallback = !task.productProtection && !task.sceneProtection && !task.ecommerceExecution?.canvas && allowsImageProtocolFallback(config);
     const useJsonImageEdit = task.kind === "edit" && (await shouldUseJsonImageEdit(config));
     if (useJsonImageEdit) return runOpenAiJsonImageEditTask(task, url, origin, publicOrigin, quality, requestSize, cookie, responseFormat, singleStep);
     let response: Response;
@@ -153,6 +155,7 @@ export async function runOpenAiImageTask(task: ImageTask, origin: string, public
         } catch (error) {
             throw new GenerationSubmissionSafeFailure(error instanceof Error ? error.message : "参考图读取失败，请重新上传参考图");
         }
+        await recordEcommerceCanvasRequest(task, { size: String(formData.get("size") || "") }, "OpenAI multipart");
         response = await imageSubmissionFetch(config, url, { method: "POST", headers, body: formData, cache: "no-store" });
         if (!response.ok) {
             const message = await readFetchError(response, "图片生成失败");
@@ -162,6 +165,7 @@ export async function runOpenAiImageTask(task: ImageTask, origin: string, public
             throw imageSubmissionResponseError(response.status, message);
         }
     } else {
+        await recordEcommerceCanvasRequest(task, { size: requestSize }, "OpenAI JSON");
         headers.set("content-type", "application/json");
         response = await imageSubmissionFetch(config, url, {
             method: "POST",
@@ -205,22 +209,24 @@ async function runGlobalAiOpcImageTask(task: ImageTask, origin: string, publicOr
     headers.set("content-type", "application/json");
     const referenceContext = { ownerUserId: task.userId, taskId: task.id };
     const imageUrls = (await Promise.all(task.references.map((reference) => publicImageReferenceRequestUrl(reference, origin, publicOrigin, referenceContext)))).filter(Boolean);
-    const ratio = imageRequestAspectRatio(config.size || "");
+    const ratio = task.ecommerceExecution?.canvas ? ecommerceCanvasSize({ ...task.ecommerceExecution.canvas, mode: "ratio" }) : imageRequestAspectRatio(config.size || "");
+    const body: Record<string, unknown> = {
+        ...buildGlobalAiOpcImageRequest(preset, {
+            model: config.model,
+            prompt: withSystemPrompt(config, withImageOutputInstructions(config, buildImageReferencePromptText(task.prompt, task.references))),
+            quality,
+            size: requestSize,
+            ratio,
+            resolution: quality === "high" ? "4k" : quality === "medium" ? "2k" : quality === "low" ? "1k" : undefined,
+            imageUrls,
+        }),
+        ...(config.outputBackground === "transparent" ? { background: "transparent", output_format: IMAGE_OUTPUT_FORMAT } : {}),
+    };
+    await recordEcommerceCanvasRequest(task, { size: body.size as string | undefined, aspectRatio: body.ratio as string | undefined }, "GlobalAiOpc");
     const response = await imageSubmissionFetch(config, url, {
         method: "POST",
         headers,
-        body: JSON.stringify({
-            ...buildGlobalAiOpcImageRequest(preset, {
-                model: config.model,
-                prompt: withSystemPrompt(config, withImageOutputInstructions(config, buildImageReferencePromptText(task.prompt, task.references))),
-                quality,
-                size: requestSize,
-                ratio,
-                resolution: quality === "high" ? "4k" : quality === "medium" ? "2k" : quality === "low" ? "1k" : undefined,
-                imageUrls,
-            }),
-            ...(config.outputBackground === "transparent" ? { background: "transparent", output_format: IMAGE_OUTPUT_FORMAT } : {}),
-        }),
+        body: JSON.stringify(body),
         cache: "no-store",
     });
     if (!response.ok) throw imageSubmissionResponseError(response.status, await readFetchError(response, "图片生成失败"));
@@ -262,11 +268,12 @@ async function runOpenAiJsonImageEditTaskUnlocked(
     const apiBase = await resolveConfiguredApiBaseUrl(task.config.baseUrl).catch(() => task.config.baseUrl);
     const referenceMode = configuredImageEditReferenceMode(config);
     const imageUrlObjectOnlyMode = shouldUseSub2ApiImageEdit(config, apiBase);
-    const allowProtocolFallback = allowsImageProtocolFallback(config);
+    const allowProtocolFallback = !task.sceneProtection && !task.ecommerceExecution?.canvas && allowsImageProtocolFallback(config);
     const publicUrlReferenceMode = imageUrlObjectOnlyMode || referenceMode === "public-url";
     for (const [index, body] of (await buildJsonImageEditBodies(task, quality, requestSize, responseFormat, origin, publicOrigin, cookie, publicUrlReferenceMode, imageUrlObjectOnlyMode, allowProtocolFallback)).entries()) {
         const headers = taskHeaders(config, cookie, imagePointsIdempotencyKey(task, index === 0 ? billingVariant : `${billingVariant}-${index + 1}`));
         headers.set("content-type", "application/json");
+        await recordEcommerceCanvasRequest(task, { size: body.size as string | undefined }, "OpenAI JSON edit");
         const response = await imageSubmissionFetch(config, url, { method: "POST", headers, body: JSON.stringify(body), cache: "no-store" });
         if (!response.ok) {
             const message = await readFetchError(response, "图片生成失败");
@@ -299,10 +306,10 @@ async function runOpenAiJsonImageEditTaskUnlocked(
 export async function runOpenAiImageTaskWithBase64Response(task: ImageTask, origin: string, publicOrigin: string, cookie: string, singleStep = false, billingVariant = "base64"): Promise<ImageTaskRunResult> {
     const config = task.config;
     const quality = normalizeQuality(config.quality || "");
-    const requestSize = resolveRequestSize(quality, config.size || "auto");
+    const requestSize = resolveCanvasRequestSize(task, quality);
     const path = await openAiImageTaskPath(config, task.kind);
     const url = taskUrl(config, path, origin);
-    const allowProtocolFallback = allowsImageProtocolFallback(config);
+    const allowProtocolFallback = !task.sceneProtection && !task.ecommerceExecution?.canvas && allowsImageProtocolFallback(config);
     const headers = taskHeaders(config, cookie, imagePointsIdempotencyKey(task, billingVariant));
 
     if (task.kind === "edit") {
@@ -312,6 +319,7 @@ export async function runOpenAiImageTaskWithBase64Response(task: ImageTask, orig
         } catch (error) {
             throw new GenerationSubmissionSafeFailure(error instanceof Error ? error.message : "参考图读取失败，请重新上传参考图");
         }
+        await recordEcommerceCanvasRequest(task, { size: String(formData.get("size") || "") }, "OpenAI multipart");
         const response = await imageSubmissionFetch(config, url, { method: "POST", headers, body: formData, cache: "no-store" });
         if (!response.ok) {
             const message = await readFetchError(response, "图片生成失败");
@@ -325,6 +333,7 @@ export async function runOpenAiImageTaskWithBase64Response(task: ImageTask, orig
     }
 
     headers.set("content-type", "application/json");
+    await recordEcommerceCanvasRequest(task, { size: requestSize }, "OpenAI JSON");
     const response = await imageSubmissionFetch(config, url, {
         method: "POST",
         headers,
@@ -350,6 +359,7 @@ export async function runOpenAiImageTaskWithBase64Response(task: ImageTask, orig
 }
 
 export async function runOpenAiResponsesImageTask(task: ImageTask, origin: string, cookie: string, singleStep = false, billingVariant = "responses"): Promise<ImageTaskRunResult> {
+    if (task.ecommerceExecution?.canvas) throw new EcommerceCanvasAdapterReview("OpenAI Responses");
     const config = task.config;
     const url = taskUrl(config, "/responses", origin);
     let lastError = "";

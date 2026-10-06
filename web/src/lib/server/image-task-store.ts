@@ -6,9 +6,10 @@ import type { GenerationAttempt } from "@/lib/server/generation-attempt";
 import type { GenerationLogSource } from "@/lib/server/generation-log-store";
 import { countActiveStoredGenerationTasks, createStoredGenerationTask, getStoredGenerationTask, mutateStoredGenerationTask, touchStoredGenerationTask, transitionStoredGenerationTask, type GenerationTaskContext } from "@/lib/server/generation-task-store";
 import { GENERATION_TASK_RETENTION_MS } from "@/lib/server/generation-task-retention";
-import type { ProductProtectionSnapshot } from "@/lib/server/ecommerce-product-regions";
+import type { ProductProtectionSnapshot, SceneEditProtection, SceneEditProtectionEvidence } from "@/lib/server/ecommerce-product-regions";
 import type { EcommerceCompiledImageRequest } from "@/lib/server/ecommerce-image-compiler";
 import type { EcommerceGenerationTrace } from "@/lib/server/ecommerce-generation-trace";
+import type { EcommerceCanvasMediaEvidence, EcommerceCanvasProviderRequest, EcommerceDimensions } from "@/lib/server/ecommerce-edit-plan";
 
 type ImageTaskKind = "generation" | "edit";
 type ImageTaskStatus = "pending" | "running" | "success" | "error" | "cancelled";
@@ -45,6 +46,7 @@ export type ImageTaskReference = {
 };
 
 export type StoredImageTaskMediaResult = {
+    resultId?: string;
     dataUrl: string;
     remoteUrl?: string;
     serverUrl?: string;
@@ -52,6 +54,20 @@ export type StoredImageTaskMediaResult = {
     height?: number;
     bytes?: number;
     mimeType?: string;
+    canvasEvidence?: EcommerceCanvasMediaEvidence;
+    sceneProtectionEvidence?: SceneEditProtectionEvidence;
+};
+
+export type ImageTaskResultEvidence = {
+    resultId: string;
+    resultIndex: number;
+    nativeStatus: "readable" | "unavailable";
+    nativeSize?: EcommerceDimensions;
+    storageStatus: "stored" | "unavailable";
+    storedSize?: EcommerceDimensions;
+    storedUrl?: string;
+    failureStage?: "read" | "decode" | "validation" | "store";
+    failureReason?: string;
 };
 
 export type ImageTask = GenerationTaskContext & {
@@ -70,9 +86,11 @@ export type ImageTask = GenerationTaskContext & {
     references: ImageTaskReference[];
     mask?: ImageTaskReference;
     productProtection?: ProductProtectionSnapshot;
+    sceneProtection?: SceneEditProtection;
     ecommerceExecution?: EcommerceCompiledImageRequest;
     ecommerceTrace?: EcommerceGenerationTrace;
-    result?: StoredImageTaskMediaResult & { results?: StoredImageTaskMediaResult[] };
+    ecommerceCanvasRequest?: EcommerceCanvasProviderRequest;
+    result?: StoredImageTaskMediaResult & { results?: StoredImageTaskMediaResult[]; batchEvidence?: ImageTaskResultEvidence[] };
     upstream?: { id: string; mediaBaseUrl: string; pollBaseUrl: string; explicitPollUrl?: string };
     billing?: { pointsCost: number; pointsRecordId?: string; refunded: boolean };
     error?: string;
@@ -93,7 +111,7 @@ export async function createImageTask(input: Omit<ImageTask, "id" | "status" | "
         createdAt: now,
         updatedAt: now,
     };
-    return createStoredGenerationTask("image", task, GENERATION_TASK_RETENTION_MS);
+    return createStoredGenerationTask("image", task, GENERATION_TASK_RETENTION_MS, { referenceDispatch: input.referenceDispatch });
 }
 
 export async function getImageTask(id: string) {
@@ -117,6 +135,6 @@ export function touchImageTask(id: string) {
     return touchStoredGenerationTask("image", id, Date.now(), GENERATION_TASK_RETENTION_MS);
 }
 
-export async function updateImageTask(id: string, patch: Partial<Pick<ImageTask, "config" | "candidateConfigs" | "attempts" | "attemptNo" | "upstream" | "billing" | "result" | "retryable" | "ecommerceTrace">>) {
+export async function updateImageTask(id: string, patch: Partial<Pick<ImageTask, "config" | "candidateConfigs" | "attempts" | "attemptNo" | "upstream" | "billing" | "result" | "retryable" | "ecommerceTrace" | "ecommerceCanvasRequest">>) {
     return mutateStoredGenerationTask<ImageTask>("image", id, GENERATION_TASK_RETENTION_MS, (task) => ({ ...task, ...patch }));
 }

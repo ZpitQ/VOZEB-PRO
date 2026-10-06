@@ -9,6 +9,7 @@ export type ChannelWorkspaceSettings = {
     logicalModels: import("@/lib/auth/store").LogicalModel[];
     defaultModels: SystemDefaultModels;
     ecommerceGenerationEnabled?: boolean;
+    ecommerceVisualQualityCheckEnabled?: boolean;
     ecommerceModelRoles?: EcommerceModelRoles;
 };
 
@@ -46,6 +47,7 @@ export function removeChannelFromWorkspace(settings: ChannelWorkspaceSettings, c
         logicalModels,
         defaultModels: Object.fromEntries(Object.entries(settings.defaultModels).map(([key, value]) => [key, liveIds.has(value) ? value : ""])) as SystemDefaultModels,
         ...(settings.ecommerceGenerationEnabled !== undefined ? { ecommerceGenerationEnabled: settings.ecommerceGenerationEnabled } : {}),
+        ...(settings.ecommerceVisualQualityCheckEnabled !== undefined ? { ecommerceVisualQualityCheckEnabled: settings.ecommerceVisualQualityCheckEnabled } : {}),
         ...(settings.ecommerceModelRoles ? { ecommerceModelRoles: normalizeEcommerceModelRoles(settings.ecommerceModelRoles, logicalModels) } : {}),
     };
 }

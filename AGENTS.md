@@ -4,6 +4,7 @@
 
 ## 基本原则
 
+- 本项目以桌面端为开发与验收目标；后续功能按桌面交互实施，不新增手机端专用布局或适配分支。本文既有手机端与窄屏条款不再作为默认开发或验收要求；仅在用户另行要求时执行。
 - 先读现有代码，再动手修改，优先沿用项目已有结构和写法。
 - 用户用截图指出界面问题后，先固定问题结论、目标状态和验收条件；同一截图默认只查看一次，后续基于源码与浏览器结果推进。只有修复结果与目标不符或用户提供新截图时才重新查看，禁止在没有新证据时反复看图并重复做同类局部调整。
 - 继续或恢复已有任务时，必须先核对任务清单、当前差异和已有测试/浏览器证据；已标记完成且后续修改未使证据失效的步骤不得重复执行或重复汇报。只有相关代码再次变化、原证据不完整或用户明确要求复测时才允许重跑，并说明触发原因。
@@ -12,7 +13,7 @@
 - 不要为了“兼容更多场景”写大量分支，只实现当前明确需要的功能。
 - 禁止用新增固定延时、轮询次数、重试次数、输出上限或其他拍脑袋常数掩盖状态与性能缺陷。限制只能来自供应商公开约束、管理员配置或项目已有且有测试依据的资源保护契约；没有依据时保持上游与现有配置语义，不自行降级性能。
 - 项目尚未上线，不需要兼容旧数据；表结构或字段调整时直接按新设计修改，不写旧字段兼容、数据迁移兜底或删除旧表的清理逻辑，除非用户明确要求。
-- 每次写完代码必须运行与改动相关的测试和类型检查；任务收尾按“Mandatory Testing”执行全量质量门禁与浏览器回归。
+- 每次写完代码运行受影响模块的测试、类型检查与桌面浏览器回归；只有共享契约变化、相关证据失效或未解决失败时才扩大测试范围。任务收尾按“Mandatory Testing”核对实际覆盖与剩余限制。
 - 不要改无关文件，不要顺手重构。
 - 如果工作区已有用户改动，不要回滚，不要覆盖；只在必要范围内追加修改。
 - 含中文的源码、配置、脚本和文档统一保存为 UTF-8；PowerShell 读取时显式使用 `-Encoding UTF8`。发布验收必须严格解码文本文件，并检查 `U+FFFD`（替换字符）、`U+951F/U+65A4/U+62F7` 等常见乱码组合，不能把终端显示异常直接当成文件损坏。
@@ -22,6 +23,9 @@
 - 如果开发过程中总是遇到某个问题，或者用户反复提醒同一个注意事项，需要把该注意事项补充到本文件。
 - 补充时写成明确、可执行的规则，避免只写模糊描述。
 - 新规则应放到最相关的章节；找不到合适章节时放到“项目注意事项”。
+- 用户限制子代理模型时，所有后续代理必须继承当前主会话模型；不得指定其他模型或重新唤醒先前使用其他模型的代理。
+- 用户要求持续记录记忆时，在根因确认、契约边界决定、固定修复、独立复审、真实验收和部署里程碑及时记录事实、证据与未完成项。明确区分会话后台提取、私有笔记落盘和服务端写入确认，没有回执不得宣称已经入库，记录不得包含密钥。
+- 公开代码、文档、提交说明与 PR 禁止新增真实部署地址、服务器目录、数据库名称、账号、凭据或用户/会话身份；环境与原始业务证据仅留私有记录，公开交付用稳定案例标识和技术结论。
 
 ## 后端规范
 
@@ -36,10 +40,11 @@
 - 业务接口保持 `{ code, data, msg }` 的响应结构。
 - 管理员后台的支付、用户、系统设置、模型渠道与密钥、对象存储和业务备份操作统一使用当前管理员 Session、显式职责权限与脱敏审计，不得再次要求当前密码或 TOTP。可选 TOTP 只用于管理员登录挑战和本人 MFA 启用/关闭；本人修改密码、注销申请等用户自证操作继续按各自契约验证当前密码。
 - 管理员设置页面和 `/api/admin/settings` 的 GET/PATCH 合并读取必须绕过进程内短缓存并刷新当前模块缓存；短缓存只用于不要求读后写一致性的普通运行时读取。保存或删除回归必须覆盖操作后立即可见、服务端已持久化、页面刷新和 API 再读取四个状态，禁止等待缓存自然过期。
-- 新增数据表时同步更新 `docs/backend-database.md`。
+- 新增数据表或持久化字段时同步更新 `docs/content/docs/backend/backend-database.mdx`。
 - 上游生成任务接口版本与模型目录是独立契约：只有供应商公开并验证过的目录路径才能加入协议注册表或由管理员显式配置；没有目录时只能使用官方文档明确列出的模型预置或手动模型 ID，禁止根据 V2 任务路径猜测 `/v1/models` 或未确认的 V2 目录。
 - 自定义协议必须从用户提供的任意上游接口文档地址提取真实目录、创建、查询、取消、请求体和结果字段，禁止写死案例域名、案例路径或依赖当前页面作为回退。涉及协议解析、系统代理或生成入口的改动，必须使用本地自建上游 fixture 逐项验证统一创作、图片、视频、音频、Canvas 和短剧实际支持的全部协议请求与返回；不能只做解析器单测或依赖外部供应商环境。
-- 生成任务的 `needs_review` / `submission_outcome_unknown` 表示上游提交结果未知，不等同于参考素材无效。服务端必须按执行阶段与上游状态统一解析公开原因，不能把基础设施脱敏文案误当成任务状态；Canvas 等已持久化节点只显示一次可操作说明，不得再叠加相同全局 Toast。
+- 上游提交未知类别的 `needs_review` / `submission_outcome_unknown` 不等同于参考素材无效；参考或技术复核按实际阶段原因解释。服务端必须按执行阶段与上游状态统一解析公开原因，不能把基础设施脱敏文案误当成任务状态；Canvas 等已持久化节点只显示一次可操作说明，不得再叠加相同全局 Toast。
+- 电商图片技术检查通过后即交付；LLM 视觉质检默认关闭，开启时由既有持久队列提供建议，不得隐藏、撤回已交付结果或成为连续编辑必需条件。每轮冻结策略；关闭无模型调用、不伪造 passed。解码、真实尺寸、蒙版保护、落盘、归属与父链检查保留。模型报告不是图像事实，用途确认不代表结构数量确认。
 - 已保存上游任务 ID 的 `needs_review` 不得只依赖管理员处理。用户“检查状态”必须对同一个上游任务执行一次查询，并在结果已返回时继续落盘；上游仍在处理或本地保存暂时失败时回到可再次检查状态，禁止重建任务、重复计费或重新开启无限自动轮询。
 - 系统渠道代理返回的 `x-vozeb-pro-upstream-url` 只用于解析上游媒体相对地址，不得覆盖任务的 `pollBaseUrl`；异步创建与恢复轮询必须继续使用原站内 `/api/ai/system/{channelId}` 基址，确保鉴权、任务归属和渠道协议映射仍经过系统代理。
 
@@ -198,8 +203,8 @@
 
 ## Mandatory Testing
 
-- After every code change, run the relevant automated checks and browser regression flow before reporting completion.
+- After every code change, run relevant automated checks and affected desktop browser flows before reporting completion. Reuse unchanged evidence and broaden coverage only for shared changes or unresolved failures.
 - 协议回归默认必须使用仓库内本地 TCP fixture、每次运行确认空闲的随机端口和固定测试凭据，禁止读取或调用管理员后台已配置的真实渠道/API；只有用户明确要求真实上游验收时才允许调用，并必须单独报告测试范围。
-- Cover desktop and mobile layouts, canvas interactions including node actions and linking, image workbench generation/history/reference-image flows, video workbench text-to-video and image-to-video flows, all visible buttons touched by the change, and configured API capability checks for text/image/video.
+- Cover affected desktop workflows, visible actions and actual provider contracts. Run Playwright with `--project=chromium`; mobile projects are outside the default acceptance scope. Do not repeat unrelated workbench, Canvas or media matrices for an isolated change.
 - For live upstream API tests that include Chinese prompts, do not put Chinese literals directly in PowerShell commands. Use the app flow, Node/fetch with UTF-8 text loaded from a file, or base64/Unicode reconstruction before sending so the upstream prompt is not submitted as question marks.
 - If the full live API/browser matrix cannot be completed, report the exact gap and why.

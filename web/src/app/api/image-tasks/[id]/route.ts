@@ -3,7 +3,7 @@ import { after, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/session";
 import { readJsonBodyResult } from "@/lib/auth/request";
 import { requestPublicOrigin } from "@/app/api/image-tasks/image-task-reference-urls";
-import { getImageTask, transitionImageTask } from "@/lib/server/image-task-store";
+import { getImageTask, transitionImageTask, type ImageTask } from "@/lib/server/image-task-store";
 import { runGenerationTaskRecoveryBatch } from "@/lib/server/generation-task-recovery-service";
 import { resolveInternalOrigin } from "@/lib/server/internal-origin";
 import { pointsResponseHeaders } from "@/lib/server/points-response";
@@ -12,6 +12,7 @@ import { cancellationExecutionPatch, type GenerationCancellationTarget } from "@
 import { refundImageTask } from "@/lib/server/image-task-refund";
 import { getStoredGenerationTaskRecord } from "@/lib/server/generation-task-store";
 import { recoverGenerationTaskFromUpstream } from "@/lib/server/generation-task-user-recovery";
+import { canRecoverUnsubmittedImageReference, scheduleGenerationTask } from "@/lib/server/generation-task-scheduler";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,7 +48,7 @@ export async function GET(request: Request, context: RouteContext) {
                 kind: settledTask.kind,
                 status: settledTask.status,
                 model: generationModelId(settledTask.config),
-                result: settledTask.result,
+                result: publicImageResult(settledTask.result),
                 error: settledTask.error,
                 canRetry: settledTask.retryable === true,
                 needsReview: executionPhase === "needs_review",
@@ -73,21 +74,24 @@ export async function POST(request: Request, context: RouteContext) {
 
     const schedule = await getStoredGenerationTaskRecord("image", task.id);
     const upstreamTaskId = task.upstream?.id || schedule?.upstreamTaskId;
-    if (!upstreamTaskId) return NextResponse.json({ error: "原任务没有保存上游任务 ID，无法安全追回结果" }, { status: 409 });
+    const referenceRecovery = !upstreamTaskId && canRecoverUnsubmittedImageReference(schedule);
+    if (!upstreamTaskId && !referenceRecovery) return NextResponse.json({ error: "原任务没有保存上游任务 ID，无法安全追回结果" }, { status: 409 });
 
-    const rearmed = await recoverGenerationTaskFromUpstream({
-        type: "image",
-        id: task.id,
-        upstreamTaskId,
-        channelId: task.config.channelId,
-        provider: task.config.advancedConfig?.protocol || task.config.apiFormat,
-        queryPath: task.upstream?.explicitPollUrl || schedule?.queryPath || task.config.advancedConfig?.queryPath,
-        submittedAt: schedule?.submittedAt || task.createdAt,
-        origin: resolveInternalOrigin(new URL(request.url).origin),
-        publicOrigin: requestPublicOrigin(request),
-        cookie: request.headers.get("cookie") || "",
-    });
+    const recoveryContext = { origin: resolveInternalOrigin(new URL(request.url).origin), publicOrigin: requestPublicOrigin(request), cookie: request.headers.get("cookie") || "" };
+    const rearmed = upstreamTaskId
+        ? await recoverGenerationTaskFromUpstream({
+              type: "image",
+              id: task.id,
+              upstreamTaskId,
+              channelId: task.config.channelId,
+              provider: task.config.advancedConfig?.protocol || task.config.apiFormat,
+              queryPath: task.upstream?.explicitPollUrl || schedule?.queryPath || task.config.advancedConfig?.queryPath,
+              submittedAt: schedule?.submittedAt || task.createdAt,
+              ...recoveryContext,
+          })
+        : await scheduleGenerationTask("image", task.id, { executionPhase: "created", nextPollAt: Date.now(), lastUpstreamStatus: "reference_recovery_requested" }, { unsubmittedReferenceRecovery: true });
     if (!rearmed) return NextResponse.json({ error: "图片任务状态已变化，请刷新后重试" }, { status: 409 });
+    if (!upstreamTaskId) await runGenerationTaskRecoveryBatch({ ...recoveryContext, limit: 1, taskIds: [task.id], userRequested: true });
     const latest = await getImageTask(task.id);
     const latestSchedule = await getStoredGenerationTaskRecord("image", task.id);
     if (!latest) return NextResponse.json({ error: "图片任务不存在或已过期" }, { status: 404 });
@@ -99,7 +103,7 @@ export async function POST(request: Request, context: RouteContext) {
                 kind: latest.kind,
                 status: latest.status,
                 model: generationModelId(latest.config),
-                result: latest.result,
+                result: publicImageResult(latest.result),
                 error: latest.error,
                 canRetry: latest.retryable === true,
                 needsReview: latestSchedule?.executionPhase === "needs_review",
@@ -121,7 +125,7 @@ function publicTask(task: NonNullable<Awaited<ReturnType<typeof getImageTask>>>)
         kind: task.kind,
         status: task.status,
         model: generationModelId(task.config),
-        result: task.result,
+        result: publicImageResult(task.result),
         error: task.error,
         canRetry: task.retryable === true,
     };
@@ -151,5 +155,22 @@ export async function PATCH(request: Request, context: RouteContext) {
     const origin = resolveInternalOrigin(new URL(request.url).origin);
     after(() => runGenerationTaskRecoveryBatch({ origin, publicOrigin: requestPublicOrigin(request), limit: 1, taskIds: [task.id] }));
     const refreshedUser = await getCurrentUser(request);
-    return NextResponse.json({ task: { id: cancelled.id, kind: cancelled.kind, status: cancelled.status, model: generationModelId(cancelled.config), result: cancelled.result, error: cancelled.error } }, { headers: pointsResponseHeaders(refreshedUser) });
+    return NextResponse.json(
+        { task: { id: cancelled.id, kind: cancelled.kind, status: cancelled.status, model: generationModelId(cancelled.config), result: publicImageResult(cancelled.result), error: cancelled.error } },
+        { headers: pointsResponseHeaders(refreshedUser) },
+    );
+}
+
+function publicImageResult(result: ImageTask["result"]): ImageTask["result"] {
+    if (!result) return undefined;
+    return {
+        dataUrl: result.dataUrl,
+        remoteUrl: result.remoteUrl,
+        serverUrl: result.serverUrl,
+        width: result.width,
+        height: result.height,
+        bytes: result.bytes,
+        mimeType: result.mimeType,
+        ...(result.results ? { results: result.results.map((media) => publicImageResult(media)!) } : {}),
+    };
 }

@@ -1,8 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import { once } from "node:events";
 
 import type { SystemChannelAdvancedConfig, SystemModelChannel } from "@/lib/auth/store";
 import { fetchInternalApi } from "@/lib/server/internal-origin";
+import { SYSTEM_PROXY_JSON_BODY_MAX_BYTES } from "./system-proxy-request-limits";
 import { getTextPlanningRuntime, isStructuredTextFailure, rankTextPlanningCandidates, requestStructuredText, resetTextPlanningRuntime, type TextPlanningCandidate } from "./text-planning-runtime";
+import { authorizedWorkerUserId, maintenanceWorkerContext } from "./maintenance-auth";
 
 vi.mock("@/lib/server/internal-origin", () => ({ fetchInternalApi: vi.fn() }));
 vi.mock("@/lib/server/channel-runtime-health", () => ({ recordChannelRuntimeFailure: vi.fn(), recordChannelRuntimeSuccess: vi.fn() }));
@@ -11,6 +15,50 @@ const mockedFetch = vi.mocked(fetchInternalApi);
 const tool = { name: "make_plan", description: "创建计划", parameters: { type: "object", properties: { result: { type: "string" } } } };
 
 describe("text planning runtime protocol matrix", () => {
+    it.each(["worker", "cookie"] as const)("requests protected structured text with %s credentials", async (credentialKind) => {
+        const server = createServer((request, response) => {
+            request.resume();
+            const worker = authorizedWorkerUserId(new Request("http://127.0.0.1", { headers: { authorization: request.headers.authorization || "", "x-vozeb-pro-worker-user-id": String(request.headers["x-vozeb-pro-worker-user-id"] || "") } }));
+            if (worker !== "worker-user" && request.headers.cookie !== "session=test") {
+                response.writeHead(401).end();
+                return;
+            }
+            response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [{ message: { tool_calls: [{ type: "function", function: { name: tool.name, arguments: '{"result":"ok"}' } }] } }] }));
+        });
+        server.listen(0, "127.0.0.1");
+        await once(server, "listening");
+        vi.stubEnv("VOZEB_PRO_WORKER_TOKEN", "structured-worker-test-token-32-characters");
+        vi.stubEnv("VOZEB_PRO_MAINTENANCE_TOKEN", "structured-maintenance-test-token-32-characters");
+        try {
+            const address = server.address();
+            if (!address || typeof address === "string") throw new Error("Structured text fixture is unavailable");
+            const actual = await vi.importActual<typeof import("./internal-origin")>("./internal-origin");
+            mockedFetch.mockImplementation(actual.fetchInternalApi);
+            const input = requestInput(candidate("newapi"));
+            const result = await requestStructuredText({ ...input, origin: `http://127.0.0.1:${address.port}`, cookie: credentialKind === "worker" ? maintenanceWorkerContext("worker-user") : input.cookie, preferNativeTools: true, allowRepair: false });
+            expect(JSON.parse(result.arguments)).toEqual({ result: "ok" });
+            expect(mockedFetch).toHaveBeenCalledOnce();
+        } finally {
+            mockedFetch.mockReset();
+            vi.unstubAllEnvs();
+            server.closeAllConnections();
+            await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+        }
+    });
+
+    it("measures the exact serialized multimodal body and stops oversized aggregate requests before transport", async () => {
+        const measured = vi.fn();
+        mockedFetch.mockResolvedValue(chatJsonResponse());
+        await requestStructuredText({ ...requestInput(candidate("newapi")), messages: multimodalMessages(), requestBodyBudget: { maxBytes: SYSTEM_PROXY_JSON_BODY_MAX_BYTES, onMeasured: measured } });
+        expect(measured).toHaveBeenCalledWith({ protocol: "chat", bodyBytes: Buffer.byteLength(String(mockedFetch.mock.calls[0][1]?.body), "utf8"), maxBytes: SYSTEM_PROXY_JSON_BODY_MAX_BYTES });
+        mockedFetch.mockClear();
+        const image = "data:image/png;base64," + "a".repeat((4 * 1024 * 1024 * 4) / 3);
+        const imageCount = Math.ceil(SYSTEM_PROXY_JSON_BODY_MAX_BYTES / Buffer.byteLength(image)) + 1;
+        const messages = [{ role: "user", content: Array.from({ length: imageCount }, () => ({ type: "image_url" as const, image_url: { url: image } })) }];
+        await expect(requestStructuredText({ ...requestInput(candidate("newapi")), messages, requestBodyBudget: { maxBytes: SYSTEM_PROXY_JSON_BODY_MAX_BYTES, onMeasured: measured } })).rejects.toThrow("正文超过");
+        expect(mockedFetch).not.toHaveBeenCalled();
+        expect(getTextPlanningRuntime(candidate("newapi"))?.failureCount).toBe(0);
+    });
     beforeEach(() => {
         resetTextPlanningRuntime();
         mockedFetch.mockReset();

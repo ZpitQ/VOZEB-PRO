@@ -89,6 +89,7 @@ export function e2eSettingsPatch() {
         logicalModels: ecommerceLogicalModels,
         defaultModels: { textModel: "e2e-text", imageModel: "e2e-image", videoModel: "e2e-video", audioModel: "e2e-audio" },
         ecommerceGenerationEnabled: true,
+        ecommerceVisualQualityCheckEnabled: false,
         ecommerceModelRoles: {
             vision_analysis: ["e2e-ecommerce-vision"],
             edit_planning: ["e2e-ecommerce-planner"],

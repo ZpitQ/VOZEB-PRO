@@ -19,6 +19,8 @@ import { createImageTask, getImageTask, touchImageTask, transitionImageTask, typ
 import { isGenerationSource, recordGenerationLog } from "@/lib/server/generation-log-store";
 import { writeReferenceImageDataUrl } from "@/lib/server/reference-asset-store";
 import { assertEcommerceImageExecutionSnapshot, EcommerceImageTaskPreparationError, prepareEcommerceImageTask, schedulePreparedImageTask } from "@/lib/server/ecommerce-image-task-orchestration";
+import { ecommerceCanvasSize } from "@/lib/server/ecommerce-edit-plan";
+import { getAgentRun } from "@/lib/server/agent-run-store";
 import { resolveImageTaskOptions } from "@/lib/server/image-task-config";
 import { generationCapacityRetryAfterSeconds, getStoredGenerationTaskByRequest, linkStoredGenerationTask, withGenerationConcurrencyLimit, type GenerationTaskContext } from "@/lib/server/generation-task-store";
 import { verifyCanvasImageLayerGrant } from "@/lib/server/canvas-image-layer-grant";
@@ -26,6 +28,7 @@ import { registerGenerationTaskAssetsForUser } from "@/lib/server/creative-runti
 import { createSignedReferenceAssetUrl, signReferenceAssetInputUrl } from "@/lib/server/reference-asset-access";
 import { assertCapabilityConstraints } from "@/lib/server/capability-constraints";
 import { checkGenerationRateLimit, rateLimitHeaders } from "@/lib/server/security";
+import { EcommerceReferenceDispatchConflict } from "@/lib/server/ecommerce-reference-dispatch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -165,6 +168,28 @@ export async function POST(request: Request) {
     const settings = await getAuthSettings();
     const createTask = async () => {
         const ecommerceExecution = resolvedBody.ecommerceExecution;
+        if (resolvedBody.sceneProtection) {
+            const run = resolvedBody.context?.runId ? await getAgentRun(resolvedBody.context.runId) : null;
+            const snapshotTask = run?.tasks.find((task) => task.id === resolvedBody.context?.parentTaskId);
+            const prefix = `${run?.clientRequestId}:${snapshotTask?.id}:${snapshotTask?.attempts}:`;
+            const copy = Number(requestId?.startsWith(prefix) ? requestId.slice(prefix.length) : "");
+            if (
+                !run ||
+                run.userId !== currentUser.id ||
+                run.status !== "running" ||
+                run.conversationId !== resolvedBody.context?.conversationId ||
+                snapshotTask?.status !== "running" ||
+                !snapshotTask.sceneProtection ||
+                resolvedBody.context?.attemptNo !== snapshotTask.attempts ||
+                !Number.isSafeInteger(copy) ||
+                copy < 1 ||
+                copy > snapshotTask.count ||
+                requestId !== prefix + copy ||
+                JSON.stringify(snapshotTask.sceneProtection) !== JSON.stringify(resolvedBody.sceneProtection) ||
+                JSON.stringify(snapshotTask.ecommerceExecution) !== JSON.stringify(ecommerceExecution)
+            )
+                return NextResponse.json({ error: "场景保护与任务的已确认快照不匹配" }, { status: 409 });
+        }
         try {
             assertEcommerceImageExecutionSnapshot(settings, ecommerceExecution);
         } catch (error) {
@@ -178,7 +203,8 @@ export async function POST(request: Request) {
         const references = Array.isArray(resolvedBody.references) ? resolvedBody.references.filter((item) => Boolean(item?.dataUrl || item?.url || item?.remoteUrl || item?.serverUrl)) : [];
         const strictRegions = resolvedBody.productProtectionRegions;
         const sourceRatio = kind === "edit" && (resolvedBody.mask || strictRegions) ? closestImageAspectRatio(references[0]?.width, references[0]?.height) : "";
-        const requestConfigs = sourceRatio ? configs.map((config) => ({ ...config, size: sourceRatio })) : configs;
+        const canvasSize = ecommerceExecution?.canvas ? ecommerceCanvasSize(ecommerceExecution.canvas) : "";
+        const requestConfigs = canvasSize || sourceRatio ? configs.map((config) => ({ ...config, size: canvasSize || sourceRatio })) : configs;
         const constrainedConfigs = requestConfigs.filter((config) => {
             try {
                 assertCapabilityConstraints(config.capabilityProfile, {
@@ -213,6 +239,7 @@ export async function POST(request: Request) {
                 references,
                 mask: resolvedBody.mask?.dataUrl || resolvedBody.mask?.url || resolvedBody.mask?.remoteUrl || resolvedBody.mask?.serverUrl ? resolvedBody.mask : undefined,
                 productProtectionRegions: strictRegions,
+                sceneProtection: resolvedBody.sceneProtection,
                 compatibleConfigs,
             });
         } catch (error) {
@@ -236,8 +263,13 @@ export async function POST(request: Request) {
             references,
             mask: prepared.mask,
             productProtection: prepared.productProtection,
+            sceneProtection: prepared.sceneProtection,
             ecommerceExecution,
         });
+        if ("executionPhase" in task && task.executionPhase)
+            return NextResponse.json({
+                task: { ...publicTask(task), executionPhase: task.executionPhase, needsReview: task.executionPhase === "needs_review", reviewReason: task.executionPhase === "needs_review" && "reviewReason" in task ? task.reviewReason : undefined },
+            });
         await linkStoredGenerationTask("image", task.id, resolvedBody.context || {});
         const cookie = request.headers.get("cookie") || "";
         const origin = resolveInternalOrigin(new URL(request.url).origin);
@@ -256,7 +288,13 @@ export async function POST(request: Request) {
 
         return NextResponse.json({ task: publicTask(task) });
     };
-    const response = layerGrant ? await createTask() : await withGenerationConcurrencyLimit(currentUser.id, "image", 10 * 60 * 1000, settings.generationConcurrency.image, createTask, undefined, concurrencyRequestId);
+    let response;
+    try {
+        response = layerGrant ? await createTask() : await withGenerationConcurrencyLimit(currentUser.id, "image", 10 * 60 * 1000, settings.generationConcurrency.image, createTask, undefined, concurrencyRequestId);
+    } catch (error) {
+        if (error instanceof EcommerceReferenceDispatchConflict) return NextResponse.json({ error: error.message }, { status: 409 });
+        throw error;
+    }
     if (response) return response;
     const retryAfter = await generationCapacityRetryAfterSeconds(currentUser.id, "image", 10 * 60 * 1000);
     return NextResponse.json({ error: "当前用户生图任务已达到并发上限，请稍后再试" }, { status: 429, ...(retryAfter ? { headers: { "Retry-After": String(retryAfter) } } : {}) });
