@@ -926,7 +926,8 @@ async function openAiFixtureImage(body, contentType, options) {
     const height = Number(match?.[2]);
     const transparent = requestsTransparentBackground(body, contentType);
     if (!options.imagePath && Number.isSafeInteger(width) && Number.isSafeInteger(height) && width > 0 && height > 0) {
-        return sharp({ create: { width, height, channels: 4, background: transparent ? "#2e7dff00" : "#2e7dff" } })
+        if (transparent) return sharp(Buffer.from(TRANSPARENT_PNG_BASE64, "base64")).resize(width, height, { fit: "fill" }).png().toBuffer();
+        return sharp({ create: { width, height, channels: 4, background: "#2e7dff" } })
             .png()
             .toBuffer();
     }

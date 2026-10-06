@@ -658,7 +658,11 @@ test("canvas opens the Agent rail at the intended width and keeps a fresh chat a
         await expect(mentionPicker.locator("video")).toBeVisible();
         await mentionPicker.getByRole("button", { name: "引用协议引用视频" }).click();
         await expect(agentComposer).toHaveText("222图片1 再参考视频1 ");
-        await agentComposer.fill("");
+        await expect(agentComposer.locator("[data-canvas-agent-reference]")).toHaveCount(2);
+        await agentComposer.press("ControlOrMeta+A");
+        await agentComposer.press("Backspace");
+        await expect(agentComposer).toHaveText("");
+        await expect(agentComposer.locator("[data-canvas-agent-reference]")).toHaveCount(0);
 
         const generationPreferencesTrigger = panel.getByRole("button", { name: /生成参数：/ });
         await expect

@@ -17,7 +17,7 @@ test("object storage CDN settings immediately resolve persisted relative assets 
     const before = await readSettings(request);
     expect(before.hasAccessKeyId, "This test only configures the isolated E2E store").toBe(false);
     expect(before.hasSecretAccessKey).toBe(false);
-    expect(before.cdnBaseUrl).toBe("https://design-img.so-shine.com");
+    expect(before.cdnBaseUrl).toBe("");
     const fixture = await objectStorageFixture();
     const prefix = "cdn-e2e/参考 图";
     const cdnA = `${fixture.cdnOrigin}/cdn-a`;

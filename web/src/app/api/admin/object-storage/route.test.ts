@@ -24,7 +24,7 @@ const settings = {
     region: "auto",
     bucket: "media",
     prefix: "vozeb-pro",
-    cdnBaseUrl: "https://design-img.so-shine.com",
+    cdnBaseUrl: "https://cdn.example.com",
     forcePathStyle: false,
     hasAccessKeyId: true,
     hasSecretAccessKey: true,

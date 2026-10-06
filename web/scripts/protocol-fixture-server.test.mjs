@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import sharp from "sharp";
 
 import { validateImageLayerOutputs } from "../src/lib/server/image-layer-output";
+import { assertTransparentImageOutput } from "../src/lib/server/image-transparent-output";
 import { ecommerceVisualAnalysisTool, ecommerceVisualAnalysisV4Tool, normalizeEcommerceVisualAnalysis } from "../src/lib/server/ecommerce-visual-analysis";
 import { ecommerceEditPlanningTool, ecommerceEditPlanningV6Tool } from "../src/lib/server/ecommerce-edit-planner";
 import { resolveEcommerceReferenceDecision } from "../src/lib/server/ecommerce-reference-purpose";
@@ -317,6 +318,7 @@ describe("protocol fixture server", () => {
         ["JSON edit", "/v1/images/edits", "json", true],
         ["multipart generation", "/v1/images/generations", "multipart", true],
         ["multipart edit", "/v1/images/edits", "multipart", false],
+        ["multipart transparent edit", "/v1/images/edits", "multipart", true],
     ])("creates native PNG pixels at the requested size for %s", async (_name, endpoint, encoding, transparent) => {
         const size = { width: 384, height: 216 };
         const parameters = { model: "mock-image", size: `${size.width}x${size.height}`, ...(transparent ? { background: "transparent" } : {}) };
@@ -328,6 +330,7 @@ describe("protocol fixture server", () => {
         });
         expect(response.status).toBe(200);
         const payload = await response.json();
+        if (transparent) await expect(assertTransparentImageOutput(`data:image/png;base64,${payload.data[0].b64_json}`)).resolves.toBeUndefined();
         const image = sharp(Buffer.from(payload.data[0].b64_json, "base64"));
         await expect(image.metadata()).resolves.toMatchObject({ format: "png", ...size });
         const { data, info } = await image.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
