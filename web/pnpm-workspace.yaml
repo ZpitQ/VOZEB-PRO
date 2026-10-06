@@ -15,8 +15,10 @@ overrides:
     "minimatch@3.1.5>brace-expansion": 2.1.7
     "nanoid@<3.3.18": 3.3.18
     postcss: 8.5.25
+    "prosemirror-view@<1.42.3": 1.42.3
     qs: 6.16.0
     sharp: 0.35.4
+    "source-map-js@>=1.0.0 <1.2.2": 1.2.2
     "undici@^7.0.0": 7.29.1
 packageExtensions:
     "@next/eslint-plugin-next@16.3.0":

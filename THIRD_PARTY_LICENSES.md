@@ -413,7 +413,7 @@
 | prosemirror-state | 1.4.4 | MIT | [链接](https://github.com/prosemirror/prosemirror-state#readme) |
 | prosemirror-tables | 1.8.5 | MIT | [链接](https://github.com/ProseMirror/prosemirror-tables#readme) |
 | prosemirror-transform | 1.12.0 | MIT | [链接](https://github.com/prosemirror/prosemirror-transform#readme) |
-| prosemirror-view | 1.42.2 | MIT | - |
+| prosemirror-view | 1.42.3 | MIT | - |
 | proxy-from-env | 2.1.0 | MIT | [链接](https://github.com/Rob--W/proxy-from-env#readme) |
 | radix-ui | 1.6.7 | MIT | [链接](https://radix-ui.com/primitives) |
 | react | 19.2.8 | MIT | [链接](https://react.dev/) |
@@ -433,7 +433,7 @@
 | scroll-into-view-if-needed | 3.1.0 | MIT | [链接](https://scroll-into-view.dev) |
 | semver | 6.3.1, 7.8.5 | ISC | [链接](https://github.com/npm/node-semver#readme) |
 | sharp | 0.35.4 | Apache-2.0 | [链接](https://sharp.pixelplumbing.com) |
-| source-map-js | 1.2.1 | BSD-3-Clause | [链接](https://github.com/7rulnik/source-map-js) |
+| source-map-js | 1.2.2 | BSD-3-Clause | [链接](https://github.com/7rulnik/source-map-js) |
 | space-separated-tokens | 2.0.2 | MIT | [链接](https://github.com/wooorm/space-separated-tokens#readme) |
 | split2 | 4.2.0 | ISC | [链接](https://github.com/mcollina/split2#readme) |
 | string-convert | 0.2.1 | MIT | [链接](https://github.com/akiran/string-convert#readme) |
@@ -717,7 +717,7 @@
 | sharp | 0.35.4 | Apache-2.0 | [链接](https://sharp.pixelplumbing.com) |
 | shiki | 4.4.3 | MIT | [链接](https://github.com/shikijs/shiki#readme) |
 | source-map | 0.7.6 | BSD-3-Clause | [链接](https://github.com/mozilla/source-map) |
-| source-map-js | 1.2.1 | BSD-3-Clause | [链接](https://github.com/7rulnik/source-map-js) |
+| source-map-js | 1.2.2 | BSD-3-Clause | [链接](https://github.com/7rulnik/source-map-js) |
 | space-separated-tokens | 2.0.2 | MIT | [链接](https://github.com/wooorm/space-separated-tokens#readme) |
 | stringify-entities | 4.0.4 | MIT | [链接](https://github.com/wooorm/stringify-entities#readme) |
 | style-to-js | 1.1.21 | MIT | [链接](https://github.com/remarkablemark/style-to-js#readme) |
