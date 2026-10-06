@@ -123,8 +123,10 @@ import {
     validateImageSize,
 } from "./image-task-support";
 import { customGeminiImageTaskPath } from "./image-task-gemini-config";
+import { EcommerceCanvasAdapterReview } from "./image-task-size";
 
 export async function runGeminiImageTask(task: ImageTask, origin: string, cookie: string): Promise<ImageTaskRunResult> {
+    if (task.ecommerceExecution?.canvas) throw new EcommerceCanvasAdapterReview("Gemini generateContent");
     assertStrictProductProviderTask(task, "gemini");
     const config = task.config;
     const maskInstruction = task.mask ? "\n\n最后一张图片是编辑蒙版：透明区域需要重新生成，白色不透明区域必须保持原图。只补全透明区域，不要把蒙版当作画面内容。" : "";

@@ -175,6 +175,7 @@ export const DEFAULT_SETTINGS: AuthSettings = {
     logicalModels: [],
     defaultModels: { imageModel: "", videoModel: "", textModel: "", audioModel: "" },
     ecommerceGenerationEnabled: false,
+    ecommerceVisualQualityCheckEnabled: false,
     ecommerceModelRoles: structuredClone(EMPTY_ECOMMERCE_MODEL_ROLES),
     agentSkills: [
         { ...ECOMMERCE_IMAGE_SKILL, keywords: [...ECOMMERCE_IMAGE_SKILL.keywords], workspaces: [...ECOMMERCE_IMAGE_SKILL.workspaces] },

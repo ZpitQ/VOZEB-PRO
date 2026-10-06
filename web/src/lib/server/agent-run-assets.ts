@@ -17,8 +17,19 @@ export async function registerAgentTaskAssets(run: AgentRun, task: AgentRunTask,
     const inputs: Parameters<typeof registerCreativeAssets>[0] = [];
     const productAnchorId = task.type === "image" ? ecommerceProductAnchorIdFromRun(run) : undefined;
     const continuity = run.ecommerceSnapshot?.continuity || run.ecommerceSnapshot?.plan?.continuity;
-    const ecommerceContinuity = productAnchorId && continuity ? { productAnchorId, sceneBaselineId: run.ecommerceSnapshot?.plan?.source.currentSceneBaselineId || null, parentResultId: continuity.parentResultId, branchId: continuity.branchId } : undefined;
-    const parentAssetIds = Array.from(new Set([productAnchorId, task.referenceAssetId, ...(task.references || []).map((item) => item.assetId)].filter((item): item is string => Boolean(item))));
+    const sceneRootAssetId = task.type === "image" ? run.ecommerceSnapshot?.continuity?.sceneRootAssetId : null;
+    const ecommerceContinuity =
+        (productAnchorId || sceneRootAssetId) && continuity
+            ? {
+                  productAnchorId: productAnchorId || null,
+                  sceneBaselineId: run.ecommerceSnapshot?.plan?.source.currentSceneBaselineId || null,
+                  parentResultId: continuity.parentResultId,
+                  branchId: continuity.branchId,
+                  ...(sceneRootAssetId ? { sceneRootAssetId } : {}),
+                  ...(run.ecommerceSnapshot?.qualityCheck ? { qualityStatus: run.ecommerceSnapshot.qualityCheck.publicStatus } : {}),
+              }
+            : undefined;
+    const parentAssetIds = Array.from(new Set([productAnchorId, sceneRootAssetId, task.referenceAssetId, ...(task.references || []).map((item) => item.assetId)].filter((item): item is string => Boolean(item))));
     records.forEach(({ record, textContent, location }, ordinal) => {
         const sourceTaskId = sourceTaskIds[Math.min(ordinal, Math.max(0, sourceTaskIds.length - 1))] || `direct-${run.id}-${task.id}`;
         const base = {

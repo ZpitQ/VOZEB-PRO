@@ -27,12 +27,114 @@ import { createAgentRun, createEditBranch, selectCurrentSceneBaseline, setAgentR
 describe("ecommerce result continuity store", () => {
     beforeEach(() => vi.clearAllMocks());
 
+    it.each(["disabled", "advisory"])("inherits delivered %s results without requiring visual approval", async (qualityPolicy) => {
+        const run = {
+            ...canvasRun(),
+            id: "delivered",
+            surface: "chat",
+            status: "completed",
+            assetIds: ["delivered-image"],
+            ecommerceSnapshot: {
+                ...passedSnapshot(),
+                mode: "active",
+                qualityPolicy,
+                technicalCheck: { status: "passed", checks: [], hardFailures: [] },
+                qualityCheck: qualityPolicy === "disabled" ? undefined : { status: "blocked", publicStatus: "needs_review", checks: [], hardFailures: [{ key: "protected_structure", status: "failed" }] },
+            },
+        } as unknown as AgentRun;
+        const result = { id: "delivered-image", userId: "user", conversationId: "conversation", type: "image", status: "ready", sourceRunId: run.id, parentAssetId: "product", metadata: { ecommerceContinuity: { productAnchorId: "product" } } };
+        const sources = [productAsset("product"), result];
+        mocks.queryStoredGenerationTasks.mockResolvedValue([run]);
+        mocks.getStoredGenerationTask.mockResolvedValue(run);
+        mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[]) => sources.filter((asset) => ids.includes(asset.id)));
+        await expect(selectCurrentSceneBaseline("conversation", undefined, "user")).resolves.toMatchObject({ id: result.id });
+        await expect(selectCurrentSceneBaseline("conversation", result.id, "user")).resolves.toMatchObject({ id: result.id });
+        result.userId = "other-user";
+        await expect(selectCurrentSceneBaseline("conversation", result.id, "user")).resolves.toBeNull();
+        result.userId = "user";
+        sources.shift();
+        await expect(selectCurrentSceneBaseline("conversation", undefined, "user")).resolves.toBeNull();
+    });
+
+    it("selects only passed scene results and preserves explicitly selected adjustment evidence", async () => {
+        const root = { id: "scene-root", userId: "user", conversationId: "conversation", type: "image", status: "ready", sourceRunId: "upload", metadata: {} };
+        const quality = { status: "passed", publicStatus: "passed", checks: [], hardFailures: [] };
+        const passed = {
+            ...canvasRun(),
+            id: "run-scene-passed",
+            surface: "chat",
+            status: "completed",
+            assetIds: ["asset-scene-passed"],
+            updatedAt: 10,
+            ecommerceSnapshot: { plan: { operation: "scene_edit", source: { productAnchorId: null, currentSceneBaselineId: root.id } }, continuity: { sceneRootAssetId: root.id, parentResultId: null, branchId: "scene-branch" }, qualityCheck: quality },
+        } as unknown as AgentRun;
+        const adjustment = {
+            ...passed,
+            id: "run-scene-adjustment",
+            assetIds: ["asset-scene-adjustment"],
+            updatedAt: 20,
+            ecommerceSnapshot: { ...passed.ecommerceSnapshot, qualityCheck: { ...quality, status: "needs_adjustment", publicStatus: "needs_adjustment", checks: [{ key: "scene_aesthetics", status: "failed", reason: "vase is too large" }] } },
+        } as unknown as AgentRun;
+        const assets = [
+            root,
+            ...[passed, adjustment].map((run) => ({
+                id: run.assetIds[0],
+                userId: "user",
+                conversationId: "conversation",
+                type: "image",
+                status: "ready",
+                sourceRunId: run.id,
+                parentAssetId: root.id,
+                metadata: { ecommerceContinuity: run.ecommerceSnapshot!.continuity },
+            })),
+        ];
+        mocks.queryStoredGenerationTasks.mockResolvedValue([adjustment, passed]);
+        mocks.getStoredGenerationTask.mockImplementation(async (_type, id) => [passed, adjustment].find((run) => run.id === id));
+        mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[]) => assets.filter((asset) => ids.includes(asset.id)));
+        await expect(selectCurrentSceneBaseline("conversation", undefined, "user")).resolves.toMatchObject({ id: "asset-scene-passed" });
+        await expect(selectCurrentSceneBaseline("conversation", "asset-scene-adjustment", "user")).resolves.toMatchObject({
+            id: "asset-scene-adjustment",
+            metadata: { ecommerceContinuity: { parentQualityCheck: { status: "needs_adjustment", checks: [{ reason: "vase is too large" }] } } },
+        });
+        await expect(selectCurrentSceneBaseline("other-conversation", "asset-scene-passed", "user")).resolves.toBeNull();
+        await expect(selectCurrentSceneBaseline("conversation", "asset-scene-passed", "other-user")).resolves.toBeNull();
+        for (const status of ["blocked", "unavailable"] as const) {
+            adjustment.ecommerceSnapshot!.qualityCheck = { ...adjustment.ecommerceSnapshot!.qualityCheck!, status, publicStatus: "needs_review" };
+            await expect(selectCurrentSceneBaseline("conversation", undefined, "user")).resolves.toMatchObject({ id: "asset-scene-passed" });
+            await expect(selectCurrentSceneBaseline("conversation", "asset-scene-adjustment", "user")).resolves.toBeNull();
+        }
+        root.conversationId = "other-conversation";
+        await expect(selectCurrentSceneBaseline("conversation", "asset-scene-passed", "user")).resolves.toBeNull();
+    });
+
+    it("does not switch to an older branch when its background review updates later", async () => {
+        const earlier = { ...canvasRun(), id: "earlier", surface: "chat", status: "completed", assetIds: ["earlier-result"], createdAt: 10, updatedAt: 100, ecommerceSnapshot: passedSnapshot() };
+        const latest = { ...earlier, id: "latest", assetIds: ["latest-result"], createdAt: 20, updatedAt: 30 };
+        mocks.queryStoredGenerationTasks.mockResolvedValue([earlier, latest]);
+        const assets = [
+            productAsset("product"),
+            ...[earlier, latest].map((run) => ({
+                id: run.assetIds[0],
+                userId: "user",
+                conversationId: "conversation",
+                type: "image",
+                status: "ready",
+                sourceRunId: run.id,
+                parentAssetId: "product",
+                metadata: { ecommerceContinuity: { productAnchorId: "product" } },
+            })),
+        ];
+        mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[]) => assets.filter((asset) => ids.includes(asset.id)));
+        await expect(selectCurrentSceneBaseline("conversation", undefined, "user")).resolves.toMatchObject({ id: "latest-result" });
+    });
+
     it("selects the newest successful image result and skips failed or unrelated runs", async () => {
-        const earlier = { ...canvasRun(), id: "run-earlier", surface: "chat" as const, status: "completed" as const, assetIds: ["result-earlier"], updatedAt: 10 };
+        const earlier = { ...canvasRun(), id: "run-earlier", surface: "chat" as const, status: "completed" as const, assetIds: ["result-earlier"], updatedAt: 10, ecommerceSnapshot: passedSnapshot() };
         const newer = { ...earlier, id: "run-newer", assetIds: ["result-newer"], updatedAt: 20 };
         const failed = { ...earlier, id: "run-failed", status: "failed" as const, assetIds: ["result-failed"], updatedAt: 30 };
         mocks.queryStoredGenerationTasks.mockResolvedValue([failed, earlier, newer]);
         mocks.getCreativeAssetsByIds.mockResolvedValue([
+            productAsset("product"),
             { id: "result-earlier", userId: "user", conversationId: "conversation", type: "image", status: "ready", sourceRunId: earlier.id, parentAssetId: "product", metadata: { ecommerceContinuity: { productAnchorId: "product" } } },
             { id: "result-newer", userId: "user", conversationId: "conversation", type: "image", status: "ready", sourceRunId: newer.id, parentAssetId: "product", metadata: { ecommerceContinuity: { productAnchorId: "product" } } },
         ]);
@@ -49,7 +151,7 @@ describe("ecommerce result continuity store", () => {
         await expect(selectCurrentSceneBaseline("conversation", undefined, "user")).resolves.toBeNull();
     });
 
-    it("recognizes a pre-Task-8 ecommerce result from its completed run snapshot", async () => {
+    it("does not automatically inherit a legacy result without QA evidence", async () => {
         const prior = {
             ...canvasRun(),
             id: "run-legacy-ecommerce",
@@ -61,14 +163,15 @@ describe("ecommerce result continuity store", () => {
         mocks.queryStoredGenerationTasks.mockResolvedValue([prior]);
         mocks.getCreativeAssetsByIds.mockResolvedValue([{ id: "result-legacy-ecommerce", userId: "user", conversationId: "conversation", type: "image", status: "ready", sourceRunId: prior.id, parentAssetId: "product-original", metadata: {} }]);
 
-        await expect(selectCurrentSceneBaseline("conversation", undefined, "user")).resolves.toMatchObject({ id: "result-legacy-ecommerce" });
+        await expect(selectCurrentSceneBaseline("conversation", undefined, "user")).resolves.toBeNull();
     });
 
     it("selects an explicit older result by ID and rejects another user's result", async () => {
-        const previous = { ...canvasRun(), id: "run-previous", surface: "chat" as const, status: "completed" as const, assetIds: ["result-previous"] };
+        const previous = { ...canvasRun(), id: "run-previous", surface: "chat" as const, status: "completed" as const, assetIds: ["result-previous"], ecommerceSnapshot: passedSnapshot() };
         mocks.queryStoredGenerationTasks.mockResolvedValue([previous]);
         mocks.getStoredGenerationTask.mockResolvedValue(previous);
         mocks.getCreativeAssetsByIds.mockResolvedValue([
+            productAsset("product"),
             { id: "result-previous", userId: "user", conversationId: "conversation", type: "image", status: "ready", sourceRunId: previous.id, parentAssetId: "product", metadata: { ecommerceContinuity: { productAnchorId: "product" } } },
         ]);
 
@@ -81,8 +184,9 @@ describe("ecommerce result continuity store", () => {
 
     it("rejects an explicit generic image while retaining explicit older ecommerce selection", async () => {
         const generic = { ...canvasRun(), id: "run-generic", surface: "chat" as const, status: "completed" as const, assetIds: ["result-generic"] };
-        const ecommerce = { ...generic, id: "run-ecommerce", assetIds: ["result-ecommerce"], ecommerceSnapshot: { plan: { source: { productAnchorId: "product-original" } } } as AgentRun["ecommerceSnapshot"] };
+        const ecommerce = { ...generic, id: "run-ecommerce", assetIds: ["result-ecommerce"], ecommerceSnapshot: { ...passedSnapshot(), plan: { source: { productAnchorId: "product-original" } } } as AgentRun["ecommerceSnapshot"] };
         const assets = [
+            productAsset("product-original"),
             { id: "result-generic", userId: "user", conversationId: "conversation", type: "image", status: "ready", sourceRunId: generic.id, parentAssetId: "generic-reference", metadata: {} },
             { id: "result-ecommerce", userId: "user", conversationId: "conversation", type: "image", status: "ready", sourceRunId: ecommerce.id, parentAssetId: "product-original", metadata: {} },
         ];
@@ -95,6 +199,9 @@ describe("ecommerce result continuity store", () => {
 
     it("persists a new branch on the current run without mutating the parent result", async () => {
         const parent = { id: "result-parent", metadata: { ecommerceContinuity: { productAnchorId: "product-original" } } };
+        const previous = { ...canvasRun(), id: "parent-run", surface: "chat", status: "completed", assetIds: [parent.id], ecommerceSnapshot: passedSnapshot("product-original") };
+        mocks.getStoredGenerationTask.mockResolvedValue(previous);
+        mocks.getCreativeAssetsByIds.mockResolvedValue([productAsset("product-original"), { ...parent, userId: "user", conversationId: "conversation", sourceRunId: previous.id, type: "image", status: "ready", parentAssetId: "product-original" }]);
         let current = { ...canvasRun(), id: "run-child", surface: "chat" as const, status: "running" as const };
         mocks.mutateCreativeRun.mockImplementation(async (id, _ttl, mutate) => {
             expect(id).toBe(current.id);
@@ -111,6 +218,14 @@ describe("ecommerce result continuity store", () => {
         expect(parent).toEqual({ id: "result-parent", metadata: { ecommerceContinuity: { productAnchorId: "product-original" } } });
     });
 });
+
+function productAsset(id: string) {
+    return { id, userId: "user", conversationId: "conversation", type: "image", status: "ready", sourceRunId: "upload", metadata: {} };
+}
+
+function passedSnapshot(productAnchorId = "product"): AgentRun["ecommerceSnapshot"] {
+    return { plan: { source: { productAnchorId } }, qualityCheck: { status: "passed", publicStatus: "passed", hardFailures: [], checks: [] } } as unknown as AgentRun["ecommerceSnapshot"];
+}
 
 describe("createAgentRun video frames", () => {
     beforeEach(() => {
@@ -305,6 +420,23 @@ describe("createAgentRun Drama snapshot", () => {
 describe("setAgentRunStatus", () => {
     beforeEach(() => vi.clearAllMocks());
 
+    it("rejects stale scene selection when tasks changed before the locked resume mutation", async () => {
+        const original = { ...canvasRun(), status: "paused" as const, tasks: [{ ...canvasRun().tasks[0], status: "needs_review" as const, attempts: 0, childTasks: [] }] };
+        let current = structuredClone(original);
+        mocks.mutateCreativeRun.mockImplementation(async (_id, _ttl, mutate) => {
+            const mutation = mutate(current);
+            if (!mutation) return null;
+            current = mutation.run;
+            return current;
+        });
+        const tasks = [{ ...original.tasks[0], status: "ready" as const }];
+        await expect(updateAgentRunById("run", { status: "running", tasks }, { type: "run.resumed" }, ["paused"], undefined, original.tasks)).resolves.toMatchObject({ status: "running", tasks });
+        current = { ...current, status: "paused", tasks: [{ ...current.tasks[0], attempts: 1, taskId: "submitted-child" }] };
+        const submitted = structuredClone(current);
+        await expect(updateAgentRunById("run", { status: "running", tasks }, { type: "run.resumed" }, ["paused"], undefined, original.tasks)).resolves.toBeNull();
+        expect(current).toEqual(submitted);
+    });
+
     it("settles active Canvas tasks and emits terminal node operations when cancelled", async () => {
         const run = canvasRun();
         let mutation: Record<string, unknown> | null = null;
@@ -439,6 +571,41 @@ describe("setAgentRunStatus", () => {
             run: { status: "paused", tasks: [{ status: "needs_review" }, { status: "completed" }] },
             assistant: { status: "running", content: "请确认这张图片是商品图还是场景参考图。" },
         });
+    });
+
+    it.each([
+        ["当前协议不支持可信独立蒙版，请选择支持局部编辑的模型。", "当前协议不支持可信独立蒙版，请选择支持局部编辑的模型。"],
+        ["provider https://private.fixture.invalid api key fixture-secret", "生成渠道暂时无法连接，请稍后重试或联系管理员。"],
+    ])("persists the saved review reason on pause instead of event text: %s", async (reason, expected) => {
+        const original = canvasRun();
+        const run = { ...original, tasks: [{ ...original.tasks[0], status: "needs_review" as const, error: reason }] };
+        let mutation: Record<string, unknown> | null = null;
+        mocks.mutateCreativeRun.mockImplementation(async (_id, _ttl, mutate) => {
+            mutation = mutate(run);
+            return mutation && "run" in mutation ? mutation.run : null;
+        });
+
+        await updateAgentRunById("run", { status: "paused" }, { type: "run.paused", data: { message: "untrusted https://event.fixture.invalid api key event-secret" } }, ["running"]);
+
+        expect(mutation).toMatchObject({ assistant: { status: "running", content: expected } });
+    });
+
+    it.each([
+        ["needs_review", undefined],
+        ["needs_review", "   "],
+        ["running", "existing progress"],
+    ] as const)("does not rewrite the assistant for a pause without a saved review reason (%s, %s)", async (status, error) => {
+        const original = canvasRun();
+        const run = { ...original, tasks: [{ ...original.tasks[0], status, error }] };
+        let mutation: Record<string, unknown> | null = null;
+        mocks.mutateCreativeRun.mockImplementation(async (_id, _ttl, mutate) => {
+            mutation = mutate(run);
+            return mutation && "run" in mutation ? mutation.run : null;
+        });
+
+        await updateAgentRunById("run", { status: "paused" }, { type: "run.paused", data: { message: "任务已暂停" } }, ["running"]);
+
+        expect((mutation as { assistant?: unknown } | null)?.assistant).toBeUndefined();
     });
 
     it("persists background review without rewriting the completed assistant message", async () => {

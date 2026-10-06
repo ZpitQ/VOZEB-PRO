@@ -1,6 +1,8 @@
 [
     {
         "id": "storage-cabinet",
+        "caseId": "white-product-scene",
+        "manualAcceptance": "pending",
         "category": "收纳",
         "productFileName": "storage-cabinet.webp",
         "fixturePath": "./fixtures/ecommerce-products/storage-cabinet.webp",
@@ -51,6 +53,8 @@
     },
     {
         "id": "bed-frame",
+        "caseId": "white-product-style-reference",
+        "manualAcceptance": "pending",
         "category": "家具",
         "productFileName": "bed-frame.webp",
         "fixturePath": "./fixtures/ecommerce-products/bed-frame.webp",
@@ -70,5 +74,94 @@
         "userRequest": "把这个烤面包机放在干净明亮的欧美厨房台面上，保持机身结构和颜色不变。",
         "expectedOperation": "product_to_scene",
         "hardProtections": ["outline", "brand_text", "color", "material", "scale", "view"]
+    },
+    {
+        "caseId": "landscape-prop-add",
+        "scenario": "selection",
+        "userRequest": "保持原尺寸和构图，三层抽屉柜场景只加柜面花瓶。",
+        "source": { "kind": "deterministic_scene", "width": 3840, "height": 2160 },
+        "expectedOperation": "scene_edit",
+        "hardProtections": ["protected_structure", "protected_material", "unmodified_region", "canvas_geometry"],
+        "expectedQuality": "passed",
+        "manualAcceptance": "pending"
+    },
+    {
+        "caseId": "three-drawer-preservation",
+        "scenario": "hard_structure",
+        "userRequest": "把三层抽屉柜放进客厅，结果故意变成四层。",
+        "expectedOperation": "product_to_scene",
+        "hardProtections": ["protected_structure"],
+        "expectedQuality": "needs_review",
+        "expectedStructure": { "baseline": 3, "result": 4 },
+        "manualAcceptance": "pending"
+    },
+    {
+        "caseId": "scene-no-product-continuity",
+        "scenario": "continuity",
+        "userRequest": "无商品锚点场景，改成午后阳光。",
+        "followupRequest": "无商品锚点场景，再生成。",
+        "expectedOperation": "scene_edit",
+        "hardProtections": ["protected_structure", "protected_material"],
+        "expectedQuality": "passed",
+        "manualAcceptance": "pending"
+    },
+    {
+        "caseId": "historical-branch",
+        "scenario": "existing_branch",
+        "userRequest": "从这张较早结果把背景改成现代厨房。",
+        "expectedOperation": "local_edit",
+        "hardProtections": ["product_identity", "protected_structure"],
+        "expectedQuality": "passed",
+        "manualAcceptance": "pending"
+    },
+    {
+        "caseId": "conflicting-canvas",
+        "scenario": "selection",
+        "userRequest": "保持原尺寸和构图，三层抽屉柜场景只加柜面花瓶。",
+        "source": { "kind": "deterministic_scene", "width": 3840, "height": 2160 },
+        "residualSize": "3:2",
+        "expectedOperation": "scene_edit",
+        "hardProtections": ["canvas_geometry", "unmodified_region"],
+        "expectedQuality": "passed",
+        "manualAcceptance": "pending"
+    },
+    {
+        "caseId": "unsupported-mask",
+        "scenario": "server_gate",
+        "userRequest": "保持构图，三层抽屉柜场景只加花瓶，只加柜面花瓶。",
+        "source": { "kind": "deterministic_scene", "width": 3840, "height": 2160 },
+        "expectedOperation": "scene_edit",
+        "hardProtections": ["unmodified_region"],
+        "expectedQuality": "needs_review",
+        "automatedEvidence": ["ecommerce-image-compiler.test.ts / unsupported independent mask", "ecommerce-product-generation.spec.ts / unsupported-mask real backend protocol gate"],
+        "manualAcceptance": "pending"
+    },
+    {
+        "caseId": "quality-unavailable",
+        "scenario": "quality_unavailable",
+        "userRequest": "把三层抽屉柜放进客厅，验收解析失败。",
+        "expectedOperation": "product_to_scene",
+        "hardProtections": ["protected_structure", "canvas_geometry"],
+        "expectedQuality": "needs_review",
+        "manualAcceptance": "pending"
+    },
+    {
+        "caseId": "soft-quality-failure",
+        "scenario": "soft_quality",
+        "userRequest": "把三层抽屉柜放进客厅，光线不达标。",
+        "expectedOperation": "product_to_scene",
+        "hardProtections": ["protected_structure", "protected_material"],
+        "expectedQuality": "needs_adjustment",
+        "manualAcceptance": "pending"
+    },
+    {
+        "caseId": "local-no-relight",
+        "scenario": "selection",
+        "userRequest": "保持原尺寸和现有光照，三层抽屉柜场景只加花瓶，只加柜面花瓶。",
+        "source": { "kind": "deterministic_scene", "width": 3840, "height": 2160 },
+        "expectedOperation": "scene_edit",
+        "hardProtections": ["protected_material", "unmodified_region"],
+        "expectedQuality": "passed",
+        "manualAcceptance": "pending"
     }
 ]

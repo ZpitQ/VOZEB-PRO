@@ -198,6 +198,7 @@ class SettingsRepository {
         if (input.logicalModels !== undefined) add("logical_models", jsonParam(input.logicalModels));
         if (input.defaultModels !== undefined) add("default_models", jsonParam(input.defaultModels));
         if (input.ecommerceGenerationEnabled !== undefined) add("ecommerce_generation_enabled", input.ecommerceGenerationEnabled);
+        if (input.ecommerceVisualQualityCheckEnabled !== undefined) add("ecommerce_visual_quality_check_enabled", input.ecommerceVisualQualityCheckEnabled);
         if (input.ecommerceModelRoles !== undefined) add("ecommerce_model_roles", jsonParam(input.ecommerceModelRoles));
         if (input.agentSkills !== undefined) add("agent_skills", jsonParam(input.agentSkills));
         if (input.freeDailyPoints !== undefined) add("free_daily_points", input.freeDailyPoints);
@@ -302,6 +303,7 @@ function mapSettings(row: Record<string, unknown>): AppSettingsRecord {
         logicalModels: jsonValue(row.logical_models),
         defaultModels: jsonValue(row.default_models),
         ecommerceGenerationEnabled: row.ecommerce_generation_enabled === true,
+        ecommerceVisualQualityCheckEnabled: row.ecommerce_visual_quality_check_enabled === true,
         ecommerceModelRoles: jsonValue(row.ecommerce_model_roles),
         agentSkills: jsonValue(row.agent_skills),
         createdAt: isoValue(row.created_at),

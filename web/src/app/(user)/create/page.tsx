@@ -607,6 +607,9 @@ export default function CreatePage() {
                                 onMaterializeProject={agent.materializeProject}
                                 onRetryMessage={retryRound}
                                 onAdjustRequest={adjustQualityReview}
+                                onConfirmSceneSelection={agent.confirmSceneSelection}
+                                onRecoverReference={agent.recoverReference}
+                                onCheckStatus={agent.checkStatus}
                                 selectedAssetIds={selectedImageAssetIds}
                                 onToggleAsset={toggleReferencedAsset}
                                 hasOlder={agent.hasOlderMessages}

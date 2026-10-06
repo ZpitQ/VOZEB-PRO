@@ -17,7 +17,7 @@ vi.mock("@/app/api/image-tasks/image-task-reference-urls", () => ({ requestPubli
 vi.mock("@/lib/server/image-task-store", () => ({ getImageTask: mocks.getImageTask, transitionImageTask: vi.fn() }));
 vi.mock("@/lib/server/generation-task-recovery-service", () => ({ runGenerationTaskRecoveryBatch: mocks.recover }));
 vi.mock("@/lib/server/generation-task-store", () => ({ getStoredGenerationTaskRecord: mocks.getSchedule }));
-vi.mock("@/lib/server/generation-task-scheduler", () => ({ scheduleGenerationTask: mocks.schedule }));
+vi.mock("@/lib/server/generation-task-scheduler", async (original) => ({ ...(await original<typeof import("@/lib/server/generation-task-scheduler")>()), scheduleGenerationTask: mocks.schedule }));
 vi.mock("@/lib/server/internal-origin", () => ({ resolveInternalOrigin: vi.fn(() => "http://localhost") }));
 vi.mock("@/lib/server/points-response", () => ({ pointsResponseHeaders: vi.fn(() => new Headers()) }));
 vi.mock("@/lib/server/generation-channel", () => ({ generationModelId: vi.fn(() => "image-model") }));
@@ -34,6 +34,35 @@ describe("GET /api/image-tasks/[id]", () => {
         mocks.getSchedule.mockResolvedValue({ executionPhase: "polling" });
         mocks.schedule.mockResolvedValue({ executionPhase: "polling" });
         mocks.recover.mockResolvedValue({ claimed: 1 });
+    });
+
+    it("keeps actual public media dimensions while hiding internal canvas evidence", async () => {
+        const media = {
+            dataUrl: "/api/generation-log-assets/native.png",
+            width: 2880,
+            height: 2880,
+            canvasEvidence: { constraint: { source: "user_text" }, nativeUrl: "private-native-file" },
+            sceneProtectionEvidence: { maskUrl: "private-mask", nativeUrl: "private-local-native" },
+        };
+        mocks.getImageTask.mockResolvedValue(imageTask({ status: "success", result: { ...media, results: [media] } }));
+        const response = await GET(new Request("http://localhost/api/image-tasks/image-one"), context);
+        const body = await response.json();
+        expect(body.task.result).toMatchObject({ width: 2880, height: 2880, results: [{ width: 2880, height: 2880 }] });
+        expect(JSON.stringify(body)).not.toContain("canvasEvidence");
+        expect(JSON.stringify(body)).not.toContain("private-native-file");
+        expect(JSON.stringify(body)).not.toContain("sceneProtectionEvidence");
+        expect(JSON.stringify(body)).not.toContain("private-mask");
+    });
+
+    it("whitelists public media fields and never exposes original batch failures or private result identities", async () => {
+        const publicMedia = { dataUrl: "/api/generation-log-assets/ready.png", remoteUrl: "https://fixture.example/result.png", serverUrl: "/api/generation-log-assets/ready.png", width: 6, height: 4, bytes: 123, mimeType: "image/png" };
+        const privateMedia = { ...publicMedia, resultId: "private-child:3", batchEvidence: [{ resultId: "private-child:1", nativeStatus: "unavailable", failureReason: "private-read-failure" }], privateUnknown: "private-future-field" };
+        mocks.getImageTask.mockResolvedValue(imageTask({ status: "success", result: { ...privateMedia, results: [privateMedia] } }));
+        const body = await (await GET(new Request("http://localhost/api/image-tasks/image-one"), context)).json();
+        expect(body.task.result).toEqual({ ...publicMedia, results: [publicMedia] });
+        expect(JSON.stringify(body)).not.toContain("private-");
+        expect(JSON.stringify(body)).not.toContain("batchEvidence");
+        expect(JSON.stringify(body)).not.toContain("resultId");
     });
 
     it("returns the current image state without running recovery work", async () => {
@@ -102,6 +131,27 @@ describe("POST /api/image-tasks/[id] recover", () => {
         mocks.currentUser.mockResolvedValue({ id: "user", role: "user" });
         mocks.schedule.mockResolvedValue({ executionPhase: "polling" });
         mocks.recover.mockResolvedValue({ claimed: 1 });
+    });
+
+    it.each(["reference_source_unavailable", "reference_validation_unavailable"])("checks and resumes the same unsubmitted reference child after %s", async (failure) => {
+        const task = imageTask({ runId: "same-run", referenceDispatch: { inputId: "frozen-input" }, attempts: [], references: [{ id: "original", url: "/api/reference-assets/original.png", dataUrl: "" }] });
+        mocks.getImageTask.mockResolvedValue(task);
+        mocks.getSchedule.mockResolvedValue({ type: "image", status: "running", payload: task, executionPhase: "needs_review", lastUpstreamStatus: `${failure}:check original task` });
+        const response = await POST(recoverRequest(), context);
+        expect(response.status).toBe(200);
+        expect(mocks.schedule).toHaveBeenCalledExactlyOnceWith("image", "image-one", expect.objectContaining({ executionPhase: "created", lastUpstreamStatus: "reference_recovery_requested" }), { unsubmittedReferenceRecovery: true });
+        expect(mocks.recover).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ taskIds: ["image-one"], userRequested: true }));
+        expect((await response.json()).task.id).toBe("image-one");
+    });
+
+    it("rejects a stale unsubmitted recovery when the scheduler CAS finds the task already submitting", async () => {
+        const task = imageTask({ runId: "same-run", referenceDispatch: { inputId: "frozen-input" }, attempts: [] });
+        mocks.getImageTask.mockResolvedValue(task);
+        mocks.getSchedule.mockResolvedValue({ type: "image", status: "running", payload: task, executionPhase: "needs_review", lastUpstreamStatus: "reference_source_unavailable:check original task" });
+        mocks.schedule.mockResolvedValue(null);
+        const response = await POST(recoverRequest(), context);
+        expect(response.status).toBe(409);
+        expect(mocks.recover).not.toHaveBeenCalled();
     });
 
     it("reuses the saved upstream task and persists a ready result in the same user action", async () => {

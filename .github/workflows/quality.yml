@@ -122,12 +122,16 @@ jobs:
           src/lib/server/admin-backup-store.postgres.test.ts
           src/lib/server/points-wallet-idempotency.postgres.test.ts
           src/lib/server/database/work-community-postgres.test.ts
+          src/lib/server/database/create-overview-quality.postgres.test.ts
+          src/lib/server/ecommerce-selection-recovery.postgres.test.ts
         env:
           VOZEB_PRO_DATABASE_PROVIDER: postgres
           DATABASE_URL: postgres://vozeb:vozeb-e2e-password@127.0.0.1:5432/vozeb_pro_e2e
           VOZEB_PRO_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           VOZEB_PRO_RUN_POSTGRES_INTEGRATION: "1"
           RUN_WORK_COMMUNITY_POSTGRES_INTEGRATION: "1"
+          VOZEB_PRO_RUN_ECOMMERCE_POSTGRES_INTEGRATION: "1"
+          VOZEB_PRO_ECOMMERCE_ISOLATED_DATABASE: "1"
       - name: Upload browser artifacts
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

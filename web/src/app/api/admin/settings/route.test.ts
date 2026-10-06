@@ -65,6 +65,19 @@ describe("admin settings model routing", () => {
         expect(mocks.safeRecordAuditLog).toHaveBeenCalledWith(expect.objectContaining({ metadata: { fields: ["ecommerceModelRoles"] } }));
     });
 
+    it("saves optional visual quality both ways with immediate fresh reads", async () => {
+        let persisted = { ...savedSettings, ecommerceVisualQualityCheckEnabled: false };
+        mocks.getFreshAuthSettings.mockImplementation(async () => persisted);
+        mocks.setAuthSettings.mockImplementation(async (patch) => (persisted = { ...persisted, ...patch }));
+        for (const enabled of [true, false]) {
+            expect((await (await PATCH(request({ ecommerceVisualQualityCheckEnabled: enabled }))).json()).settings.ecommerceVisualQualityCheckEnabled).toBe(enabled);
+            expect((await (await GET()).json()).settings.ecommerceVisualQualityCheckEnabled).toBe(enabled);
+        }
+        expect(mocks.safeRecordAuditLog).toHaveBeenCalledWith(expect.objectContaining({ metadata: { fields: ["ecommerceVisualQualityCheckEnabled"] } }));
+        mocks.getCurrentUser.mockResolvedValue({ id: "admin", role: "admin", status: "active", adminPermissions: ["system.manage"] });
+        expect((await PATCH(request({ ecommerceVisualQualityCheckEnabled: true }))).status).toBe(403);
+    });
+
     it("persists the administrator ecommerce orchestration switch", async () => {
         const response = await PATCH(request({ ecommerceGenerationEnabled: true }));
 

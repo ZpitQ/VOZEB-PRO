@@ -36,9 +36,20 @@ describe("GenerationLogDetail ecommerce observability", () => {
                                 { key: "visual_analysis", status: "completed", model: { upstreamModel: "gemini-3.8-flash-high" }, output: { references: [] } },
                                 { key: "edit_planning", status: "completed", model: { upstreamModel: "gpt-5.6-sol" }, output: { operation: "product_to_scene" } },
                                 { key: "image_generation", status: "completed", model: { upstreamModel: "gpt-image-2.5-flare" }, output: { compilerVersion: "ecommerce-openai-image-2.5.v1" } },
-                                { key: "quality_check", status: "passed", model: { upstreamModel: "gemini-3.8-flash-high" }, output: { checks: [] } },
+                                {
+                                    key: "quality_check",
+                                    status: "blocked",
+                                    model: { upstreamModel: "gemini-3.8-flash-high" },
+                                    output: {
+                                        checks: [],
+                                        observations: { baseline: { readable: true } },
+                                        contradictions: [{ observedCount: 3, reportedCount: 2 }],
+                                        sceneProtectionEvidence: [{ outsideMaskMatches: false }],
+                                        canvasEvidence: [{ nativeStatus: "readable", nativeSize: { width: 1254, height: 1254 }, nativeMatches: false, storedStatus: "unavailable", storedMatches: null }],
+                                    },
+                                },
                             ],
-                            finalStatus: "passed",
+                            finalStatus: "needs_review",
                             recordedAt: 500,
                         },
                     } as never
@@ -53,5 +64,11 @@ describe("GenerationLogDetail ecommerce observability", () => {
         expect(markup).toContain("gpt-image-2.5-flare");
         expect(markup).toContain("gemini-3.8-flash-high");
         expect(markup).toContain("agent-run-one");
+        const evidence = markup.replaceAll("&quot;", '"');
+        expect(evidence).toContain('"storedMatches": null');
+        expect(evidence).toContain('"nativeMatches": false');
+        expect(evidence).toContain('"observedCount": 3');
+        expect(evidence).toContain('"outsideMaskMatches": false');
+        expect(evidence).not.toContain('"storedSize"');
     });
 });

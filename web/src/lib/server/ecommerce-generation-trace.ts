@@ -29,6 +29,7 @@ export type EcommerceGenerationTrace = { [key: string]: JsonValue } & {
     stages: EcommerceGenerationTraceStage[];
     finalStatus: string;
     recordedAt: number;
+    mode?: EcommerceGenerationSnapshot["mode"];
 };
 
 export function buildEcommerceGenerationTrace(input: {
@@ -42,21 +43,34 @@ export function buildEcommerceGenerationTrace(input: {
     recordedAt?: number;
 }): EcommerceGenerationTrace {
     const analysis = input.snapshot.visualAnalysis;
+    const analysisFailure = input.snapshot.visualAnalysisFailure;
+    const analysisModel = analysis?.modelRole || analysisFailure?.attempts.at(-1)?.modelRole;
     const plan = input.snapshot.plan;
     const execution = input.task.ecommerceExecution;
     const quality = input.snapshot.qualityCheck;
     return sanitizeTraceValue({
         version: ECOMMERCE_GENERATION_TRACE_VERSION,
+        ...(input.snapshot.mode ? { mode: input.snapshot.mode } : {}),
         runId: input.runId,
         agentTaskId: input.task.id,
         imageTaskIds: uniqueText(input.imageTaskIds),
         stages: [
             {
                 key: "visual_analysis",
-                status: analysis ? "completed" : "not_run",
-                ...(analysis?.modelRole ? { model: routeSnapshot(analysis.modelRole) } : {}),
+                status: analysis ? "completed" : analysisFailure ? "failed" : "not_run",
+                ...(analysisModel ? { model: routeSnapshot(analysisModel) } : {}),
                 ...(finiteTime(input.snapshot.stageTimings?.analysisCompletedAt) ? { completedAt: input.snapshot.stageTimings!.analysisCompletedAt } : {}),
-                output: analysis ? { analysisVersion: analysis.analysisVersion, references: analysis.references } : {},
+                output: analysis
+                    ? {
+                          analysisVersion: analysis.analysisVersion,
+                          references: analysis.references,
+                          ...(input.snapshot.referenceDecision ? { referenceDecision: input.snapshot.referenceDecision } : {}),
+                      }
+                    : analysisFailure
+                      ? { visualAnalysisFailure: analysisFailure }
+                      : input.snapshot.referenceDecision
+                        ? { referenceDecision: input.snapshot.referenceDecision }
+                        : {},
             },
             {
                 key: "edit_planning",
@@ -70,6 +84,7 @@ export function buildEcommerceGenerationTrace(input: {
                 status: input.generationStatus,
                 ...(execution?.modelSnapshot ? { model: routeSnapshot(execution.modelSnapshot) } : {}),
                 output: {
+                    ...(input.snapshot.technicalCheck ? { technicalCheck: input.snapshot.technicalCheck } : {}),
                     ...(execution
                         ? {
                               state: execution.state,
@@ -77,12 +92,17 @@ export function buildEcommerceGenerationTrace(input: {
                               providerProfileId: execution.providerProfileId,
                               executionPrompt: execution.prompt,
                               referenceRoles: execution.referenceRoles,
+                              ...(execution.referenceMapping ? { referenceMapping: execution.referenceMapping } : {}),
                               mask: execution.mask,
                               parameters: execution.parameters,
+                              ...(execution.canvas ? { canvas: execution.canvas } : {}),
+                              ...(execution.photography ? { photography: execution.photography } : {}),
                           }
                         : {}),
                     imageTaskIds: uniqueText(input.imageTaskIds),
                     ...(input.task.productProtectionRegions ? { protection: protectionSummary(input.task.productProtectionRegions) } : {}),
+                    ...(input.task.sceneProtection ? { sceneProtection: sceneProtectionSummary(input.task.sceneProtection) } : {}),
+                    ...(input.snapshot.continuity ? { continuity: input.snapshot.continuity } : {}),
                     ...(input.error?.trim() ? { error: input.error.trim() } : {}),
                 },
             },
@@ -91,16 +111,24 @@ export function buildEcommerceGenerationTrace(input: {
                 status: quality?.status || "not_run",
                 ...(quality?.modelRole ? { model: routeSnapshot(quality.modelRole) } : {}),
                 ...(finiteTime(quality?.checkedAt) ? { completedAt: quality!.checkedAt } : {}),
-                output: quality
-                    ? {
-                          version: quality.version,
-                          status: quality.status,
-                          publicStatus: quality.publicStatus,
-                          checks: quality.checks,
-                          hardFailures: quality.hardFailures,
-                          internalReason: quality.internalReason,
-                      }
-                    : {},
+                output: {
+                    ...(input.snapshot.qualityPolicy ? { policy: input.snapshot.qualityPolicy } : {}),
+                    ...(quality
+                        ? {
+                              version: quality.version,
+                              status: quality.status,
+                              publicStatus: quality.publicStatus,
+                              checks: quality.checks,
+                              hardFailures: quality.hardFailures,
+                              internalReason: quality.internalReason,
+                              ...(quality.canvasEvidence ? { canvasEvidence: quality.canvasEvidence } : {}),
+                              ...(quality.observations ? { observations: quality.observations } : {}),
+                              ...(quality.contradictions ? { contradictions: quality.contradictions } : {}),
+                              ...(quality.sceneProtectionEvidence ? { sceneProtectionEvidence: quality.sceneProtectionEvidence } : {}),
+                              ...(quality.visionEvidence ? { visionEvidence: quality.visionEvidence } : {}),
+                          }
+                        : {}),
+                },
             },
         ],
         finalStatus: input.finalStatus.trim() || input.generationStatus,
@@ -117,7 +145,16 @@ export function normalizeEcommerceGenerationTrace(value: unknown): EcommerceGene
     const finalStatus = text(value.finalStatus);
     const recordedAt = finiteTime(value.recordedAt) ? value.recordedAt : undefined;
     if (!runId || !agentTaskId || stages.length !== 4 || !finalStatus || recordedAt === undefined) return undefined;
-    return sanitizeTraceValue({ version: ECOMMERCE_GENERATION_TRACE_VERSION, runId, agentTaskId, imageTaskIds, stages, finalStatus, recordedAt }) as EcommerceGenerationTrace;
+    return sanitizeTraceValue({
+        version: ECOMMERCE_GENERATION_TRACE_VERSION,
+        ...(value.mode === "active" || value.mode === "shadow" || value.mode === "legacy" ? { mode: value.mode } : {}),
+        runId,
+        agentTaskId,
+        imageTaskIds,
+        stages,
+        finalStatus,
+        recordedAt,
+    }) as EcommerceGenerationTrace;
 }
 
 function normalizeStage(value: unknown): EcommerceGenerationTraceStage[] {
@@ -148,6 +185,12 @@ function protectionSummary(regions: NonNullable<AgentRunTask["productProtectionR
         maskProvider: regions.editableBackground.mask?.provider,
         maskTrust: regions.editableBackground.mask?.trust,
     };
+}
+
+function sceneProtectionSummary(protection: NonNullable<AgentRunTask["sceneProtection"]>) {
+    const { mask: _mask, ...evidence } = protection;
+    void _mask;
+    return evidence;
 }
 
 function routeSnapshot(value: Partial<EcommerceRoleRouteSnapshot> | Record<string, unknown>): EcommerceGenerationTraceModel {

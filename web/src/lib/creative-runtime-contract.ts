@@ -11,6 +11,20 @@ export type CreativeMessageStatus = "running" | "completed" | "failed" | "cancel
 export type CreativeAssetType = "text" | "image" | "video" | "audio";
 export type CreativeAssetStatus = "ready" | "failed" | "deleted";
 
+export const ECOMMERCE_REFERENCE_PURPOSES = ["edit_target", "product_identity", "style", "lighting", "composition"] as const;
+export type EcommerceReferencePurpose = (typeof ECOMMERCE_REFERENCE_PURPOSES)[number];
+export type CreativeReferenceReview = {
+    version: "ecommerce-reference-review.v1";
+    reviewId: string;
+    kind: "confirm_purposes" | "retry_analysis" | "retry_source";
+    question: string;
+    inheritedEditTarget?: { assetId: string; previewUrl: string };
+    assets: Array<{ assetId: string; assetVersion: string; alias: string; previewUrl: string; purposes: EcommerceReferencePurpose[]; allowedPurposes: EcommerceReferencePurpose[] }>;
+};
+export type CreativeReferenceRecovery =
+    | { reviewId: string; action: "retry_analysis" | "retry_source" }
+    | { reviewId: string; action: "confirm_purposes"; decisionVersion: "ecommerce-reference-decision.v1"; bindings: Array<{ assetId: string; assetVersion: string; purposes: EcommerceReferencePurpose[] }> };
+
 export type CreativeConversation = {
     id: string;
     userId: string;

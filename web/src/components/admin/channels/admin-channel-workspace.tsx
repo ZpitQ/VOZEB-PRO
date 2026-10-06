@@ -159,6 +159,8 @@ export function AdminChannelWorkspace({ settings, fetchingModelId, saving, onCha
                                 roles={settings.ecommerceModelRoles || EMPTY_ECOMMERCE_MODEL_ROLES}
                                 enabled={settings.ecommerceGenerationEnabled === true}
                                 onEnabledChange={(ecommerceGenerationEnabled) => onChange({ ...settings, ecommerceGenerationEnabled })}
+                                visualQualityEnabled={settings.ecommerceVisualQualityCheckEnabled === true}
+                                onVisualQualityEnabledChange={(ecommerceVisualQualityCheckEnabled) => onChange({ ...settings, ecommerceVisualQualityCheckEnabled })}
                                 onChange={(ecommerceModelRoles) => onChange({ ...settings, ecommerceModelRoles })}
                             />
                         ),

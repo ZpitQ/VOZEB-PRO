@@ -18,9 +18,9 @@ export async function writeImageGenerationLog(
 ) {
     const results = Array.isArray(result) ? result : [result];
     const preserveNativeSize = task.config.advancedConfig?.protocol === "custom" && isCustomGeminiImageModel(task.config.model) && !parseImageDimensions(task.config.size || "");
-    const targetSize = task.config.outputMode === "layers" || preserveNativeSize ? undefined : resolveResultSize(task.config.quality, task.config.size || "auto");
+    const targetSize = task.ecommerceExecution?.canvas || task.config.outputMode === "layers" || preserveNativeSize ? undefined : resolveResultSize(task.config.quality, task.config.size || "auto");
     const assets = results.flatMap((item) => {
-        const resultUrl = typeof item === "string" ? item : item.remoteUrl || item.dataUrl || "";
+        const resultUrl = typeof item === "string" ? item : task.ecommerceExecution?.canvas ? item.dataUrl || item.remoteUrl || "" : item.remoteUrl || item.dataUrl || "";
         return resultUrl
             ? [
                   {

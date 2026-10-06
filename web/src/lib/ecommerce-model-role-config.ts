@@ -8,7 +8,7 @@ export const ECOMMERCE_MODEL_ROLE_DEFINITIONS: ReadonlyArray<{
     { role: "vision_analysis", label: "视觉分析", capability: "text" },
     { role: "edit_planning", label: "编辑规划", capability: "text" },
     { role: "image_generation", label: "图片生成", capability: "image" },
-    { role: "quality_check", label: "结果验收", capability: "text" },
+    { role: "quality_check", label: "视觉质检（可选）", capability: "text" },
 ];
 
 export const EMPTY_ECOMMERCE_MODEL_ROLES: EcommerceModelRoles = {

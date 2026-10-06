@@ -26,7 +26,7 @@ export type GenerationTaskLease = Pick<
 >;
 
 export type GenerationTaskSchedulePatch = Partial<Pick<GenerationTaskLease, "executionPhase" | "upstreamTaskId" | "channelId" | "provider" | "queryPath" | "submittedAt" | "nextPollAt" | "lastPollAt" | "lastUpstreamStatus" | "resultPayload">>;
-type GenerationTaskScheduleOptions = { cancellation?: boolean; resetUpstreamIdentity?: boolean };
+type GenerationTaskScheduleOptions = { cancellation?: boolean; resetUpstreamIdentity?: boolean; unsubmittedReferenceRecovery?: boolean };
 
 const SCHEDULABLE_TYPES = new Set<GenerationTaskType>(["image", "video", "audio", "text", "agent"]);
 const ACTIVE_PHASES = new Set<GenerationTaskExecutionPhase>(["created", "submitting", "submitted", "polling", "result_ready", "persisting"]);
@@ -45,8 +45,17 @@ export async function scheduleGenerationTask(type: GenerationTaskType, id: strin
                  last_upstream_status = COALESCE($11, last_upstream_status), result_payload = COALESCE($12::jsonb, result_payload)
              WHERE id = $1 AND task_type = $2
                AND ($13::boolean OR status <> 'cancelled' OR execution_phase NOT IN ('cancel_requested', 'cancel_polling'))
+               AND (NOT $14::boolean OR (
+                   task_type = 'image' AND status = 'running' AND execution_phase = 'needs_review'
+                   AND worker_id IS NULL AND lease_until IS NULL AND submitted_at IS NULL AND upstream_task_id IS NULL
+                   AND split_part(last_upstream_status, ':', 1) IN ('reference_source_unavailable', 'reference_validation_unavailable')
+                   AND NULLIF(payload->>'runId', '') IS NOT NULL AND jsonb_typeof(payload->'referenceDispatch') = 'object'
+                   AND COALESCE(payload->'attempts', '[]'::jsonb) = '[]'::jsonb
+                   AND payload->>'billing' IS NULL AND payload->>'upstream' IS NULL AND payload->>'result' IS NULL
+                   AND COALESCE(result_payload, '{}'::jsonb) - 'reviewReason' = '{}'::jsonb
+               ))
              RETURNING *`,
-            [...scheduleValues(id, type, normalized), options.cancellation === true],
+            [...scheduleValues(id, type, normalized), options.cancellation === true, options.unsubmittedReferenceRecovery === true],
         );
         return result.rows[0] ? mapLease(result.rows[0]) : null;
     }
@@ -268,7 +277,38 @@ function isSchedulable(task: StoredGenerationTaskRecord, now: number) {
 }
 
 function canApplySchedulePatch(task: StoredGenerationTaskRecord, options: GenerationTaskScheduleOptions) {
+    if (options.unsubmittedReferenceRecovery && !canRecoverUnsubmittedImageReference(task)) return false;
     return options.cancellation === true || task.status !== "cancelled" || !CANCELLATION_PHASES.has(task.executionPhase || "created");
+}
+
+export function canRecoverUnsubmittedImageReference(task: StoredGenerationTaskRecord | null | undefined) {
+    return Boolean(
+        task && task.status === "running" && task.executionPhase === "needs_review" && ["reference_source_unavailable", "reference_validation_unavailable"].includes((task.lastUpstreamStatus || "").split(":")[0]) && unsubmittedImageReference(task),
+    );
+}
+
+export function canContinueCreatedImageReference(task: StoredGenerationTaskRecord | null | undefined) {
+    return Boolean(
+        task && ["pending", "running"].includes(task.status) && task.executionPhase === "created" && !["reference_source_changed", "submission_outcome_unknown"].includes((task.lastUpstreamStatus || "").split(":")[0]) && unsubmittedImageReference(task),
+    );
+}
+
+function unsubmittedImageReference(task: StoredGenerationTaskRecord) {
+    const payload = task.payload;
+    return Boolean(
+        task.type === "image" &&
+        !task.workerId &&
+        !task.leaseUntil &&
+        !task.submittedAt &&
+        !task.upstreamTaskId &&
+        payload.runId &&
+        record(payload.referenceDispatch) &&
+        (payload.attempts === undefined || (Array.isArray(payload.attempts) && payload.attempts.length === 0)) &&
+        !payload.billing &&
+        !payload.upstream &&
+        !payload.result &&
+        Object.keys(task.resultPayload || {}).every((key) => key === "reviewReason"),
+    );
 }
 
 function mapLease(row: Record<string, unknown>): GenerationTaskLease {

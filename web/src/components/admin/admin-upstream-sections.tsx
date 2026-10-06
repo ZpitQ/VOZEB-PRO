@@ -32,6 +32,7 @@ export function AdminChannelsSection({ controller }: { controller: AdminDashboar
                                     logicalModels: current.logicalModels,
                                     defaultModels: current.defaultModels,
                                     ecommerceGenerationEnabled: current.ecommerceGenerationEnabled,
+                                    ecommerceVisualQualityCheckEnabled: current.ecommerceVisualQualityCheckEnabled,
                                     ecommerceModelRoles: current.ecommerceModelRoles,
                                 }),
                                 "模型渠道配置已保存",
@@ -49,6 +50,7 @@ export function AdminChannelsSection({ controller }: { controller: AdminDashboar
                         logicalModels: settings.logicalModels,
                         defaultModels: settings.defaultModels,
                         ecommerceGenerationEnabled: settings.ecommerceGenerationEnabled,
+                        ecommerceVisualQualityCheckEnabled: settings.ecommerceVisualQualityCheckEnabled,
                         ecommerceModelRoles: settings.ecommerceModelRoles,
                     }}
                     fetchingModelId={fetchingModelId}

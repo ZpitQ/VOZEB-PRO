@@ -32,8 +32,10 @@ import {
     stableAssetUrl,
 } from "./generation-log-repository";
 import type { GenerationAssetStats, GenerationLogInput, GenerationLogListOptions, StoredGenerationLog } from "./generation-log-types";
-import { normalizeEcommerceGenerationTrace, type EcommerceGenerationTrace } from "./ecommerce-generation-trace";
+import { buildEcommerceGenerationTrace, normalizeEcommerceGenerationTrace, type EcommerceGenerationTrace } from "./ecommerce-generation-trace";
 import { getImageTask } from "./image-task-store";
+import { getStoredGenerationTask } from "./generation-task-store";
+import type { AgentRun } from "./agent-run-store";
 
 export type { GenerationAssetStats, GenerationLogAsset, GenerationLogInput, GenerationLogSource, StoredGenerationLog } from "./generation-log-types";
 export { isGenerationSource } from "./generation-log-repository";
@@ -87,15 +89,59 @@ export async function listGenerationLogs(options: GenerationLogListOptions = {})
     return { items: options.includeEcommerceTrace ? await hydrateEcommerceTracesFromImageTasks(items) : items, total, page, pageSize };
 }
 
-export async function hydrateEcommerceTracesFromImageTasks(logs: StoredGenerationLog[], persist: (taskIds: string[], trace: EcommerceGenerationTrace) => Promise<{ updated: number }> = attachEcommerceTraceToGenerationLogs) {
+function pendingAdvisoryTrace(trace: EcommerceGenerationTrace | undefined) {
+    const stage = trace?.stages.find((entry) => entry.key === "quality_check");
+    const output = stage?.output;
+    return stage?.status === "not_run" && output && typeof output === "object" && !Array.isArray(output) && output.policy === "advisory";
+}
+
+function sameTraceIdentity(left: EcommerceGenerationTrace, right: EcommerceGenerationTrace) {
+    return left.runId === right.runId && left.agentTaskId === right.agentTaskId && JSON.stringify(left.imageTaskIds) === JSON.stringify(right.imageTaskIds);
+}
+
+export async function hydrateEcommerceTracesFromImageTasks(
+    logs: StoredGenerationLog[],
+    persist: (taskIds: string[], trace: EcommerceGenerationTrace, expectedTrace?: EcommerceGenerationTrace | null) => Promise<{ updated: number }> = attachEcommerceTraceToGenerationLogs,
+) {
     return Promise.all(
         logs.map(async (log) => {
-            if (log.ecommerceTrace || !log.taskId) return log;
+            if (!log.taskId || (log.ecommerceTrace && !pendingAdvisoryTrace(log.ecommerceTrace))) return log;
             const task = await getImageTask(log.taskId);
-            const trace = normalizeEcommerceGenerationTrace(task?.ecommerceTrace);
-            if (!trace) return log;
+            if (!task || task.id !== log.taskId || task.userId !== log.userId) return log;
+            let trace = normalizeEcommerceGenerationTrace(task.ecommerceTrace);
+            if (log.ecommerceTrace && trace && !sameTraceIdentity(log.ecommerceTrace, trace)) return log;
+            if ((!trace || pendingAdvisoryTrace(trace)) && task.runId && task.parentTaskId) {
+                const run = await getStoredGenerationTask<AgentRun>("agent", task.runId);
+                const snapshot = run?.ecommerceSnapshot;
+                const parent = run?.tasks.find((entry) => entry.id === task.parentTaskId);
+                const ids = parent?.taskIds || (parent?.taskId ? [parent.taskId] : []);
+                if (
+                    run?.id === task.runId &&
+                    run.userId === task.userId &&
+                    run.status === "completed" &&
+                    run.reviewed &&
+                    snapshot?.qualityPolicy === "advisory" &&
+                    snapshot.technicalCheck?.status === "passed" &&
+                    snapshot.qualityCheck &&
+                    parent?.status === "completed" &&
+                    parent.ecommerceExecution &&
+                    ids.includes(task.id)
+                ) {
+                    const rebuilt = buildEcommerceGenerationTrace({
+                        runId: run.id,
+                        task: parent,
+                        snapshot,
+                        imageTaskIds: ids,
+                        generationStatus: "completed",
+                        finalStatus: "completed",
+                        recordedAt: run.timings?.reviewCompletedAt || snapshot.qualityCheck.checkedAt,
+                    });
+                    if (!log.ecommerceTrace || sameTraceIdentity(log.ecommerceTrace, rebuilt)) trace = rebuilt;
+                }
+            }
+            if (!trace || (log.ecommerceTrace && pendingAdvisoryTrace(trace))) return log;
             try {
-                await persist([log.taskId], trace);
+                await persist([log.taskId], trace, log.ecommerceTrace || null);
             } catch (error) {
                 console.error("[ecommerce-generation-trace] pending trace reconciliation failed", error instanceof Error ? error.message : "unknown error");
             }
@@ -104,19 +150,20 @@ export async function hydrateEcommerceTracesFromImageTasks(logs: StoredGeneratio
     );
 }
 
-export async function attachEcommerceTraceToGenerationLogs(taskIds: string[], trace: EcommerceGenerationTrace) {
+export async function attachEcommerceTraceToGenerationLogs(taskIds: string[], trace: EcommerceGenerationTrace, expectedTrace?: EcommerceGenerationTrace | null) {
     const ids = Array.from(new Set(taskIds.map((id) => id.trim()).filter(Boolean)));
     const normalized = normalizeEcommerceGenerationTrace(trace);
     if (!ids.length || !normalized) return { updated: 0 };
     if (isPostgresDatabaseEnabled()) {
         await ensurePostgresSchema();
-        return { updated: await createPostgresRepositories().generationLogs.updateEcommerceTraceByTaskIds(ids, normalized) };
+        return { updated: await createPostgresRepositories().generationLogs.updateEcommerceTraceByTaskIds(ids, normalized, expectedTrace) };
     }
     return mutateGenerationLogDb(async (db) => {
         const idSet = new Set(ids);
         let updated = 0;
         db.logs = db.logs.map((log) => {
             if (!log.taskId || !idSet.has(log.taskId)) return log;
+            if (expectedTrace !== undefined && JSON.stringify(log.ecommerceTrace || null) !== JSON.stringify(expectedTrace)) return log;
             updated += 1;
             return { ...log, ecommerceTrace: normalized, updatedAt: new Date().toISOString() };
         });

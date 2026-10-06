@@ -75,6 +75,35 @@ describe("generation task scheduler", () => {
         });
     });
 
+    it("accepts one explicit unsubmitted reference recovery and rejects the second scheduler mutation", async () => {
+        mocks.records = [{ ...record("due", 0), executionPhase: "needs_review", lastUpstreamStatus: "reference_source_unavailable:check original", payload: { runId: "same-run", referenceDispatch: { inputId: "same-input" }, attempts: [] } }];
+        const patch = { executionPhase: "created" as const, nextPollAt: 1_000, lastUpstreamStatus: "reference_recovery_requested" };
+        const results = [await scheduleGenerationTask("image", "due", patch, { unsubmittedReferenceRecovery: true }), await scheduleGenerationTask("image", "due", patch, { unsubmittedReferenceRecovery: true })];
+        expect(results.filter(Boolean)).toHaveLength(1);
+        expect(mocks.records[0]).toMatchObject({ executionPhase: "created", nextPollAt: 1_000, payload: { runId: "same-run", referenceDispatch: { inputId: "same-input" }, attempts: [] } });
+    });
+
+    it.each([
+        { lastUpstreamStatus: "reference_source_changed:changed" },
+        { lastUpstreamStatus: "submission_outcome_unknown" },
+        { executionPhase: "submitting" },
+        { submittedAt: 1 },
+        { upstreamTaskId: "same-upstream" },
+        { resultPayload: { url: "/api/generation-log-assets/ready.png" } },
+        { payload: { runId: "same-run", referenceDispatch: {}, attempts: [{ attemptNo: 1 }] } },
+        { payload: { runId: "same-run", referenceDispatch: {}, upstream: { id: "same-upstream" } } },
+        { payload: { runId: "same-run", referenceDispatch: {}, billing: { pointsRecordId: "same-billing" } } },
+        { payload: { runId: "same-run", referenceDispatch: {}, result: { dataUrl: "/api/generation-log-assets/ready.png" } } },
+        { payload: { runId: "same-run", attempts: [] } },
+        { type: "video" },
+        { status: "cancelled" },
+    ])("refuses reference recovery when a protected submission field is present (%j)", async (drift) => {
+        mocks.records = [{ ...record("due", 0), executionPhase: "needs_review", lastUpstreamStatus: "reference_source_unavailable:check original", payload: { runId: "same-run", referenceDispatch: { inputId: "same-input" }, attempts: [] }, ...drift }];
+        const before = structuredClone(mocks.records);
+        expect(await scheduleGenerationTask("image", "due", { executionPhase: "created", nextPollAt: 1_000 }, { unsubmittedReferenceRecovery: true })).toBeNull();
+        expect(mocks.records).toEqual(before);
+    });
+
     it("clears the previous upstream identity before an automatic retry", async () => {
         mocks.records[0] = {
             ...mocks.records[0],

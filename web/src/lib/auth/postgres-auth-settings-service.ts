@@ -76,6 +76,7 @@ function postgresSettingsPatch(patch: Partial<AuthSettings>, settings: AuthSetti
     if (patch.logicalModels !== undefined) result.logicalModels = asJson(settings.logicalModels);
     if (patch.defaultModels !== undefined) result.defaultModels = asJson(settings.defaultModels);
     if (patch.ecommerceGenerationEnabled !== undefined) result.ecommerceGenerationEnabled = settings.ecommerceGenerationEnabled;
+    if (patch.ecommerceVisualQualityCheckEnabled !== undefined) result.ecommerceVisualQualityCheckEnabled = settings.ecommerceVisualQualityCheckEnabled;
     if (patch.ecommerceModelRoles !== undefined) result.ecommerceModelRoles = asJson(settings.ecommerceModelRoles);
     if (patch.agentSkills !== undefined) result.agentSkills = asJson(settings.agentSkills);
     return result;
