@@ -761,7 +761,7 @@ test("unsupported-mask:真实协议能力门禁保留原任务且不整图重绘
         const detail = await request.get("/api/admin/generation-operations?type=agent");
         expect(detail.ok(), await detail.text()).toBe(true);
         const internal = ((await detail.json()).data.items as Array<{ id: string; status: string; model: string; error?: string; childTasks?: unknown[] }>).find((item) => item.id === created.runId);
-        expect(internal).toMatchObject({ id: created.runId, status: "paused", model: logicalModelId, error: expect.stringContaining("不支持可信独立蒙版") });
+        expect(internal).toMatchObject({ id: created.runId, status: "paused", model: logicalModelId, error: "当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。" });
         const creates = (state: Awaited<ReturnType<typeof protocolFixtureState>>) => state.requests.filter((item) => item.method === "POST" && (/\/images\//.test(item.path) || /:generateContent$/.test(item.path))).length;
         expect(creates(await protocolFixtureState(request))).toBe(0);
         const rejected = await request.post(`/api/agent/runs/${created.runId}/resume`, { data: { conversationId: created.conversationId, sceneSelection: { baselineAssetId: "invalid-selection", region: { x: 1, y: 1, width: 2, height: 2 } } } });
@@ -775,7 +775,7 @@ test("unsupported-mask:真实协议能力门禁保留原任务且不整图重绘
         expect(restoredResponse).not.toBeNull();
         expect(restoredResponse!.ok(), await restoredResponse!.text()).toBe(true);
         expect(((await restoredResponse!.json()) as { data: { run: PublicRun } }).data.run).toMatchObject({ id: created.runId, conversationId: created.conversationId, status: "paused" });
-        await expect(page.getByText("当前生图模型不支持可信独立蒙版，任务已暂停等待复核。", { exact: true })).toBeVisible();
+        await expect(page.getByText("当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。", { exact: true })).toBeVisible();
         await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
         await expect(page.getByTestId("creative-media-result")).toHaveCount(0);
         const restored = await waitForRun(request, created.runId, "paused");
@@ -1817,7 +1817,7 @@ function expectSuccessfulTrace(
     const canvasEvidence = qualityStage.output.canvasEvidence ?? [];
     expect(canvasEvidence).toHaveLength(1);
     const evidence = canvasEvidence[0];
-    expect(evidence).toMatchObject({ resultId, constraint: canvas, nativeMatches: true, storedMatches: true, hardFailures: [] });
+    expect(evidence).toMatchObject({ resultId, constraint: canvas, nativeMatches: true, storedMatches: true, normalization: "none", hardFailures: [] });
     expect(evidence.nativeUrl).toMatch(/^\/api\/generation-log-assets\/permanent\//);
     expect(evidence.storedUrl).toMatch(/^\/api\/generation-log-assets\/permanent\//);
     for (const size of [evidence.nativeSize, evidence.storedSize]) {
@@ -1826,7 +1826,9 @@ function expectSuccessfulTrace(
         if (canvas!.mode === "exact") expect(size).toEqual(canvas!.size);
         else expect(BigInt(size.width) * BigInt(canvas!.size.height)).toBe(BigInt(size.height) * BigInt(canvas!.size.width));
     }
-    expect(checks.at(-1)?.reason).toBe(`native=${evidence.nativeSize.width}x${evidence.nativeSize.height};stored=${evidence.storedSize.width}x${evidence.storedSize.height};constraint=${canvas!.mode}:${canvas!.size.width}x${canvas!.size.height}`);
+    expect(checks.at(-1)?.reason).toBe(
+        `native=${evidence.nativeSize.width}x${evidence.nativeSize.height};stored=${evidence.storedSize.width}x${evidence.storedSize.height};constraint=${canvas!.mode}:${canvas!.size.width}x${canvas!.size.height};normalization=none`,
+    );
 }
 
 function expectTraceRoutes(trace: EcommerceTrace) {

@@ -206,3 +206,6 @@ jobs:
           languages: javascript-typescript
       - name: Analyze JavaScript and TypeScript
         uses: github/codeql-action/analyze@47be0dbd5113ab1b79fe2dd3f68bdf7e426cdc87 # v3
+        with:
+          # Preserve the existing main-branch analysis identity after moving PR checks.
+          category: .github/workflows/docker-image.yml:security/

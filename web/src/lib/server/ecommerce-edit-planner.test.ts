@@ -5,6 +5,7 @@ import { normalizePlannedEdit, planEcommerceEdit } from "./ecommerce-edit-planne
 import { referenceUsesFromEcommerceDecision, resolveEcommerceReferenceDecision, type EcommerceReferenceDecision } from "./ecommerce-reference-purpose";
 import type { EcommerceVisualAnalysisV4 } from "./ecommerce-visual-analysis";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
+import { resolveImageEditProtocol } from "./image-edit-protocol";
 import type { EcommercePlanningInput } from "./ecommerce-generation-snapshot";
 import type { EcommerceRoleCandidate } from "./ecommerce-model-routing";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
@@ -109,7 +110,15 @@ describe("ecommerce edit planner", () => {
         const { input, analysis, plan } = productPurposeFixture(userRequest);
         plan.delta.requestedChanges = [modelDelta];
         const original = structuredClone({ input, plan });
-        const profile = resolveEcommerceImageProviderProfile({ logicalRole: "image_generation", capability: "image", logicalModelId: "image-generation", channelId: "fixture", upstreamModel: "gpt-image-2.5-flare", apiFormat: "openai" })!;
+        const profile = resolveEcommerceImageProviderProfile({
+            logicalRole: "image_generation",
+            capability: "image",
+            logicalModelId: "image-generation",
+            channelId: "fixture",
+            upstreamModel: "gpt-image-2.5-flare",
+            apiFormat: "openai",
+            imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
+        })!;
         expect(() => compileEcommerceImageRequest(normalizePlannedEdit(plan, input, analysis, "planner-model")!, profile)).toThrow("暂不支持修改商品颜色或材质");
         expect(input.planningInput.userRequest).toBe(original.input.planningInput.userRequest);
         expect(plan.preserve).toEqual(original.plan.preserve);
@@ -223,7 +232,15 @@ describe("ecommerce edit planner", () => {
         ...["中的", "里面的", "里的", "的"].flatMap((qualifier) => [`修改图片2场景，不要对图片2${qualifier}商品颜色进行修改`, `修改图片2场景，将背景地板材质改成石材，禁止修改图片2${qualifier}商品材质`]),
     ])("keeps scene edits and product-preservation instructions executable: %s", (userRequest) => {
         const { input, analysis, plan } = productPurposeFixture(userRequest);
-        const profile = resolveEcommerceImageProviderProfile({ logicalRole: "image_generation", capability: "image", logicalModelId: "image-generation", channelId: "fixture", upstreamModel: "gpt-image-2.5-flare", apiFormat: "openai" })!;
+        const profile = resolveEcommerceImageProviderProfile({
+            logicalRole: "image_generation",
+            capability: "image",
+            logicalModelId: "image-generation",
+            channelId: "fixture",
+            upstreamModel: "gpt-image-2.5-flare",
+            apiFormat: "openai",
+            imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
+        })!;
         const normalized = normalizePlannedEdit(plan, input, analysis, "planner-model")!;
         expect(compileEcommerceImageRequest(normalized, profile).state).toBe("ready");
         expect(normalized.preserve.productCore).toEqual(expect.arrayContaining(["color", "material"]));
@@ -393,7 +410,15 @@ describe("ecommerce edit planner", () => {
         expect(plan.photography?.lighting.keyLight).toBe("本轮更明亮的自然主光");
         expect(plan.photography?.composition).toEqual(photographyFacts().composition);
         expect(plan.photography?.materials[0]).toMatchObject({ textureDirection: "沿原图木纹方向", gloss: "保留原有低光泽" });
-        const profile = resolveEcommerceImageProviderProfile({ logicalRole: "image_generation", capability: "image", logicalModelId: "image-generation", channelId: "fixture", upstreamModel: "gpt-image-2.5-flare", apiFormat: "openai" })!;
+        const profile = resolveEcommerceImageProviderProfile({
+            logicalRole: "image_generation",
+            capability: "image",
+            logicalModelId: "image-generation",
+            channelId: "fixture",
+            upstreamModel: "gpt-image-2.5-flare",
+            apiFormat: "openai",
+            imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
+        })!;
         const compiled = compileEcommerceImageRequest(plan, profile);
         expect(compiled).toMatchObject({ state: "ready", mask: { mode: "independent", required: true }, protection: { scope: "global", allowLightingChange: true } });
         expect(compiled.prompt).toContain("本轮更明亮的自然主光");
@@ -433,7 +458,15 @@ describe("ecommerce edit planner", () => {
         expect(plan.protection).toMatchObject({ scope: "local", allowLightingChange: false, preserveOutsideMask: false, protectedObjectIds: expect.arrayContaining(["product"]) });
         expect(plan.photography?.lighting.keyLight).toBe("保留原有左侧大面积柔光");
         expect(plan.photography?.composition).toEqual(photographyFacts().composition);
-        const profile = resolveEcommerceImageProviderProfile({ logicalRole: "image_generation", capability: "image", logicalModelId: "image-generation", channelId: "fixture", upstreamModel: "gpt-image-2.5-flare", apiFormat: "openai" })!;
+        const profile = resolveEcommerceImageProviderProfile({
+            logicalRole: "image_generation",
+            capability: "image",
+            logicalModelId: "image-generation",
+            channelId: "fixture",
+            upstreamModel: "gpt-image-2.5-flare",
+            apiFormat: "openai",
+            imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
+        })!;
         const compiled = compileEcommerceImageRequest(plan, profile);
         expect(compiled).toMatchObject({ state: "ready", mask: { mode: "independent", required: true }, protection: { scope: "local", allowLightingChange: false } });
         expect(compiled.prompt).not.toContain("未经授权");
@@ -640,7 +673,15 @@ describe("ecommerce edit planner", () => {
         });
         const normalized = normalizePlannedEdit(output, request, sceneVisualAnalysis(), "planner-model");
         expect(normalized).toMatchObject({ planVersion: ECOMMERCE_EDIT_PLAN_VERSION, protection: { scope, preserveOutsideMask: scope === "local", allowLightingChange: scope === "global" } });
-        const profile = resolveEcommerceImageProviderProfile({ logicalRole: "image_generation", capability: "image", logicalModelId: "image-generation", channelId: "fixture", upstreamModel: "gpt-image-2.5-flare", apiFormat: "openai" })!;
+        const profile = resolveEcommerceImageProviderProfile({
+            logicalRole: "image_generation",
+            capability: "image",
+            logicalModelId: "image-generation",
+            channelId: "fixture",
+            upstreamModel: "gpt-image-2.5-flare",
+            apiFormat: "openai",
+            imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
+        })!;
         const compiled = compileEcommerceImageRequest(normalized!, profile);
         expect(compiled).toMatchObject({ state: "ready", protection: normalized!.protection });
         if (scope === "local") expect(compiled.mask).toEqual({ mode: "independent", required: true });

@@ -60,16 +60,16 @@
 | @floating-ui/react-dom | 2.1.9 | MIT | [链接](https://floating-ui.com/docs/react-dom) |
 | @floating-ui/utils | 0.2.12 | MIT | [链接](https://floating-ui.com) |
 | @img/colour | 1.1.0 | MIT | [链接](https://github.com/lovell/colour#readme) |
-| @img/sharp-libvips-linux-x64 | 1.3.3 | LGPL-3.0-or-later | [链接](https://sharp.pixelplumbing.com) |
-| @img/sharp-linux-x64 | 0.35.4 | Apache-2.0 | [链接](https://sharp.pixelplumbing.com) |
+| @img/sharp-libvips-linux-x64 | 1.3.4 | LGPL-3.0-or-later | [链接](https://sharp.pixelplumbing.com) |
+| @img/sharp-linux-x64 | 0.35.5 | Apache-2.0 | [链接](https://sharp.pixelplumbing.com) |
 | @jridgewell/gen-mapping | 0.3.13 | MIT | [链接](https://github.com/jridgewell/sourcemaps/tree/main/packages/gen-mapping) |
 | @jridgewell/remapping | 2.3.5 | MIT | [链接](https://github.com/jridgewell/sourcemaps/tree/main/packages/remapping) |
 | @jridgewell/resolve-uri | 3.1.2 | MIT | [链接](https://github.com/jridgewell/resolve-uri#readme) |
 | @jridgewell/sourcemap-codec | 1.5.5 | MIT | [链接](https://github.com/jridgewell/sourcemaps/tree/main/packages/sourcemap-codec) |
 | @jridgewell/trace-mapping | 0.3.31 | MIT | [链接](https://github.com/jridgewell/sourcemaps/tree/main/packages/trace-mapping) |
 | @mediapipe/tasks-vision | 1.0.1 | Apache-2.0 | [链接](http://mediapipe.dev) |
-| @next/env | 16.3.6 | MIT | [链接](https://github.com/vercel/next.js#readme) |
-| @next/swc-linux-x64-gnu | 16.3.6 | MIT | [链接](https://github.com/vercel/next.js#readme) |
+| @next/env | 16.3.8 | MIT | [链接](https://github.com/vercel/next.js#readme) |
+| @next/swc-linux-x64-gnu | 16.3.8 | MIT | [链接](https://github.com/vercel/next.js#readme) |
 | @noble/hashes | 2.2.0 | MIT | [链接](https://paulmillr.com/noble/) |
 | @photo-sphere-viewer/core | 5.15.0 | MIT | [链接](https://photo-sphere-viewer.js.org) |
 | @playwright/test | 1.62.1 | Apache-2.0 | [链接](https://playwright.dev) |
@@ -376,7 +376,7 @@
 | motion-utils | 12.39.0 | MIT | [链接](https://github.com/motiondivision/motion#readme) |
 | ms | 2.1.3 | MIT | [链接](https://github.com/vercel/ms#readme) |
 | nanoid | 3.3.18, 6.0.0 | MIT | [链接](https://github.com/ai/nanoid#readme) |
-| next | 16.3.6 | MIT | [链接](https://nextjs.org) |
+| next | 16.3.8 | MIT | [链接](https://nextjs.org) |
 | node-domexception | 1.0.0 | MIT | [链接](https://github.com/jimmywarting/node-domexception#readme) |
 | node-fetch | 3.3.2 | MIT | [链接](https://github.com/node-fetch/node-fetch) |
 | node-releases | 2.0.53 | MIT | [链接](https://github.com/chicoxyzzy/node-releases#readme) |
@@ -432,7 +432,7 @@
 | scheduler | 0.27.0 | MIT | [链接](https://react.dev/) |
 | scroll-into-view-if-needed | 3.1.0 | MIT | [链接](https://scroll-into-view.dev) |
 | semver | 6.3.1, 7.8.5 | ISC | [链接](https://github.com/npm/node-semver#readme) |
-| sharp | 0.35.4 | Apache-2.0 | [链接](https://sharp.pixelplumbing.com) |
+| sharp | 0.35.5 | Apache-2.0 | [链接](https://sharp.pixelplumbing.com) |
 | source-map-js | 1.2.2 | BSD-3-Clause | [链接](https://github.com/7rulnik/source-map-js) |
 | space-separated-tokens | 2.0.2 | MIT | [链接](https://github.com/wooorm/space-separated-tokens#readme) |
 | split2 | 4.2.0 | ISC | [链接](https://github.com/mcollina/split2#readme) |
@@ -490,12 +490,12 @@
 | @fuma-translate/react | 1.0.2 | MIT | [链接](https://github.com/fuma-nama/fuma-translate#readme) |
 | @fumadocs/tailwind | 0.1.1 | MIT | [链接](https://fumadocs.dev) |
 | @img/colour | 1.1.0 | MIT | [链接](https://github.com/lovell/colour#readme) |
-| @img/sharp-libvips-linux-x64 | 1.3.3 | LGPL-3.0-or-later | [链接](https://sharp.pixelplumbing.com) |
-| @img/sharp-linux-x64 | 0.35.4 | Apache-2.0 | [链接](https://sharp.pixelplumbing.com) |
+| @img/sharp-libvips-linux-x64 | 1.3.4 | LGPL-3.0-or-later | [链接](https://sharp.pixelplumbing.com) |
+| @img/sharp-linux-x64 | 0.35.5 | Apache-2.0 | [链接](https://sharp.pixelplumbing.com) |
 | @jridgewell/sourcemap-codec | 1.5.5 | MIT | [链接](https://github.com/jridgewell/sourcemaps/tree/main/packages/sourcemap-codec) |
 | @mdx-js/mdx | 3.1.1 | MIT | [链接](https://mdxjs.com) |
-| @next/env | 16.3.6 | MIT | [链接](https://github.com/vercel/next.js#readme) |
-| @next/swc-linux-x64-gnu | 16.3.6 | MIT | [链接](https://github.com/vercel/next.js#readme) |
+| @next/env | 16.3.8 | MIT | [链接](https://github.com/vercel/next.js#readme) |
+| @next/swc-linux-x64-gnu | 16.3.8 | MIT | [链接](https://github.com/vercel/next.js#readme) |
 | @radix-ui/number | 1.1.3 | MIT | [链接](https://radix-ui.com/primitives) |
 | @radix-ui/primitive | 1.1.7 | MIT | [链接](https://radix-ui.com/primitives) |
 | @radix-ui/react-accordion | 1.2.20 | MIT | [链接](https://radix-ui.com/primitives) |
@@ -679,7 +679,7 @@
 | motion-utils | 12.39.0 | MIT | [链接](https://github.com/motiondivision/motion#readme) |
 | ms | 2.1.3 | MIT | [链接](https://github.com/vercel/ms#readme) |
 | nanoid | 3.3.18 | MIT | [链接](https://github.com/ai/nanoid#readme) |
-| next | 16.3.6 | MIT | [链接](https://nextjs.org) |
+| next | 16.3.8 | MIT | [链接](https://nextjs.org) |
 | next-themes | 0.4.6 | MIT | [链接](https://github.com/pacocoursey/next-themes#readme) |
 | npm-to-yarn | 3.2.0 | MIT | [链接](https://github.com/nebrelbug/npm-to-yarn#readme) |
 | oniguruma-parser | 0.12.2 | MIT | [链接](https://github.com/slevithan/oniguruma-parser#readme) |
@@ -714,7 +714,7 @@
 | scheduler | 0.27.0 | MIT | [链接](https://react.dev/) |
 | scroll-into-view-if-needed | 3.1.0 | MIT | [链接](https://scroll-into-view.dev) |
 | semver | 7.8.5 | ISC | [链接](https://github.com/npm/node-semver#readme) |
-| sharp | 0.35.4 | Apache-2.0 | [链接](https://sharp.pixelplumbing.com) |
+| sharp | 0.35.5 | Apache-2.0 | [链接](https://sharp.pixelplumbing.com) |
 | shiki | 4.4.3 | MIT | [链接](https://github.com/shikijs/shiki#readme) |
 | source-map | 0.7.6 | BSD-3-Clause | [链接](https://github.com/mozilla/source-map) |
 | source-map-js | 1.2.2 | BSD-3-Clause | [链接](https://github.com/7rulnik/source-map-js) |
