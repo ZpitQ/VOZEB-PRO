@@ -761,7 +761,7 @@ test("unsupported-mask:真实协议能力门禁保留原任务且不整图重绘
         const detail = await request.get("/api/admin/generation-operations?type=agent");
         expect(detail.ok(), await detail.text()).toBe(true);
         const internal = ((await detail.json()).data.items as Array<{ id: string; status: string; model: string; error?: string; childTasks?: unknown[] }>).find((item) => item.id === created.runId);
-        expect(internal).toMatchObject({ id: created.runId, status: "paused", model: logicalModelId, error: expect.stringContaining("不支持可信独立蒙版") });
+        expect(internal).toMatchObject({ id: created.runId, status: "paused", model: logicalModelId, error: "当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。" });
         const creates = (state: Awaited<ReturnType<typeof protocolFixtureState>>) => state.requests.filter((item) => item.method === "POST" && (/\/images\//.test(item.path) || /:generateContent$/.test(item.path))).length;
         expect(creates(await protocolFixtureState(request))).toBe(0);
         const rejected = await request.post(`/api/agent/runs/${created.runId}/resume`, { data: { conversationId: created.conversationId, sceneSelection: { baselineAssetId: "invalid-selection", region: { x: 1, y: 1, width: 2, height: 2 } } } });
@@ -775,7 +775,7 @@ test("unsupported-mask:真实协议能力门禁保留原任务且不整图重绘
         expect(restoredResponse).not.toBeNull();
         expect(restoredResponse!.ok(), await restoredResponse!.text()).toBe(true);
         expect(((await restoredResponse!.json()) as { data: { run: PublicRun } }).data.run).toMatchObject({ id: created.runId, conversationId: created.conversationId, status: "paused" });
-        await expect(page.getByText("当前生图模型不支持可信独立蒙版，任务已暂停等待复核。", { exact: true })).toBeVisible();
+        await expect(page.getByText("当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。", { exact: true })).toBeVisible();
         await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
         await expect(page.getByTestId("creative-media-result")).toHaveCount(0);
         const restored = await waitForRun(request, created.runId, "paused");
@@ -787,13 +787,13 @@ test("unsupported-mask:真实协议能力门禁保留原任务且不整图重绘
     }
 });
 
-test("child-review-reason:选区确认后子任务API复核原因持久显示且不重复创建", async ({ page, request }, testInfo) => {
-    test.skip(testInfo.project.name !== "chromium", "真实子任务链路在桌面执行；布局矩阵另有DTO测试");
+test("custom-mask-preflight:不可信自定义蒙版协议提前复核且原因刷新保留", async ({ page, request }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "真实协议否定对照在桌面执行");
     const golden = regressions.find((item) => item.caseId === "landscape-prop-add")!;
     const settings = e2eSettingsPatch();
     const model = MODEL_ROUTES.image_generation.upstreamModel;
-    const reason = "当前协议不支持可信独立蒙版，请选择支持局部编辑的模型。";
-    // The compiler accepts this OpenAI image profile; the child API rejects its custom mask transport after selection.
+    const reason = "当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。";
+    // The shared protocol contract rejects untrusted custom masks before asking for a selection.
     const configured = await request.patch("/api/admin/settings", {
         data: {
             ...settings,
@@ -813,41 +813,20 @@ test("child-review-reason:选区确认后子任务API复核原因持久显示且
         await page.locator('input[type="file"][multiple]').setInputFiles({ name: "child-review-scene.png", mimeType: "image/png", buffer: await deterministicScene(golden.source!) });
         const created = await submitPrompt(page, golden.userRequest, { reusePage: true });
         pausedRunForCleanup = created;
-        const waiting = await waitForRun(request, created.runId, "paused");
-        expect(waiting.ecommerceSceneSelection).toMatchObject({ action: "confirm_scene_selection" });
-        const taskId = waiting.tasks?.[0].id;
+        const paused = await waitForRun(request, created.runId, "paused");
+        const taskId = paused.tasks?.[0].id;
+        expect(taskId).toBeDefined();
+        expect(paused.tasks).toEqual([expect.objectContaining({ id: taskId, status: "needs_review", error: reason })]);
+        expect(paused.ecommerceSceneSelection).toBeUndefined();
+        expectPublicWhitelist(paused);
         const children = async () => {
             const response = await request.get("/api/admin/generation-operations?type=image");
             expect(response.ok(), await response.text()).toBe(true);
             return ((await response.json()).data.items as AdminGenerationTask[]).filter((task) => task.runId === created.runId);
         };
         expect(await children()).toHaveLength(0);
-        await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
-        const image = page.getByRole("img", { name: "选择修改位置的原图", exact: true });
-        await expect(image).toBeVisible();
-        await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).complete && (element as HTMLImageElement).naturalWidth > 0)).toBe(true);
-        const box = await image.boundingBox();
-        if (!box) throw new Error("Child review selection image has no geometry");
-        await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
-        await page.mouse.down();
-        await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.8);
-        await page.mouse.up();
-        const resumeResponse = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/agent/runs/${created.runId}/resume`);
-        await page.getByRole("button", { name: "确认修改位置", exact: true }).click();
-        const resumed = await resumeResponse;
-        expect(resumed.ok(), await resumed.text()).toBe(true);
-        await expect.poll(async () => (await children()).length).toBe(1);
-        const paused = await waitForRun(request, created.runId, "paused");
-        expect(paused.tasks).toEqual([expect.objectContaining({ id: taskId, status: "needs_review", error: reason })]);
-        expect(paused.ecommerceSceneSelection).toBeUndefined();
-        expectPublicWhitelist(paused);
-        const [child] = await children();
-        expect(child).toMatchObject({ runId: created.runId, parentTaskId: created.runId, attemptNo: 1, executionPhase: "needs_review", lastUpstreamStatus: "strict_product_mask_review_required", error: reason });
-        expect(child.attempts ?? []).toHaveLength(0);
-        expect(child.upstreamTaskId).toBeUndefined();
-        const detail = await request.get(`/api/image-tasks/${encodeURIComponent(child.id)}`);
-        expect(detail.ok(), await detail.text()).toBe(true);
-        expect(await detail.json()).toMatchObject({ task: { id: child.id, needsReview: true, reviewReason: reason, executionPhase: "needs_review" } });
+        const rejected = await request.post(`/api/agent/runs/${created.runId}/resume`, { data: { conversationId: created.conversationId, sceneSelection: { baselineAssetId: "invalid-selection", region: { x: 1, y: 1, width: 2, height: 2 } } } });
+        expect(rejected.status()).toBe(409);
         await expect(page.getByText(reason, { exact: true })).toBeVisible();
         const assertPersistedReason = async () => {
             const messages = await request.get(`/api/creative/conversations/${created.conversationId}/messages`);
@@ -856,9 +835,11 @@ test("child-review-reason:选区确认后子任务API复核原因持久显示且
             expect(assistant?.content).toBe(reason);
             await expect(page.getByText(/上游创建状态待确认|上游创建结果待确认/)).toHaveCount(0);
             expect((await protocolFixtureState(request)).requests.filter((item) => item.method === "POST" && (/\/images\//.test(item.path) || /:generateContent$/.test(item.path)))).toHaveLength(0);
-            expect((await children()).map((task) => ({ id: task.id, attemptNo: task.attemptNo }))).toEqual([{ id: child.id, attemptNo: 1 }]);
+            expect(await children()).toHaveLength(0);
         };
         await assertPersistedReason();
+        await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-media-result")).toHaveCount(0);
         await page.reload({ waitUntil: "domcontentloaded" });
         await expect(page.getByText(reason, { exact: true })).toBeVisible();
         await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
@@ -1327,6 +1308,62 @@ async function flushRunEventRendering(page: Page) {
     await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 }
 
+test("selection-large-preview:待确认直接显示完整图片并在大图保留原像素选区", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "桌面大图框选专项");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const fixture = await mockPublicEcommerceRound(page, "selection");
+    await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
+    const preview = page.getByRole("img", { name: "待修改的原图", exact: true });
+    await expect(preview).toBeVisible();
+    await expect.poll(() => preview.evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBe(418);
+    const small = await preview.boundingBox();
+    if (!small) throw new Error("Inline selection preview has no browser geometry");
+    expect(small.width / small.height).toBeCloseTo(2, 2);
+    await expect(page.getByRole("dialog", { name: "选择修改位置", exact: true })).toHaveCount(0);
+    await preview.click();
+    const dialog = page.getByRole("dialog", { name: "选择修改位置", exact: true });
+    await expect(dialog).toBeVisible();
+    const image = dialog.getByRole("img", { name: "选择修改位置的原图", exact: true });
+    await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(418);
+    const large = await sceneSelectionImageGeometry(page);
+    expect(large.width).toBeGreaterThan(small.width * 1.6);
+    expect(large.width / large.height).toBeCloseTo(2, 2);
+    expect(large.x).toBeGreaterThanOrEqual(0);
+    expect(large.y).toBeGreaterThanOrEqual(0);
+    expect(large.x + large.width).toBeLessThanOrEqual(1440);
+    expect(large.y + large.height).toBeLessThanOrEqual(900);
+    const confirm = dialog.getByRole("button", { name: /确认修改位置$/ });
+    await expect(confirm).toBeDisabled();
+    await dragSceneSelection(page);
+    await expect(confirm).toBeEnabled();
+    const selected = dialog.getByTestId("creative-scene-selection-region");
+    const expectedOverlay = await selected.getAttribute("style");
+    await dialog.getByRole("button", { name: "关闭大图", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByTestId("creative-scene-selection-preview").getByTestId("creative-scene-selection-region")).toHaveAttribute("style", expectedOverlay!);
+    expect(fixture.controls).toHaveLength(0);
+    await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
+    await expect(dialog).toBeVisible();
+    await expect(selected).toHaveAttribute("style", expectedOverlay!);
+    await expect(confirm).toBeEnabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByTestId("creative-scene-selection-preview").getByTestId("creative-scene-selection-region")).toHaveAttribute("style", expectedOverlay!);
+    expect(fixture.controls).toHaveLength(0);
+    await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
+    await expect(dialog).toBeVisible();
+    await expect(selected).toHaveAttribute("style", expectedOverlay!);
+    await testInfo.attach("selection-large-preview", { body: await page.screenshot(), contentType: "image/png" });
+    await confirm.dblclick();
+    await expect(confirm).toBeDisabled();
+    await expect.poll(() => fixture.controls.length).toBe(1);
+    expect(fixture.controls[0]).toEqual({ conversationId: fixture.conversationId, sceneSelection: { baselineAssetId: "task16-baseline", region: { x: 251, y: 125, width: 752, height: 377 } } });
+    fixture.releaseResume();
+    await expect(dialog).toHaveCount(0);
+    expect(fixture.createdRuns()).toBe(0);
+    expect(fixture.controls).toHaveLength(1);
+});
+
 for (const theme of ["light", "dark"] as const) {
     test(`待选区同一任务可取消、刷新恢复并按原图像素确认-${theme}`, async ({ page }, testInfo) => {
         test.skip(!["chromium", "mobile-390", "mobile-430"].includes(testInfo.project.name), "桌面与390/430专项");
@@ -1343,6 +1380,13 @@ for (const theme of ["light", "dark"] as const) {
         await expect(confirm).toBeEnabled();
         await page.getByRole("button", { name: "取消选择", exact: true }).click();
         expect(fixture.controls).toHaveLength(0);
+        await expect(page.getByRole("dialog", { name: "选择修改位置", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-scene-selection-preview").getByTestId("creative-scene-selection-region")).toHaveCount(0);
+        await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
+        await expect(confirm).toBeDisabled();
+        await expect(page.getByTestId("creative-scene-selection").getByTestId("creative-scene-selection-region")).toHaveCount(0);
+        await page.getByRole("button", { name: "关闭大图", exact: true }).click();
+        await expect(page.getByRole("dialog", { name: "选择修改位置", exact: true })).toHaveCount(0);
         await page.reload({ waitUntil: "domcontentloaded" });
         await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
         await expect(confirm).toBeDisabled();
@@ -1391,12 +1435,30 @@ for (const theme of ["light", "dark"] as const) {
     });
 }
 
-async function dragSceneSelection(page: Page) {
+async function sceneSelectionImageGeometry(page: Page) {
     const image = page.getByRole("img", { name: "选择修改位置的原图", exact: true });
     await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(418);
     await image.scrollIntoViewIfNeeded();
-    const box = await image.boundingBox();
-    if (!box) throw new Error("Selection image has no browser geometry");
+    let previous: Awaited<ReturnType<typeof image.boundingBox>> = null;
+    let stableSamples = 0;
+    // Modal motion can start after its first visible frame; wait for stable geometry.
+    await expect
+        .poll(
+            async () => {
+                const box = await image.boundingBox();
+                stableSamples = box && previous && (["x", "y", "width", "height"] as const).every((key) => Math.abs(box[key] - previous![key]) < 0.5) ? stableSamples + 1 : 0;
+                previous = box;
+                return stableSamples;
+            },
+            { intervals: [100, 100, 100] },
+        )
+        .toBeGreaterThanOrEqual(2);
+    if (!previous) throw new Error("Selection image has no stable browser geometry");
+    return previous;
+}
+
+async function dragSceneSelection(page: Page) {
+    const box = await sceneSelectionImageGeometry(page);
     await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
     await page.mouse.down();
     await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.8);
@@ -1736,7 +1798,7 @@ function expectSuccessfulTrace(
     const canvasEvidence = qualityStage.output.canvasEvidence ?? [];
     expect(canvasEvidence).toHaveLength(1);
     const evidence = canvasEvidence[0];
-    expect(evidence).toMatchObject({ resultId, constraint: canvas, nativeMatches: true, storedMatches: true, hardFailures: [] });
+    expect(evidence).toMatchObject({ resultId, constraint: canvas, nativeMatches: true, storedMatches: true, normalization: "none", hardFailures: [] });
     expect(evidence.nativeUrl).toMatch(/^\/api\/generation-log-assets\/permanent\//);
     expect(evidence.storedUrl).toMatch(/^\/api\/generation-log-assets\/permanent\//);
     for (const size of [evidence.nativeSize, evidence.storedSize]) {
@@ -1745,7 +1807,9 @@ function expectSuccessfulTrace(
         if (canvas!.mode === "exact") expect(size).toEqual(canvas!.size);
         else expect(BigInt(size.width) * BigInt(canvas!.size.height)).toBe(BigInt(size.height) * BigInt(canvas!.size.width));
     }
-    expect(checks.at(-1)?.reason).toBe(`native=${evidence.nativeSize.width}x${evidence.nativeSize.height};stored=${evidence.storedSize.width}x${evidence.storedSize.height};constraint=${canvas!.mode}:${canvas!.size.width}x${canvas!.size.height}`);
+    expect(checks.at(-1)?.reason).toBe(
+        `native=${evidence.nativeSize.width}x${evidence.nativeSize.height};stored=${evidence.storedSize.width}x${evidence.storedSize.height};constraint=${canvas!.mode}:${canvas!.size.width}x${canvas!.size.height};normalization=none`,
+    );
 }
 
 function expectTraceRoutes(trace: EcommerceTrace) {

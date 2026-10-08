@@ -5,6 +5,7 @@ import type { CreativeAsset } from "@/lib/creative-runtime-contract";
 import { planEcommerceEdit, type EcommerceEditPlanningRequest } from "./ecommerce-edit-planner";
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
+import { resolveImageEditProtocol } from "./image-edit-protocol";
 import type { EcommerceRoleCandidate } from "./ecommerce-model-routing";
 import { referenceUsesFromEcommerceDecision, resolveEcommerceReferenceDecision } from "./ecommerce-reference-purpose";
 import { resolveSourcesFromEcommerceReferenceDecision } from "./ecommerce-reference-roles";
@@ -262,8 +263,17 @@ describe("authorized ecommerce planner input projection", () => {
             expect(capture.result.plan.preserve.productCore).toEqual(fixture.plan.preserve.productCore);
             if (fixture.plan.operation === "local_edit") expect(capture.result.plan.delta.targetObjects).toEqual(fixture.plan.delta.targetObjects);
             const compiled = ["gpt-image-2.5-flare", "nano-banana-2"].map((upstreamModel) => {
-                const profile = resolveEcommerceImageProviderProfile({ logicalRole: "image_generation", capability: "image", logicalModelId: "image", channelId: "fixture", upstreamModel, apiFormat: "openai" });
+                const profile = resolveEcommerceImageProviderProfile({
+                    logicalRole: "image_generation",
+                    capability: "image",
+                    logicalModelId: "image",
+                    channelId: "fixture",
+                    upstreamModel,
+                    apiFormat: "openai",
+                    imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: upstreamModel }),
+                });
                 if (!profile) throw new Error("Missing fixture image profile");
+                expect(profile.supportsIndependentMask).toBe(upstreamModel === "gpt-image-2.5-flare");
                 const output = compileEcommerceImageRequest(capture.result.plan, profile);
                 const requiresMask = fixture.plan.strategy === "strict_product" || (fixture.plan.operation === "scene_edit" && capture.result.plan.protection?.scope === "local");
                 if (requiresMask && !profile.supportsIndependentMask) expect(output).toMatchObject({ state: "needs_review", reason: "independent_mask_unsupported" });

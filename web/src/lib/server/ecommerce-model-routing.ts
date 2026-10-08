@@ -2,6 +2,8 @@ import type { AuthSettings, LogicalModelCapability } from "@/lib/auth/store";
 
 import type { EcommerceLogicalModelRole } from "./agent-run-surface-policy";
 import { resolveLogicalModelCandidates, resolveLogicalModelSnapshot, type ResolvedLogicalModel } from "./logical-model-router";
+import { toSystemGenerationChannel } from "./generation-channel";
+import { resolveImageEditProtocol, sameImageEditProtocol, type ImageEditProtocol } from "./image-edit-protocol";
 
 export type EcommerceModelRoutingSettings = Pick<AuthSettings, "defaultModels" | "logicalModels" | "systemChannels"> & {
     ecommerceModelRoles?: Partial<Record<EcommerceLogicalModelRole, string[]>>;
@@ -14,6 +16,7 @@ export type EcommerceRoleRouteSnapshot = {
     channelId: string;
     upstreamModel: string;
     apiFormat: "openai" | "gemini";
+    imageEdit?: ImageEditProtocol;
 };
 
 export type EcommerceRoleCandidate = ResolvedLogicalModel & {
@@ -42,7 +45,10 @@ export function routeEcommerceRole(settings: EcommerceModelRoutingSettings, role
     if (snapshot) {
         if (snapshot.logicalRole !== role || snapshot.capability !== capability) return null;
         const resolved = resolveLogicalModelSnapshot(settings, capability, snapshot);
-        return resolved ? withRole(resolved, role, capability) : null;
+        if (!resolved) return null;
+        const candidate = withRole(resolved, role, capability);
+        if (candidate.snapshot.apiFormat !== snapshot.apiFormat || (snapshot.imageEdit && (!candidate.snapshot.imageEdit || !sameImageEditProtocol(snapshot.imageEdit, candidate.snapshot.imageEdit)))) return null;
+        return candidate;
     }
     return resolveEcommerceRoleCandidates(settings, role, capability)[0] || null;
 }
@@ -52,7 +58,8 @@ function capabilityForRole(role: EcommerceLogicalModelRole): LogicalModelCapabil
 }
 
 function withRole(candidate: ResolvedLogicalModel, role: EcommerceLogicalModelRole, capability: LogicalModelCapability): EcommerceRoleCandidate {
-    const apiFormat = candidate.channel.apiFormat === "gemini" ? "gemini" : "openai";
+    const config = toSystemGenerationChannel(candidate);
+    const apiFormat = config.apiFormat;
     return {
         ...candidate,
         logicalRole: role,
@@ -64,6 +71,7 @@ function withRole(candidate: ResolvedLogicalModel, role: EcommerceLogicalModelRo
             channelId: candidate.channelId,
             upstreamModel: candidate.upstreamModel,
             apiFormat,
+            ...(capability === "image" ? { imageEdit: resolveImageEditProtocol(config, candidate.channel.baseUrl) } : {}),
         },
     };
 }

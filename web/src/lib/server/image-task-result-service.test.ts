@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,6 +9,7 @@ import { emptyAdvancedConfig } from "@/lib/channel-protocol-registry";
 import type { ImageTask } from "./image-task-store";
 
 const storage = vi.hoisted(() => ({ rejectedBytes: new Set<string>() }));
+const mediaRegistry = vi.hoisted(() => ({ register: vi.fn(), get: vi.fn<(storageKey: string) => Promise<null>>(async () => null), delete: vi.fn<(storageKeys: string[]) => Promise<void>>(async () => undefined) }));
 
 vi.mock("@/app/api/image-tasks/image-task-support", () => ({
     directRemoteImageResult: vi.fn(),
@@ -24,7 +25,7 @@ vi.mock("@/lib/server/object-storage-service", () => ({
         return null;
     },
 }));
-vi.mock("@/lib/server/local-media-registry", () => ({ registerLocalMediaAsset: vi.fn() }));
+vi.mock("@/lib/server/local-media-registry", () => ({ registerLocalMediaAsset: mediaRegistry.register, getLocalMediaRegistration: mediaRegistry.get, deleteLocalMediaRegistrations: mediaRegistry.delete }));
 vi.mock("@/lib/server/database", () => ({ getDatabaseProvider: () => "file" }));
 
 describe("image task result persistence", () => {
@@ -44,7 +45,18 @@ describe("image task result persistence", () => {
         await rm(directory, { recursive: true, force: true });
     });
 
-    beforeEach(() => storage.rejectedBytes.clear());
+    beforeEach(() => {
+        storage.rejectedBytes.clear();
+        mediaRegistry.register.mockClear();
+        mediaRegistry.get.mockClear();
+        mediaRegistry.delete.mockClear();
+    });
+
+    const savedFiles = async () => {
+        const paths = await readdir(directory, { recursive: true });
+        const files = await Promise.all(paths.map(async (file) => ((await stat(join(directory, file))).isFile() ? file : null)));
+        return files.filter((file): file is string => file !== null).sort();
+    };
 
     it.each([1, 2, 3])("durably retains unreadable canvas slot %s without renumbering or deleting good files", async (missingIndex) => {
         const { createImageTask, getImageTask, updateImageTask } = await import("./image-task-store");
@@ -186,6 +198,48 @@ describe("image task result persistence", () => {
         task.sceneProtection = await buildSceneEditProtection(source, "scene", { x: 2, y: 1, width: 2, height: 2 }, ["vase"], "user_selection");
         task.mask = task.sceneProtection.mask;
         await expect(prepare(task, { dataUrl: dataUrl(source), results: [{ dataUrl: dataUrl(source) }, { dataUrl: "https://fixture.invalid/unreadable.png" }] }, "http://fixture.local", "fixture")).rejects.toThrow("原生图片");
+    });
+
+    it("fails a mixed valid-ratio and wrong-ratio local scene batch before registering or writing any file", async () => {
+        const { buildSceneEditProtection } = await import("./ecommerce-product-regions");
+        const source = await imageBytes(6, 4);
+        const good = await imageBytes(3, 2);
+        const wrongRatio = await imageBytes(5, 5);
+        const task = imageTask({ size: "6x4" });
+        task.kind = "edit";
+        task.references = [{ id: "scene", dataUrl: dataUrl(source) }];
+        task.sceneProtection = await buildSceneEditProtection(source, "scene", { x: 2, y: 1, width: 2, height: 2 }, ["vase"], "user_selection");
+        task.mask = task.sceneProtection.mask;
+        const before = await savedFiles();
+        await expect(prepare(task, { dataUrl: dataUrl(good), results: [{ dataUrl: dataUrl(good) }, { dataUrl: dataUrl(wrongRatio) }] }, "http://fixture.local", "fixture")).rejects.toThrow("原生画幅比例");
+        expect(mediaRegistry.register).not.toHaveBeenCalled();
+        expect(mediaRegistry.delete).not.toHaveBeenCalled();
+        expect(await savedFiles()).toEqual(before);
+        expect(task.result).toBeUndefined();
+    });
+
+    it("removes the saved mask and native when protected composite storage fails without deleting older files", async () => {
+        const { buildSceneEditProtection, compositeSceneEdit } = await import("./ecommerce-product-regions");
+        const source = await imageBytes(6, 4);
+        const native = await sharp({ create: { width: 3, height: 2, channels: 4, background: "red" } })
+            .png()
+            .toBuffer();
+        const task = imageTask({ size: "6x4" });
+        task.kind = "edit";
+        task.references = [{ id: "scene", dataUrl: dataUrl(source) }];
+        task.sceneProtection = await buildSceneEditProtection(source, "scene", { x: 2, y: 1, width: 2, height: 2 }, ["vase"], "user_selection");
+        task.mask = task.sceneProtection.mask;
+        const composite = await compositeSceneEdit(source, native, task.sceneProtection);
+        storage.rejectedBytes.add(composite.bytes.toString("base64"));
+        const before = await savedFiles();
+        await expect(prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture")).rejects.toThrow();
+        expect(mediaRegistry.register).toHaveBeenCalledTimes(2);
+        expect(mediaRegistry.register.mock.calls.map(([registration]) => registration.originalName)).toEqual(["scene-edit-mask.png", "scene-edit-native-1.png"]);
+        const registered = mediaRegistry.register.mock.calls.map(([registration]) => registration.storageKey).sort();
+        expect(mediaRegistry.delete).toHaveBeenCalledTimes(2);
+        expect(mediaRegistry.delete.mock.calls.flatMap(([keys]) => keys).sort()).toEqual(registered);
+        expect(await savedFiles()).toEqual(before);
+        expect(task.result).toBeUndefined();
     });
 
     it.each(["ecommerce-nano-banana-2.v1", "ecommerce-nano-banana-2.v3"] as const)("retains each ecommerce native file before target normalization and %s task round-trip", async (compilerVersion) => {

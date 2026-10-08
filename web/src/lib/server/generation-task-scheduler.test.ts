@@ -23,6 +23,7 @@ vi.mock("@/lib/server/generation-task-store", () => ({
 }));
 
 import { claimDueGenerationTasks, generationTaskNextPollAt, getNextGenerationTaskDueAt, releaseGenerationTaskLease, renewGenerationTaskLeases, scheduleGenerationTask } from "./generation-task-scheduler";
+import type { StoredGenerationTaskRecord } from "./generation-task-store";
 
 describe("generation task scheduler", () => {
     beforeEach(() => {
@@ -81,6 +82,35 @@ describe("generation task scheduler", () => {
         const results = [await scheduleGenerationTask("image", "due", patch, { unsubmittedReferenceRecovery: true }), await scheduleGenerationTask("image", "due", patch, { unsubmittedReferenceRecovery: true })];
         expect(results.filter(Boolean)).toHaveLength(1);
         expect(mocks.records[0]).toMatchObject({ executionPhase: "created", nextPollAt: 1_000, payload: { runId: "same-run", referenceDispatch: { inputId: "same-input" }, attempts: [] } });
+    });
+
+    it("recovers the confirmed unsubmitted mask child once, using a frozen payload CAS", async () => {
+        const original = maskReviewRecord();
+        mocks.records = [structuredClone(original)];
+        const patch = { executionPhase: "created" as const, nextPollAt: 1_000, lastUpstreamStatus: "scene_mask_recovery_requested" };
+        const options = { unsubmittedMaskRecovery: original };
+        expect(await scheduleGenerationTask("image", "due", patch, options)).not.toBeNull();
+        expect(await scheduleGenerationTask("image", "due", patch, options)).toBeNull();
+        expect(mocks.records[0].payload).toEqual(original.payload);
+    });
+
+    it.each(["submitted", "upstream", "attempts", "billing", "result", "unknown", "lease", "payload", "protocol", "kind"])("rejects masked recovery after protected state changes (%s)", async (drift) => {
+        const original = maskReviewRecord();
+        const current = structuredClone(original);
+        if (drift === "submitted") current.submittedAt = 1;
+        if (drift === "upstream") current.upstreamTaskId = "already-submitted";
+        if (drift === "lease") current.workerId = "worker";
+        if (drift === "unknown") current.lastUpstreamStatus = "submission_outcome_unknown";
+        if (drift === "attempts") current.payload.attempts = [{ attemptNo: 1 }];
+        if (drift === "billing") current.payload.billing = {};
+        if (drift === "result") current.payload.result = { dataUrl: "stored-result" };
+        if (drift === "payload") current.payload.prompt = "changed edit";
+        if (drift === "protocol") (current.payload.config as { advancedConfig: { protocol: string } }).advancedConfig.protocol = "custom";
+        if (drift === "kind") delete current.payload.kind;
+        mocks.records = [current];
+        const before = structuredClone(mocks.records);
+        expect(await scheduleGenerationTask("image", "due", { executionPhase: "created", nextPollAt: 1_000 }, { unsubmittedMaskRecovery: original })).toBeNull();
+        expect(mocks.records).toEqual(before);
     });
 
     it.each([
@@ -170,5 +200,28 @@ function record(id: string, nextPollAt: number) {
         createdAt: 100,
         updatedAt: 100,
         expiresAt: 100_000,
+    };
+}
+
+function maskReviewRecord(): StoredGenerationTaskRecord {
+    return {
+        ...record("due", 0),
+        type: "image",
+        status: "pending",
+        executionPhase: "needs_review",
+        lastUpstreamStatus: "strict_product_mask_review_required",
+        runId: "same-run",
+        conversationId: "same-conversation",
+        payload: {
+            kind: "edit",
+            runId: "same-run",
+            attempts: [],
+            prompt: "add vase",
+            references: [{ id: "scene", ecommerceRole: "scene" }],
+            mask: { dataUrl: "same-alpha-mask" },
+            config: { apiFormat: "openai", model: "gpt-image-2.5-sunburst", baseUrl: "https://image.example.com", advancedConfig: { protocol: "sub2api" } },
+            sceneProtection: { sourceAssetId: "scene", selectionSource: "user_selection", mask: { dataUrl: "same-alpha-mask" } },
+            ecommerceExecution: { protection: { scope: "local" }, mask: { required: true }, referenceRoles: [{ assetId: "scene" }] },
+        },
     };
 }

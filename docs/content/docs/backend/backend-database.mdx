@@ -103,6 +103,8 @@ Agent Run 的状态与任务数组继续保存在 `generation_tasks.payload`，�
 
 ## Repository 边界
 
+局部编辑结果在已有 `generation_tasks.payload.result` 保存 `sceneProtectionEvidence`，包括真实 `nativeSize`、`normalization=none|uniform_scale|pixel_grid_scale`、源图/原生/蒙版/合成摘要与稳定媒体地址。同比或共同整数取整适配使用源坐标的 `mappedOutsideChangedPixels`，`nativeOutsideChangedPixels` 仅同尺寸保留；`canvasEvidence` 分别保存原生与最终尺寸和实际适配方式。技术交付与管理员 `ecommerce_trace` 保留 `nativeMatches` 的真实值，使用独立 `mappingVerified` 记录源/native/mask/composite 重建验证结果；不同原生分辨率不伪装为原生 exact 通过。沿用现有 JSONB 字段和媒体登记，不新增表或独立尺寸迁移。
+
 管理员设置新增 `ecommerce_visual_quality_check_enabled BOOLEAN NOT NULL DEFAULT false`，由 `ecommerceVisualQualityCheckEnabled` 开关管理，定向更新和完整设置 upsert 均保留。每轮快照冻结 `qualityPolicy=disabled|advisory`；旧无策略任务保留恢复语义。新任务技术通过先交付，advisory 复用持久 `review_pending` 队列，报告只补建议。
 
 流水总状态记录交付 completed，真实视觉状态独立保留在 quality_check；关闭记 not_run、无模型。reviewAttempts 与任务集合 CAS 防迟到报告覆盖，日志补偿读取同归属 child/冻结 Run，旧 trace CAS 防止补偿降级；不重复调用模型。

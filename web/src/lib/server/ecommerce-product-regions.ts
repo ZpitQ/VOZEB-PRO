@@ -2,6 +2,7 @@ import type { ImageTaskConfig, ImageTaskReference } from "./image-task-store";
 import type { EcommerceNormalizedRegion, EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
 import { createHash } from "node:crypto";
 import sharp from "sharp";
+import { resolveImageEditProtocol } from "./image-edit-protocol";
 
 export type SceneEditProtection = {
     version: "scene-edit-protection.v1";
@@ -20,10 +21,12 @@ export type SceneEditProtection = {
 };
 export type SceneEditProtectionEvidence = Omit<SceneEditProtection, "mask"> & {
     nativeSize: ProductProtectionSourceSize;
+    normalization: "none" | "uniform_scale" | "pixel_grid_scale";
     nativeDigest: string;
     compositeDigest: string;
     outsidePixels: number;
-    nativeOutsideChangedPixels: number;
+    mappedOutsideChangedPixels: number;
+    nativeOutsideChangedPixels?: number;
     compositeOutsideChangedPixels: 0;
     maskUrl?: string;
     nativeUrl?: string;
@@ -80,30 +83,56 @@ export async function validateSceneEditProtection(source: Buffer, protection: Sc
 export async function compositeSceneEdit(source: Buffer, generated: Buffer, protection: SceneEditProtection): Promise<{ bytes: Buffer; evidence: SceneEditProtectionEvidence }> {
     const original = await validateSceneEditProtection(source, protection);
     const native = await decodeScenePixels(generated);
-    if (!sameSize(native.info, protection.sourceSize)) throw new Error("局部编辑上游原生尺寸不符合源图，禁止合成修复尺寸");
-    const pixels = Buffer.from(native.data);
+    const sourceSize = protection.sourceSize;
+    const nativeSize = { width: native.info.width, height: native.info.height };
+    const cross = BigInt(nativeSize.width) * BigInt(sourceSize.height) - BigInt(nativeSize.height) * BigInt(sourceSize.width);
+    // Both rounded edges must admit one common scale: each half-up interval excludes its upper bound.
+    if (BigInt(2) * (cross < BigInt(0) ? -cross : cross) >= BigInt(sourceSize.width) + BigInt(sourceSize.height))
+        throw new Error(`局部编辑上游原生画幅比例与源图不一致，禁止拉伸或裁切（源图 ${sourceSize.width}x${sourceSize.height}，原生 ${nativeSize.width}x${nativeSize.height}）`);
+    const normalization = sameSize(nativeSize, sourceSize) ? "none" : cross === BigInt(0) ? "uniform_scale" : "pixel_grid_scale";
+    const pixels =
+        normalization === "none"
+            ? Buffer.from(native.data)
+            : await sharp(native.data, { raw: { ...nativeSize, channels: 4 } })
+                  .resize(sourceSize.width, sourceSize.height, { fit: "fill" })
+                  .raw()
+                  .toBuffer();
     let outsidePixels = 0;
-    let nativeOutsideChangedPixels = 0;
-    for (let y = 0; y < native.info.height; y++)
-        for (let x = 0; x < native.info.width; x++) {
+    let mappedOutsideChangedPixels = 0;
+    for (let y = 0; y < sourceSize.height; y++)
+        for (let x = 0; x < sourceSize.width; x++) {
             if (inside(protection.targetRegion, x, y)) continue;
-            const offset = (y * native.info.width + x) * 4;
+            const offset = (y * sourceSize.width + x) * 4;
             outsidePixels++;
-            if (!pixels.subarray(offset, offset + 4).equals(original.data.subarray(offset, offset + 4))) nativeOutsideChangedPixels++;
-            original.data.copy(pixels, offset, offset, offset + 4);
+            const originalPixel = original.data.readUInt32LE(offset);
+            if (pixels.readUInt32LE(offset) !== originalPixel) mappedOutsideChangedPixels++;
+            pixels.writeUInt32LE(originalPixel, offset);
         }
-    const bytes = await sharp(pixels, { raw: { width: native.info.width, height: native.info.height, channels: 4 } })
+    const bytes = await sharp(pixels, { raw: { ...sourceSize, channels: 4 } })
         .png()
         .toBuffer();
     const persistedPixels = (await decodeScenePixels(bytes)).data;
-    for (let y = 0; y < native.info.height; y++)
-        for (let x = 0; x < native.info.width; x++) {
+    for (let y = 0; y < sourceSize.height; y++)
+        for (let x = 0; x < sourceSize.width; x++) {
             if (inside(protection.targetRegion, x, y)) continue;
-            const offset = (y * native.info.width + x) * 4;
-            if (!persistedPixels.subarray(offset, offset + 4).equals(original.data.subarray(offset, offset + 4))) throw new Error("选区外像素保护验证失败");
+            const offset = (y * sourceSize.width + x) * 4;
+            if (persistedPixels.readUInt32LE(offset) !== original.data.readUInt32LE(offset)) throw new Error("选区外像素保护验证失败");
         }
     const { mask: _mask, ...snapshot } = protection;
-    return { bytes, evidence: { ...structuredClone(snapshot), nativeSize: { ...protection.sourceSize }, nativeDigest: digest(generated), compositeDigest: digest(bytes), outsidePixels, nativeOutsideChangedPixels, compositeOutsideChangedPixels: 0 } };
+    return {
+        bytes,
+        evidence: {
+            ...structuredClone(snapshot),
+            nativeSize,
+            normalization,
+            nativeDigest: digest(generated),
+            compositeDigest: digest(bytes),
+            outsidePixels,
+            mappedOutsideChangedPixels,
+            ...(normalization === "none" ? { nativeOutsideChangedPixels: mappedOutsideChangedPixels } : {}),
+            compositeOutsideChangedPixels: 0,
+        },
+    };
 }
 
 function decodeScenePixels(bytes: Buffer) {
@@ -158,7 +187,7 @@ export type ProductProtectionSnapshot = {
 type StrictProductEditTask = {
     kind: "edit";
     prompt: string;
-    config: Pick<ImageTaskConfig, "apiFormat">;
+    config: Pick<ImageTaskConfig, "apiFormat" | "model" | "baseUrl" | "advancedConfig">;
     references: ImageTaskReference[];
     mask?: ImageTaskReference;
     productProtection?: ProductProtectionSnapshot;
@@ -255,7 +284,7 @@ export function compileStrictProductEdit<T extends StrictProductEditTask>(task: 
     if (maskInput?.trust !== "trusted" || !hasImageSource(maskInput.reference)) {
         return review("严格商品任务缺少可信商品蒙版，禁止静默执行整图生成");
     }
-    if (task.config.apiFormat !== "openai") {
+    if (!resolveImageEditProtocol(task.config).supportsIndependentMask) {
         return review("当前 provider 不支持可信独立蒙版，严格商品任务需要人工复核");
     }
     return {

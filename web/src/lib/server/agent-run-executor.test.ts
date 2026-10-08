@@ -6,6 +6,7 @@ import { AGENT_PLAN_SCHEMA_VERSION } from "./agent-run-audit";
 import type { AgentRun, AgentRunTask } from "./agent-run-store";
 import type { ImageTask } from "./image-task-store";
 import { buildSceneEditProtection, compositeSceneEdit } from "./ecommerce-product-regions";
+import { resolveImageEditProtocol } from "./image-edit-protocol";
 import { canvasPlan, canvasSettings, conversationPlan, creativeImageAsset, disabledSettings, imageTask, plannerFailoverSettings, planningRun, runFixture, runWithTasks, settings } from "./agent-run-executor.test-fixtures";
 
 const mocks = vi.hoisted(() => ({
@@ -1657,7 +1658,15 @@ describe("executeAgentRun backend settings", () => {
         const compiler = await vi.importActual<typeof import("./ecommerce-image-compiler")>("./ecommerce-image-compiler");
         const execution = compiler.compileEcommerceImageRequest(
             plan,
-            compiler.resolveEcommerceImageProviderProfile({ logicalRole: "image_generation", capability: "image", logicalModelId: "image-model", channelId: "image-channel", upstreamModel: "gpt-image-2.5-flare", apiFormat: "openai" })!,
+            compiler.resolveEcommerceImageProviderProfile({
+                logicalRole: "image_generation",
+                capability: "image",
+                logicalModelId: "image-model",
+                channelId: "image-channel",
+                upstreamModel: "gpt-image-2.5-flare",
+                apiFormat: "openai",
+                imageEdit: resolveImageEditProtocol({ model: "gpt-image-2.5-flare", apiFormat: "openai", baseUrl: "https://api.example.com/v1" }),
+            })!,
         );
         const run = runFixture({
             status: "paused",

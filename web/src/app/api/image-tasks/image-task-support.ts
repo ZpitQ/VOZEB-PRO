@@ -15,6 +15,17 @@ import { finishGenerationAttempt, startGenerationAttempt } from "@/lib/server/ge
 import { resolveLogicalModelCandidates } from "@/lib/server/logical-model-router";
 import { routeEcommerceRole, type EcommerceRoleRouteSnapshot } from "@/lib/server/ecommerce-model-routing";
 import { resolveChannelModelConfig } from "@/lib/channel-protocol-registry";
+import { normalizeImageTaskPath, resolveImageEditProtocol } from "@/lib/server/image-edit-protocol";
+export {
+    configuredImageEditPath,
+    configuredImageEditReferenceMode,
+    isNativeSub2ApiImageEdit,
+    isStandardOpenAiImageGenerationPath,
+    isCode2AlitaApiBase,
+    matchesApiHost,
+    normalizeImageTaskPath,
+    shouldUseSub2ApiImageEdit,
+} from "@/lib/server/image-edit-protocol";
 import { assertReferenceCapabilities } from "@/lib/server/provider-task-config";
 import { countActiveImageTasksForUser, createImageTask, getImageTask, touchImageTask, transitionImageTask, type ImageTask, type ImageTaskConfig, type ImageTaskReference, updateImageTask } from "@/lib/server/image-task-store";
 import { isGenerationSource, recordGenerationLog } from "@/lib/server/generation-log-store";
@@ -54,7 +65,6 @@ import {
     IMAGE_TASK_ID_KEYS,
     IMAGE_STATUS_KEYS,
     IMAGE_POLL_URL_KEYS,
-    type ImageEditReferenceMode,
 } from "./image-task-types";
 
 export { imageRequestAspectRatio, parseImageDimensions, parseImageRatio, resolveRequestSize, resolveResultSize, resolveSize, validateImageSize } from "./image-task-size";
@@ -119,53 +129,16 @@ export async function openAiImageTaskPath(config: ImageTaskConfig, kind: ImageTa
     const configured = (config.advancedConfig?.createPath || "").trim();
     const configuredPath = configured ? normalizeImageTaskPath(configured) : "";
     if (kind !== "edit") return configuredPath || "/images/generations";
-    const configuredEditPath = (config.advancedConfig?.editPath || "").trim();
-    if (configuredEditPath) return normalizeImageTaskPath(configuredEditPath);
-    if (isNativeSub2ApiImageEdit(config)) return "/images/edits";
-    const apiBase = await resolveConfiguredApiBaseUrl(config.baseUrl).catch(() => config.baseUrl);
-    if (shouldUseSub2ApiImageEdit(config, apiBase)) return configuredPath || "/images/generations";
-
-    const ruleEditPath = configuredImageEditPath(config);
-    if (ruleEditPath) return ruleEditPath;
-    if (!configuredPath) return "/images/edits";
-
-    const referenceMode = configuredImageEditReferenceMode(config);
-    if (referenceMode === "json" || referenceMode === "public-url" || globalAiOpcImagePreset(config)) return configuredPath;
-    if (isStandardOpenAiImageGenerationPath(configuredPath)) return configuredPath.replace(/\/generations$/i, "/edits");
-    return configuredPath;
-}
-
-export function configuredImageEditPath(config: ImageTaskConfig) {
-    const rule = (config.advancedConfig?.referenceRule || "").trim();
-    const match = rule.match(/\/(?:[a-z0-9._-]+\/)*images\/edits\b/i);
-    return match?.[0] ? normalizeImageTaskPath(match[0]) : "";
-}
-
-export function normalizeImageTaskPath(path: string) {
-    return path.startsWith("/") ? path : `/${path}`;
-}
-
-export function isStandardOpenAiImageGenerationPath(path: string) {
-    return /^\/(?:v1\/)?images\/generations$/i.test(path);
+    return (await resolveImageTaskEditProtocol(config)).editPath;
 }
 
 export async function shouldUseJsonImageEdit(config: ImageTaskConfig) {
-    if (globalAiOpcImagePreset(config)) return true;
-    const referenceMode = configuredImageEditReferenceMode(config);
-    const apiBase = await resolveConfiguredApiBaseUrl(config.baseUrl).catch(() => config.baseUrl);
-    if (shouldUseSub2ApiImageEdit(config, apiBase)) return true;
-    if (referenceMode === "json" || referenceMode === "public-url") return true;
-    if (referenceMode === "multipart") return false;
-    return false;
+    return (await resolveImageTaskEditProtocol(config)).transport === "json";
 }
 
-export function configuredImageEditReferenceMode(config: ImageTaskConfig): ImageEditReferenceMode {
-    const rule = (config.advancedConfig?.referenceRule || "").trim().toLowerCase();
-    if (!rule) return "auto";
-    if (/\bmultipart\b|form-?data|file upload|\u6587\u4ef6\u4e0a\u4f20|\u4e0a\u4f20\u6587\u4ef6/i.test(rule)) return "multipart";
-    if (/\u516c\u7f51|public|next_public_site_url|localhost|must.*\burl\b|\burl\b.*only|\u5fc5\u987b.*\burl\b|\u4ec5.*\burl\b|\u53ea.*\burl\b/i.test(rule)) return "public-url";
-    if (/\bjson\b|base64.*json|json.*base64|data:image|inline|ref_assets|input_image|image\/images/i.test(rule)) return "json";
-    return "auto";
+export async function resolveImageTaskEditProtocol(config: ImageTaskConfig) {
+    const apiBase = await resolveConfiguredApiBaseUrl(config.baseUrl).catch(() => config.baseUrl);
+    return resolveImageEditProtocol(config, apiBase);
 }
 
 export function globalAiOpcImagePreset(config: ImageTaskConfig) {
@@ -187,34 +160,6 @@ export function readSystemChannelId(baseUrl: string) {
         return match?.[1] ? decodeURIComponent(match[1]) : "";
     } catch {
         return "";
-    }
-}
-
-export function shouldUseSub2ApiImageEdit(config: ImageTaskConfig, apiBase: string) {
-    if (isNativeSub2ApiImageEdit(config)) return true;
-    if (isCode2AlitaApiBase(apiBase)) return true;
-    const advanced = config.advancedConfig;
-    const requestTemplate = (advanced?.requestTemplate || "").toLowerCase();
-    const referenceRule = (advanced?.referenceRule || "").toLowerCase();
-    if (/\bsub2api\b/i.test(`${requestTemplate}\n${referenceRule}`)) return true;
-    return /\bimage_urls\b|images\[\]\.image_url|"images"\s*:\s*\[\s*\{\s*"image_url"|images\s*:\s*\[\s*\{\s*image_url/i.test(requestTemplate);
-}
-
-export function isNativeSub2ApiImageEdit(config: ImageTaskConfig) {
-    return (resolveChannelModelConfig(config.advancedConfig, config.model)?.protocol || config.advancedConfig?.protocol) === "sub2api";
-}
-
-export function isCode2AlitaApiBase(baseUrl: string) {
-    return matchesApiHost(baseUrl, "code2alita.com");
-}
-
-export function matchesApiHost(baseUrl: string, hostname: string) {
-    try {
-        const host = new URL(baseUrl).hostname.toLowerCase();
-        const target = hostname.toLowerCase();
-        return host === target || host.endsWith(`.${target}`);
-    } catch {
-        return false;
     }
 }
 

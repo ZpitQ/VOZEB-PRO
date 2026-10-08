@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
+import { createHash } from "node:crypto";
 import { buildSceneEditProtection, compositeSceneEdit } from "./ecommerce-product-regions";
 
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
@@ -35,6 +36,185 @@ vi.mock("@/lib/auth/store", async (importOriginal) => {
 });
 
 describe("ecommerce quality check", () => {
+    it("delivers a real 8 x 5 pixel-grid native on the original 12 x 8 canvas with verified mapping facts", async () => {
+        const { input } = await uniformLocalRequest({ width: 8, height: 5 });
+        const checked = await checkEcommerceTechnicalResult(input);
+        expect(checked.status).toBe("passed");
+        expect(ecommerceResultDeliveryGate(checked)).toMatchObject({ action: "publish" });
+        expect(checked.canvasEvidence).toEqual([
+            expect.objectContaining({ nativeSize: { width: 8, height: 5 }, storedSize: { width: 12, height: 8 }, nativeMatches: false, storedMatches: true, normalization: "pixel_grid_scale", mappingVerified: true, hardFailures: [] }),
+        ]);
+        expect(checked.sceneProtectionEvidence[0].evidence).toMatchObject({ nativeSize: { width: 8, height: 5 }, sourceSize: { width: 12, height: 8 }, normalization: "pixel_grid_scale", compositeOutsideChangedPixels: 0 });
+        expect(checked.sceneProtectionEvidence[0].evidence).not.toHaveProperty("nativeOutsideChangedPixels");
+        expect(checked.checks).toContainEqual(expect.objectContaining({ key: "unmodified_region", source: "protection", status: "passed" }));
+        expect(checked.checks).toContainEqual(expect.objectContaining({ key: "canvas_geometry", source: "media", status: "passed" }));
+        const trace = buildEcommerceGenerationTrace({ runId: "fixture-run", task: { id: "fixture-task" } as never, snapshot: { technicalCheck: checked } as never, imageTaskIds: ["fixture-child"], generationStatus: "completed", finalStatus: "completed" });
+        const restored = normalizeEcommerceGenerationTrace(JSON.parse(JSON.stringify(trace)))!;
+        expect(restored.stages.find((stage) => stage.key === "image_generation")?.output).toMatchObject({
+            technicalCheck: { canvasEvidence: [expect.objectContaining({ nativeSize: { width: 8, height: 5 }, storedSize: { width: 12, height: 8 }, nativeMatches: false, storedMatches: true, normalization: "pixel_grid_scale", mappingVerified: true })] },
+        });
+        expect(JSON.stringify(restored)).not.toContain("data:image/png;base64");
+        expect(mocks.requestStructuredText).not.toHaveBeenCalled();
+    });
+
+    it.each(["uniform_mode", "none_mode", "native_digest", "replacement_native_rehashed", "replacement_composite_rehashed", "wrong_ratio_native", "missing_mask", "native_counter"] as const)(
+        "rejects pixel-grid mapping with %s evidence without releasing a forged result",
+        async (condition) => {
+            const { input, composite } = await uniformLocalRequest({ width: 8, height: 5 });
+            const result = input.resultImages[0];
+            const proof = result.sceneProtectionEvidence!;
+            const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+            const url = (bytes: Buffer) => "data:image/png;base64," + bytes.toString("base64");
+            if (condition === "uniform_mode") proof.normalization = "uniform_scale";
+            if (condition === "none_mode") proof.normalization = "none";
+            if (condition === "native_digest") proof.nativeDigest = "a".repeat(64);
+            if (condition === "replacement_native_rehashed" || condition === "wrong_ratio_native") {
+                const nativeSize = condition === "wrong_ratio_native" ? { width: 8, height: 8 } : { width: 8, height: 5 };
+                const replacement = await sharp({ create: { ...nativeSize, channels: 4, background: condition === "wrong_ratio_native" ? "blue" : "red" } })
+                    .png()
+                    .toBuffer();
+                result.nativeUrl = url(replacement);
+                result.nativeSize = nativeSize;
+                proof.nativeUrl = result.nativeUrl;
+                proof.nativeSize = nativeSize;
+                proof.nativeDigest = sha256(replacement);
+            }
+            if (condition === "replacement_composite_rehashed") {
+                const { data, info } = await sharp(composite.bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+                Buffer.from([0, 255, 0, 255]).copy(data, (3 * info.width + 3) * 4);
+                const replacement = await sharp(data, { raw: info }).png().toBuffer();
+                result.url = url(replacement);
+                proof.compositeUrl = result.url;
+                proof.compositeDigest = sha256(replacement);
+            }
+            if (condition === "missing_mask") proof.maskUrl = undefined;
+            if (condition === "native_counter") proof.nativeOutsideChangedPixels = 1;
+            const checked = await checkEcommerceTechnicalResult(input);
+            expect(checked.status).not.toBe("passed");
+            expect(ecommerceResultDeliveryGate(checked)).toMatchObject({ action: "pause" });
+            if (condition === "missing_mask")
+                expect(checked.canvasEvidence).toEqual([
+                    expect.objectContaining({ nativeSize: { width: 8, height: 5 }, storedSize: { width: 12, height: 8 }, nativeMatches: false, storedMatches: true, normalization: "pixel_grid_scale", mappingVerified: false }),
+                ]);
+            expect(mocks.requestStructuredText).not.toHaveBeenCalled();
+        },
+    );
+
+    it("does not apply pixel-grid local mapping to an ordinary global exact canvas", async () => {
+        const { input } = await uniformLocalRequest({ width: 8, height: 5 });
+        input.plan.operation = "scene_edit";
+        input.plan.protection = { scope: "global", protectedObjectIds: [], preserveOutsideMask: false, allowLightingChange: true };
+        const checked = await checkEcommerceTechnicalResult(input);
+        expect(checked.status).not.toBe("passed");
+        expect(ecommerceResultDeliveryGate(checked)).toMatchObject({ action: "pause" });
+        expect(checked.canvasEvidence).toEqual([expect.objectContaining({ nativeSize: { width: 8, height: 5 }, storedSize: { width: 12, height: 8 }, nativeMatches: false, storedMatches: true, hardFailures: ["canvas_geometry"] })]);
+        expect(mocks.requestStructuredText).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        { width: 6, height: 4 },
+        { width: 24, height: 16 },
+    ])("delivers an independently verified local $width x $height native mapping without claiming native exact resolution", async (nativeSize) => {
+        const { input } = await uniformLocalRequest(nativeSize);
+        const checked = await checkEcommerceTechnicalResult(input);
+        expect(checked.status).toBe("passed");
+        expect(ecommerceResultDeliveryGate(checked)).toMatchObject({ action: "publish" });
+        expect(checked.canvasEvidence).toEqual([expect.objectContaining({ nativeSize, storedSize: { width: 12, height: 8 }, nativeMatches: false, storedMatches: true, normalization: "uniform_scale", mappingVerified: true, hardFailures: [] })]);
+        expect(checked.checks).toContainEqual(expect.objectContaining({ key: "unmodified_region", source: "protection", status: "passed" }));
+        expect(checked.checks).toContainEqual(expect.objectContaining({ key: "canvas_geometry", source: "media", status: "passed" }));
+        expect(checked.sceneProtectionEvidence[0].evidence).toMatchObject({ nativeSize, normalization: "uniform_scale", compositeOutsideChangedPixels: 0 });
+        expect(checked.sceneProtectionEvidence[0].evidence).not.toHaveProperty("nativeOutsideChangedPixels");
+        expect(mocks.requestStructuredText).not.toHaveBeenCalled();
+        const trace = buildEcommerceGenerationTrace({ runId: "fixture-run", task: { id: "fixture-task" } as never, snapshot: { technicalCheck: checked } as never, imageTaskIds: ["fixture-child"], generationStatus: "completed", finalStatus: "completed" });
+        const restored = normalizeEcommerceGenerationTrace(JSON.parse(JSON.stringify(trace)))!;
+        expect(restored.stages.find((stage) => stage.key === "image_generation")?.output).toMatchObject({
+            technicalCheck: { canvasEvidence: [expect.objectContaining({ nativeSize, nativeMatches: false, storedMatches: true, normalization: "uniform_scale", mappingVerified: true })] },
+        });
+        expect(JSON.stringify(restored)).not.toContain("data:image/png;base64");
+    });
+
+    it.each([
+        "normalization",
+        "native_size",
+        "native_digest",
+        "source_digest",
+        "native_counter",
+        "replacement_native",
+        "replacement_native_rehashed",
+        "wrong_ratio_native",
+        "reverse_mask_rehashed",
+        "replacement_composite_rehashed",
+        "missing_native",
+        "missing_mask",
+    ] as const)("refuses a local mapping with %s evidence instead of bypassing technical delivery", async (condition) => {
+        const { input, protection, composite } = await uniformLocalRequest({ width: 6, height: 4 });
+        const result = input.resultImages[0];
+        const proof = result.sceneProtectionEvidence!;
+        const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+        const url = (bytes: Buffer) => "data:image/png;base64," + bytes.toString("base64");
+        if (condition === "normalization") proof.normalization = "none";
+        if (condition === "native_size") proof.nativeSize = { width: 12, height: 8 };
+        if (condition === "native_digest") proof.nativeDigest = "a".repeat(64);
+        if (condition === "source_digest") proof.sourceDigest = "a".repeat(64);
+        if (condition === "native_counter") proof.nativeOutsideChangedPixels = 1;
+        if (condition === "replacement_native" || condition === "replacement_native_rehashed" || condition === "wrong_ratio_native") {
+            const size = condition === "wrong_ratio_native" ? { width: 5, height: 5 } : { width: 6, height: 4 };
+            const replacement = await sharp({ create: { ...size, channels: 4, background: "red" } })
+                .png()
+                .toBuffer();
+            result.nativeUrl = url(replacement);
+            proof.nativeUrl = result.nativeUrl;
+            if (condition !== "replacement_native") {
+                proof.nativeDigest = sha256(replacement);
+                proof.nativeSize = size;
+                result.nativeSize = size;
+            }
+        }
+        if (condition === "reverse_mask_rehashed") {
+            const { data, info } = await sharp(Buffer.from(protection.mask.dataUrl.split(",")[1], "base64"))
+                .ensureAlpha()
+                .raw()
+                .toBuffer({ resolveWithObject: true });
+            for (let index = 3; index < data.length; index += 4) data[index] = 255 - data[index];
+            const reversed = await sharp(data, { raw: info }).png().toBuffer();
+            proof.maskUrl = url(reversed);
+            proof.maskDigest = sha256(reversed);
+        }
+        if (condition === "replacement_composite_rehashed") {
+            const { data, info } = await sharp(composite.bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+            Buffer.from([0, 255, 0, 255]).copy(data, (3 * info.width + 3) * 4);
+            const replacement = await sharp(data, { raw: info }).png().toBuffer();
+            result.url = url(replacement);
+            proof.compositeUrl = result.url;
+            proof.compositeDigest = sha256(replacement);
+        }
+        if (condition === "missing_native") {
+            result.nativeUrl = undefined;
+            proof.nativeUrl = undefined;
+            result.nativeSize = undefined;
+        }
+        if (condition === "missing_mask") proof.maskUrl = undefined;
+        const checked = await checkEcommerceTechnicalResult(input);
+        expect(checked.status).not.toBe("passed");
+        expect(ecommerceResultDeliveryGate(checked)).toMatchObject({ action: "pause" });
+        if (condition === "missing_mask")
+            expect(checked.canvasEvidence).toEqual([
+                expect.objectContaining({ nativeSize: { width: 6, height: 4 }, storedSize: { width: 12, height: 8 }, nativeMatches: false, storedMatches: true, normalization: "uniform_scale", mappingVerified: false }),
+            ]);
+        expect(mocks.requestStructuredText).not.toHaveBeenCalled();
+    });
+
+    it("keeps ordinary global native exact geometry strict even with a copied valid local mapping proof", async () => {
+        const { input } = await uniformLocalRequest({ width: 6, height: 4 });
+        input.plan.operation = "scene_edit";
+        input.plan.protection = { scope: "global", protectedObjectIds: [], preserveOutsideMask: false, allowLightingChange: true };
+        const checked = await checkEcommerceTechnicalResult(input);
+        expect(checked.status).not.toBe("passed");
+        expect(ecommerceResultDeliveryGate(checked)).toMatchObject({ action: "pause" });
+        expect(checked.canvasEvidence).toEqual([expect.objectContaining({ nativeSize: { width: 6, height: 4 }, storedSize: { width: 12, height: 8 }, nativeMatches: false, storedMatches: true, hardFailures: ["canvas_geometry"] })]);
+        expect(mocks.requestStructuredText).not.toHaveBeenCalled();
+    });
+
     it("checks saved media without a visual model and publishes visual misjudgements only as advice", async () => {
         const input = await independentRequest();
         const technical = await checkEcommerceTechnicalResult(input);
@@ -708,6 +888,30 @@ describe("ecommerce quality check", () => {
         expect(shouldBlockEcommerceResult(checked)).toBe(true);
     });
 });
+
+async function uniformLocalRequest(nativeSize: { width: number; height: number }) {
+    const input = request(scenePlan());
+    input.plan.planVersion = "ecommerce-edit.v6";
+    input.plan.operation = "local_edit";
+    input.plan.canvas = { mode: "exact", size: { width: 12, height: 8 }, source: "baseline", allowReframe: false };
+    input.plan.protection = { scope: "local", protectedObjectIds: [], preserveOutsideMask: true, allowLightingChange: false };
+    const sourcePixels = Buffer.from(Array.from({ length: 12 * 8 * 4 }, (_, index) => (index % 4 === 3 ? 255 : (index * 7) % 256)));
+    const source = await sharp(sourcePixels, { raw: { width: 12, height: 8, channels: 4 } })
+        .png()
+        .toBuffer();
+    const native = await sharp({ create: { ...nativeSize, channels: 4, background: "blue" } })
+        .png()
+        .toBuffer();
+    const protection = await buildSceneEditProtection(source, "scene-1", { x: 2, y: 2, width: 4, height: 4 }, ["add prop"], "user_selection");
+    protection.confirmation = { actorUserId: input.userId, confirmedAt: 1 };
+    const composite = await compositeSceneEdit(source, native, protection);
+    const url = (bytes: Buffer) => "data:image/png;base64," + bytes.toString("base64");
+    input.baselineReference = { assetId: "scene-1", role: "scene", url: url(source) };
+    input.resultImages = [
+        { resultId: "result-1", url: url(composite.bytes), nativeUrl: url(native), nativeSize, sceneProtectionEvidence: { ...composite.evidence, nativeUrl: url(native), maskUrl: protection.mask.dataUrl, compositeUrl: url(composite.bytes) } },
+    ];
+    return { input, source, native, protection, composite };
+}
 
 function structure(count: number | null) {
     return { objectId: "cabinet", feature: "drawers" as "drawers" | "doors" | "handles" | "legs", count, certainty: count === null ? ("uncertain" as const) : ("confirmed" as const), evidenceRegion: { x: 0, y: 0, width: 120, height: 160 } };

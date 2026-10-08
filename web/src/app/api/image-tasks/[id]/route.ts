@@ -12,7 +12,9 @@ import { cancellationExecutionPatch, type GenerationCancellationTarget } from "@
 import { refundImageTask } from "@/lib/server/image-task-refund";
 import { getStoredGenerationTaskRecord } from "@/lib/server/generation-task-store";
 import { recoverGenerationTaskFromUpstream } from "@/lib/server/generation-task-user-recovery";
-import { canRecoverUnsubmittedImageReference, scheduleGenerationTask } from "@/lib/server/generation-task-scheduler";
+import { canRecoverUnsubmittedImageMask, canRecoverUnsubmittedImageReference, scheduleGenerationTask } from "@/lib/server/generation-task-scheduler";
+import { assertEcommerceImageExecutionSnapshot } from "@/lib/server/ecommerce-image-task-orchestration";
+import { getAuthSettings } from "@/lib/auth/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -70,12 +72,21 @@ export async function POST(request: Request, context: RouteContext) {
     if (!parsed.ok) return NextResponse.json({ error: parsed.message }, { status: parsed.status });
     if (parsed.data.action !== "recover") return NextResponse.json({ error: "不支持的图片任务操作" }, { status: 400 });
     if (task.status === "success") return NextResponse.json({ task: publicTask(task) }, { headers: pointsResponseHeaders(user) });
-    if (task.status !== "running") return NextResponse.json({ error: "当前图片任务无法继续检查" }, { status: 409 });
+    if (!["pending", "running"].includes(task.status)) return NextResponse.json({ error: "当前图片任务无法继续检查" }, { status: 409 });
 
     const schedule = await getStoredGenerationTaskRecord("image", task.id);
     const upstreamTaskId = task.upstream?.id || schedule?.upstreamTaskId;
     const referenceRecovery = !upstreamTaskId && canRecoverUnsubmittedImageReference(schedule);
-    if (!upstreamTaskId && !referenceRecovery) return NextResponse.json({ error: "原任务没有保存上游任务 ID，无法安全追回结果" }, { status: 409 });
+    const maskRecovery = !upstreamTaskId && canRecoverUnsubmittedImageMask(schedule);
+    if (task.status !== "running" && !maskRecovery) return NextResponse.json({ error: "当前图片任务无法继续检查" }, { status: 409 });
+    if (!upstreamTaskId && !referenceRecovery && !maskRecovery) return NextResponse.json({ error: "原任务没有保存上游任务 ID，无法安全追回结果" }, { status: 409 });
+    if (maskRecovery && task.config.apiSource === "system") {
+        try {
+            assertEcommerceImageExecutionSnapshot(await getAuthSettings(), task.ecommerceExecution, task.config);
+        } catch {
+            return NextResponse.json({ error: "原任务的编辑渠道配置已变化，无法沿用原选区继续执行" }, { status: 409 });
+        }
+    }
 
     const recoveryContext = { origin: resolveInternalOrigin(new URL(request.url).origin), publicOrigin: requestPublicOrigin(request), cookie: request.headers.get("cookie") || "" };
     const rearmed = upstreamTaskId
@@ -89,7 +100,12 @@ export async function POST(request: Request, context: RouteContext) {
               submittedAt: schedule?.submittedAt || task.createdAt,
               ...recoveryContext,
           })
-        : await scheduleGenerationTask("image", task.id, { executionPhase: "created", nextPollAt: Date.now(), lastUpstreamStatus: "reference_recovery_requested" }, { unsubmittedReferenceRecovery: true });
+        : await scheduleGenerationTask(
+              "image",
+              task.id,
+              { executionPhase: "created", nextPollAt: Date.now(), lastUpstreamStatus: maskRecovery ? "scene_mask_recovery_requested" : "reference_recovery_requested" },
+              maskRecovery ? { unsubmittedMaskRecovery: schedule! } : { unsubmittedReferenceRecovery: true },
+          );
     if (!rearmed) return NextResponse.json({ error: "图片任务状态已变化，请刷新后重试" }, { status: 409 });
     if (!upstreamTaskId) await runGenerationTaskRecoveryBatch({ ...recoveryContext, limit: 1, taskIds: [task.id], userRequested: true });
     const latest = await getImageTask(task.id);

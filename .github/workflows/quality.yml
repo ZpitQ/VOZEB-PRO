@@ -206,3 +206,26 @@ jobs:
           languages: javascript-typescript
       - name: Analyze JavaScript and TypeScript
         uses: github/codeql-action/analyze@47be0dbd5113ab1b79fe2dd3f68bdf7e426cdc87 # v3
+        with:
+          category: .github/workflows/quality.yml:security/
+
+  codeql-release-baseline:
+    name: security / release CodeQL
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@47be0dbd5113ab1b79fe2dd3f68bdf7e426cdc87 # v3
+        with:
+          languages: javascript-typescript
+      - name: Analyze JavaScript and TypeScript
+        uses: github/codeql-action/analyze@47be0dbd5113ab1b79fe2dd3f68bdf7e426cdc87 # v3
+        with:
+          # Match the release baseline without replacing the quality baseline.
+          category: .github/workflows/docker-image.yml:security/

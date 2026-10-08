@@ -17,9 +17,9 @@ import { GenerationSubmissionSafeFailure, generationSubmissionUncertainError } f
 import { getImageTask, transitionImageTask, updateImageTask, type ImageTask, type StoredImageTaskMediaResult } from "@/lib/server/image-task-store";
 import { maintenanceWorkerContext } from "@/lib/server/maintenance-auth";
 import { resolveModelRequestTimeoutMs } from "@/lib/server/model-request-policy";
-import { imageReferenceToDataUrl, shouldUseJsonImageEdit, openAiImageTaskPath } from "@/app/api/image-tasks/image-task-support";
+import { imageReferenceToDataUrl, resolveImageTaskEditProtocol } from "@/app/api/image-tasks/image-task-support";
 import { validateSceneEditProtection } from "./ecommerce-product-regions";
-import { ecommerceSceneProtectionReferencesMatch } from "./ecommerce-image-task-orchestration";
+import { assertEcommerceImageExecutionSnapshot, ecommerceSceneProtectionReferencesMatch } from "./ecommerce-image-task-orchestration";
 import { getAgentRun } from "./agent-run-store";
 import { assertEcommerceReferenceContent, EcommerceReferenceSourceChangedError, EcommerceReferenceSourceReadError, referenceAssetVersion } from "./ecommerce-reference-recovery";
 import { originalImageSourceUrl } from "@/lib/media-image-url";
@@ -56,22 +56,26 @@ export async function createImageTaskUpstreamStep(task: ImageTask, origin: strin
             status: infrastructure ? "reference_validation_unavailable" : "reference_source_unavailable",
         };
     }
-    if (running.sceneProtection || (running.ecommerceExecution?.protection?.scope === "local" && !running.productProtection)) {
+    if (running.config.apiSource === "system" && running.ecommerceExecution) {
         try {
-            if (!running.sceneProtection || !running.mask || !ecommerceSceneProtectionReferencesMatch(running.sceneProtection.sourceAssetId, running.references, running.ecommerceExecution) || running.mask.dataUrl !== running.sceneProtection.mask.dataUrl)
-                throw new Error("局部场景编辑缺少完整原图与可信独立蒙版");
-            const protocol = running.config.advancedConfig?.protocol;
-            if (
-                running.config.apiFormat !== "openai" ||
-                (protocol && !["openai", "auto", "compatible"].includes(protocol)) ||
-                (await shouldUseJsonImageEdit(running.config)) ||
-                !/^\/(?:v1\/)?images\/edits$/i.test(await openAiImageTaskPath(running.config, "edit"))
-            )
-                throw new Error("当前协议未验证支持独立 alpha 蒙版，请选择支持局部编辑的模型");
-            const source = await imageReferenceToDataUrl(submissionReferences[0], "scene.png", origin, authContext);
-            await validateSceneEditProtection(Buffer.from(source.split(",")[1], "base64"), running.sceneProtection);
+            assertEcommerceImageExecutionSnapshot(await getAuthSettings(), running.ecommerceExecution, running.config);
         } catch (error) {
-            return { state: "needs_review", reason: error instanceof Error ? error.message : "局部场景蒙版无法验证", status: "scene_mask_review_required" };
+            return { state: "needs_review", reason: error instanceof Error ? error.message : "电商生图执行配置已变化", status: "ecommerce_execution_snapshot_changed" };
+        }
+    }
+    const localSceneEdit = running.sceneProtection || (running.ecommerceExecution?.protection?.scope === "local" && !running.productProtection);
+    if (running.productProtection || localSceneEdit) {
+        try {
+            if (!running.mask) throw new Error("局部编辑缺少可信独立蒙版");
+            if (!(await resolveImageTaskEditProtocol(running.config)).supportsIndependentMask) throw new Error("当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。");
+            if (localSceneEdit) {
+                if (!running.sceneProtection || !ecommerceSceneProtectionReferencesMatch(running.sceneProtection.sourceAssetId, running.references, running.ecommerceExecution) || running.mask.dataUrl !== running.sceneProtection.mask.dataUrl)
+                    throw new Error("局部场景编辑缺少完整原图与可信独立蒙版");
+                const source = await imageReferenceToDataUrl(submissionReferences[0], "scene.png", origin, authContext);
+                await validateSceneEditProtection(Buffer.from(source.split(",")[1], "base64"), running.sceneProtection);
+            }
+        } catch (error) {
+            return { state: "needs_review", reason: error instanceof Error ? error.message : "局部编辑蒙版无法验证", status: running.productProtection ? "product_mask_review_required" : "scene_mask_review_required" };
         }
     }
     const config = running.config;
