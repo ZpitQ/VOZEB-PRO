@@ -4,10 +4,12 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 
 import type { CreativeAsset } from "@/lib/creative-runtime-contract";
+import { emptyAdvancedConfig } from "@/lib/channel-protocol-registry";
 
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import type { EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
+import { resolveImageEditProtocol } from "./image-edit-protocol";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
 import { createEcommerceSceneEditTask, createEcommerceLocalEditTask, loadEcommercePlanningImage } from "./ecommerce-generation-service";
 import { authorizedWorkerUserId, maintenanceWorkerContext } from "./maintenance-auth";
@@ -36,6 +38,35 @@ describe("ecommerce generation service", () => {
         const task = operation === "local_edit" ? createEcommerceLocalEditTask({ id: "run", prompt: "edit" }, editPlan, assets, regions, compiled) : createEcommerceSceneEditTask({ id: "run", prompt: "edit" }, editPlan, assets, compiled);
         expect(task.references?.map((reference) => reference.assetId)).toEqual(compiled.referenceRoles.map((reference) => reference.assetId));
         expect(task.ecommerceExecution?.referenceMapping).toEqual(compiled.referenceMapping);
+    });
+    it.each([
+        { kind: "missing protocol", edit: undefined },
+        { kind: "JSON reference transport", edit: { referenceRule: "JSON images[].image_url" } },
+        { kind: "generation path", edit: { editPath: "/images/generations" } },
+        { kind: "Nano Banana", edit: {} },
+    ])("rejects unsupported independent-mask execution before creating tasks or requesting a provider: $kind", async ({ kind, edit }) => {
+        const snapshot = generationSnapshot();
+        if (kind === "Nano Banana") {
+            snapshot.upstreamModel = "nano-banana-2";
+            snapshot.apiFormat = "gemini";
+        }
+        snapshot.imageEdit = edit ? resolveImageEditProtocol({ apiFormat: snapshot.apiFormat, model: snapshot.upstreamModel, advancedConfig: { ...emptyAdvancedConfig(), ...edit } }) : undefined;
+        const editPlan = plan();
+        const compiled = compileEcommerceImageRequest(editPlan, resolveEcommerceImageProviderProfile(snapshot)!);
+        expect(compiled).toMatchObject({ state: "needs_review", reason: "independent_mask_unsupported" });
+        const regions = await buildWhiteBackgroundProductProtection(await productImage({ background: "white", products: [{ left: 22, top: 10, width: 20, height: 28 }] }), analysis(), "product");
+        const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected provider request"));
+        try {
+            expect(() => createEcommerceProductSceneTask({ id: "run", prompt: "scene" }, editPlan, [asset("product", "product.png")], regions, compiled)).toThrow("当前生图模型不满足电商图片执行要求");
+            const localPlan: EcommerceEditPlan = { ...editPlan, operation: "local_edit", source: { ...editPlan.source, currentSceneBaselineId: "current" } };
+            const localCompiled = compileEcommerceImageRequest(localPlan, resolveEcommerceImageProviderProfile(snapshot)!);
+            expect(() => createEcommerceLocalEditTask({ id: "run", prompt: "edit" }, localPlan, [asset("product", "product.png"), asset("current", "current.png")], { ...regions, sourceAssetId: "current" }, localCompiled)).toThrow(
+                "当前生图模型不满足电商图片执行要求",
+            );
+            expect(fetch).not.toHaveBeenCalled();
+        } finally {
+            fetch.mockRestore();
+        }
     });
     it.each(["worker", "cookie"] as const)("reads protected baseline images with %s credentials", async (credentialKind) => {
         const bytes = await sharp({ create: { width: 32, height: 24, channels: 3, background: "white" } })
@@ -353,6 +384,7 @@ function generationSnapshot(): EcommerceRoleRouteSnapshot {
         channelId: "image-channel",
         upstreamModel: "gpt-image-2.5-flare",
         apiFormat: "openai",
+        imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
     };
 }
 

@@ -787,13 +787,13 @@ test("unsupported-mask:真实协议能力门禁保留原任务且不整图重绘
     }
 });
 
-test("child-review-reason:选区确认后子任务API复核原因持久显示且不重复创建", async ({ page, request }, testInfo) => {
-    test.skip(testInfo.project.name !== "chromium", "真实子任务链路在桌面执行；布局矩阵另有DTO测试");
+test("custom-mask-preflight:不可信自定义蒙版协议提前复核且原因刷新保留", async ({ page, request }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "真实协议否定对照在桌面执行");
     const golden = regressions.find((item) => item.caseId === "landscape-prop-add")!;
     const settings = e2eSettingsPatch();
     const model = MODEL_ROUTES.image_generation.upstreamModel;
-    const reason = "当前协议不支持可信独立蒙版，请选择支持局部编辑的模型。";
-    // The compiler accepts this OpenAI image profile; the child API rejects its custom mask transport after selection.
+    const reason = "当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。";
+    // The shared protocol contract rejects untrusted custom masks before asking for a selection.
     const configured = await request.patch("/api/admin/settings", {
         data: {
             ...settings,
@@ -813,41 +813,20 @@ test("child-review-reason:选区确认后子任务API复核原因持久显示且
         await page.locator('input[type="file"][multiple]').setInputFiles({ name: "child-review-scene.png", mimeType: "image/png", buffer: await deterministicScene(golden.source!) });
         const created = await submitPrompt(page, golden.userRequest, { reusePage: true });
         pausedRunForCleanup = created;
-        const waiting = await waitForRun(request, created.runId, "paused");
-        expect(waiting.ecommerceSceneSelection).toMatchObject({ action: "confirm_scene_selection" });
-        const taskId = waiting.tasks?.[0].id;
+        const paused = await waitForRun(request, created.runId, "paused");
+        const taskId = paused.tasks?.[0].id;
+        expect(taskId).toBeDefined();
+        expect(paused.tasks).toEqual([expect.objectContaining({ id: taskId, status: "needs_review", error: reason })]);
+        expect(paused.ecommerceSceneSelection).toBeUndefined();
+        expectPublicWhitelist(paused);
         const children = async () => {
             const response = await request.get("/api/admin/generation-operations?type=image");
             expect(response.ok(), await response.text()).toBe(true);
             return ((await response.json()).data.items as AdminGenerationTask[]).filter((task) => task.runId === created.runId);
         };
         expect(await children()).toHaveLength(0);
-        await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
-        const image = page.getByRole("img", { name: "选择修改位置的原图", exact: true });
-        await expect(image).toBeVisible();
-        await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).complete && (element as HTMLImageElement).naturalWidth > 0)).toBe(true);
-        const box = await image.boundingBox();
-        if (!box) throw new Error("Child review selection image has no geometry");
-        await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
-        await page.mouse.down();
-        await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.8);
-        await page.mouse.up();
-        const resumeResponse = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/agent/runs/${created.runId}/resume`);
-        await page.getByRole("button", { name: "确认修改位置", exact: true }).click();
-        const resumed = await resumeResponse;
-        expect(resumed.ok(), await resumed.text()).toBe(true);
-        await expect.poll(async () => (await children()).length).toBe(1);
-        const paused = await waitForRun(request, created.runId, "paused");
-        expect(paused.tasks).toEqual([expect.objectContaining({ id: taskId, status: "needs_review", error: reason })]);
-        expect(paused.ecommerceSceneSelection).toBeUndefined();
-        expectPublicWhitelist(paused);
-        const [child] = await children();
-        expect(child).toMatchObject({ runId: created.runId, parentTaskId: created.runId, attemptNo: 1, executionPhase: "needs_review", lastUpstreamStatus: "strict_product_mask_review_required", error: reason });
-        expect(child.attempts ?? []).toHaveLength(0);
-        expect(child.upstreamTaskId).toBeUndefined();
-        const detail = await request.get(`/api/image-tasks/${encodeURIComponent(child.id)}`);
-        expect(detail.ok(), await detail.text()).toBe(true);
-        expect(await detail.json()).toMatchObject({ task: { id: child.id, needsReview: true, reviewReason: reason, executionPhase: "needs_review" } });
+        const rejected = await request.post(`/api/agent/runs/${created.runId}/resume`, { data: { conversationId: created.conversationId, sceneSelection: { baselineAssetId: "invalid-selection", region: { x: 1, y: 1, width: 2, height: 2 } } } });
+        expect(rejected.status()).toBe(409);
         await expect(page.getByText(reason, { exact: true })).toBeVisible();
         const assertPersistedReason = async () => {
             const messages = await request.get(`/api/creative/conversations/${created.conversationId}/messages`);
@@ -856,9 +835,11 @@ test("child-review-reason:选区确认后子任务API复核原因持久显示且
             expect(assistant?.content).toBe(reason);
             await expect(page.getByText(/上游创建状态待确认|上游创建结果待确认/)).toHaveCount(0);
             expect((await protocolFixtureState(request)).requests.filter((item) => item.method === "POST" && (/\/images\//.test(item.path) || /:generateContent$/.test(item.path)))).toHaveLength(0);
-            expect((await children()).map((task) => ({ id: task.id, attemptNo: task.attemptNo }))).toEqual([{ id: child.id, attemptNo: 1 }]);
+            expect(await children()).toHaveLength(0);
         };
         await assertPersistedReason();
+        await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-media-result")).toHaveCount(0);
         await page.reload({ waitUntil: "domcontentloaded" });
         await expect(page.getByText(reason, { exact: true })).toBeVisible();
         await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
