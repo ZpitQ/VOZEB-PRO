@@ -1327,6 +1327,62 @@ async function flushRunEventRendering(page: Page) {
     await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 }
 
+test("selection-large-preview:待确认直接显示完整图片并在大图保留原像素选区", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "桌面大图框选专项");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const fixture = await mockPublicEcommerceRound(page, "selection");
+    await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
+    const preview = page.getByRole("img", { name: "待修改的原图", exact: true });
+    await expect(preview).toBeVisible();
+    await expect.poll(() => preview.evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBe(418);
+    const small = await preview.boundingBox();
+    if (!small) throw new Error("Inline selection preview has no browser geometry");
+    expect(small.width / small.height).toBeCloseTo(2, 2);
+    await expect(page.getByRole("dialog", { name: "选择修改位置", exact: true })).toHaveCount(0);
+    await preview.click();
+    const dialog = page.getByRole("dialog", { name: "选择修改位置", exact: true });
+    await expect(dialog).toBeVisible();
+    const image = dialog.getByRole("img", { name: "选择修改位置的原图", exact: true });
+    await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(418);
+    const large = await sceneSelectionImageGeometry(page);
+    expect(large.width).toBeGreaterThan(small.width * 1.6);
+    expect(large.width / large.height).toBeCloseTo(2, 2);
+    expect(large.x).toBeGreaterThanOrEqual(0);
+    expect(large.y).toBeGreaterThanOrEqual(0);
+    expect(large.x + large.width).toBeLessThanOrEqual(1440);
+    expect(large.y + large.height).toBeLessThanOrEqual(900);
+    const confirm = dialog.getByRole("button", { name: /确认修改位置$/ });
+    await expect(confirm).toBeDisabled();
+    await dragSceneSelection(page);
+    await expect(confirm).toBeEnabled();
+    const selected = dialog.getByTestId("creative-scene-selection-region");
+    const expectedOverlay = await selected.getAttribute("style");
+    await dialog.getByRole("button", { name: "关闭大图", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByTestId("creative-scene-selection-preview").getByTestId("creative-scene-selection-region")).toHaveAttribute("style", expectedOverlay!);
+    expect(fixture.controls).toHaveLength(0);
+    await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
+    await expect(dialog).toBeVisible();
+    await expect(selected).toHaveAttribute("style", expectedOverlay!);
+    await expect(confirm).toBeEnabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByTestId("creative-scene-selection-preview").getByTestId("creative-scene-selection-region")).toHaveAttribute("style", expectedOverlay!);
+    expect(fixture.controls).toHaveLength(0);
+    await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
+    await expect(dialog).toBeVisible();
+    await expect(selected).toHaveAttribute("style", expectedOverlay!);
+    await testInfo.attach("selection-large-preview", { body: await page.screenshot(), contentType: "image/png" });
+    await confirm.dblclick();
+    await expect(confirm).toBeDisabled();
+    await expect.poll(() => fixture.controls.length).toBe(1);
+    expect(fixture.controls[0]).toEqual({ conversationId: fixture.conversationId, sceneSelection: { baselineAssetId: "task16-baseline", region: { x: 251, y: 125, width: 752, height: 377 } } });
+    fixture.releaseResume();
+    await expect(dialog).toHaveCount(0);
+    expect(fixture.createdRuns()).toBe(0);
+    expect(fixture.controls).toHaveLength(1);
+});
+
 for (const theme of ["light", "dark"] as const) {
     test(`待选区同一任务可取消、刷新恢复并按原图像素确认-${theme}`, async ({ page }, testInfo) => {
         test.skip(!["chromium", "mobile-390", "mobile-430"].includes(testInfo.project.name), "桌面与390/430专项");
@@ -1343,6 +1399,13 @@ for (const theme of ["light", "dark"] as const) {
         await expect(confirm).toBeEnabled();
         await page.getByRole("button", { name: "取消选择", exact: true }).click();
         expect(fixture.controls).toHaveLength(0);
+        await expect(page.getByRole("dialog", { name: "选择修改位置", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-scene-selection-preview").getByTestId("creative-scene-selection-region")).toHaveCount(0);
+        await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
+        await expect(confirm).toBeDisabled();
+        await expect(page.getByTestId("creative-scene-selection").getByTestId("creative-scene-selection-region")).toHaveCount(0);
+        await page.getByRole("button", { name: "关闭大图", exact: true }).click();
+        await expect(page.getByRole("dialog", { name: "选择修改位置", exact: true })).toHaveCount(0);
         await page.reload({ waitUntil: "domcontentloaded" });
         await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
         await expect(confirm).toBeDisabled();
@@ -1391,12 +1454,30 @@ for (const theme of ["light", "dark"] as const) {
     });
 }
 
-async function dragSceneSelection(page: Page) {
+async function sceneSelectionImageGeometry(page: Page) {
     const image = page.getByRole("img", { name: "选择修改位置的原图", exact: true });
     await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(418);
     await image.scrollIntoViewIfNeeded();
-    const box = await image.boundingBox();
-    if (!box) throw new Error("Selection image has no browser geometry");
+    let previous: Awaited<ReturnType<typeof image.boundingBox>> = null;
+    let stableSamples = 0;
+    // Modal motion can start after its first visible frame; wait for stable geometry.
+    await expect
+        .poll(
+            async () => {
+                const box = await image.boundingBox();
+                stableSamples = box && previous && (["x", "y", "width", "height"] as const).every((key) => Math.abs(box[key] - previous![key]) < 0.5) ? stableSamples + 1 : 0;
+                previous = box;
+                return stableSamples;
+            },
+            { intervals: [100, 100, 100] },
+        )
+        .toBeGreaterThanOrEqual(2);
+    if (!previous) throw new Error("Selection image has no stable browser geometry");
+    return previous;
+}
+
+async function dragSceneSelection(page: Page) {
+    const box = await sceneSelectionImageGeometry(page);
     await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
     await page.mouse.down();
     await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.8);

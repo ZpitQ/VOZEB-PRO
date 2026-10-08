@@ -1,5 +1,5 @@
 import { ecommerceCanvasSize, type EcommerceCanvasConstraint, type EcommerceEditPlan, type EcommerceEditProtection, type EcommercePhotographyPlan, type EcommerceReferenceUse } from "./ecommerce-edit-plan";
-import type { EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
+import type { EcommerceRoleCandidate, EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 
 export type EcommerceImageProviderProfile = {
     profileId: "gpt-image-2.5-flare" | "gpt-image-2.5-sunburst" | "nano-banana-2";
@@ -39,7 +39,7 @@ export function resolveEcommerceImageProviderProfile(snapshot: EcommerceRoleRout
         return {
             profileId: model,
             compilerFamily: "openai-image-2.5",
-            supportsIndependentMask: snapshot.apiFormat === "openai",
+            supportsIndependentMask: snapshot.apiFormat === "openai" && snapshot.imageEdit?.supportsIndependentMask === true,
             modelSnapshot: { ...snapshot },
         };
     }
@@ -52,6 +52,18 @@ export function resolveEcommerceImageProviderProfile(snapshot: EcommerceRoleRout
         };
     }
     return null;
+}
+
+export function compileEcommerceImageCandidates(plan: EcommerceEditPlan, candidates: EcommerceRoleCandidate[]) {
+    let first: { candidate: EcommerceRoleCandidate; execution: EcommerceCompiledImageRequest } | null = null;
+    for (const candidate of candidates) {
+        const profile = resolveEcommerceImageProviderProfile(candidate.snapshot);
+        if (!profile) continue;
+        const execution = compileEcommerceImageRequest(plan, profile);
+        first ||= { candidate, execution };
+        if (execution.state === "ready") return { candidate, execution };
+    }
+    return first;
 }
 
 export function compileEcommerceImageRequest(plan: EcommerceEditPlan, profile: EcommerceImageProviderProfile): EcommerceCompiledImageRequest {

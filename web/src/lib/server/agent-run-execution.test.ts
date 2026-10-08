@@ -3,11 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AuthSettings } from "@/lib/auth/store";
+import { emptyAdvancedConfig } from "@/lib/channel-protocol-registry";
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import type { AgentRunTask } from "./agent-run-store";
 import type { ImageTask, StoredImageTaskMediaResult } from "./image-task-store";
+import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
+import { routeEcommerceRole } from "./ecommerce-model-routing";
+import { toSystemGenerationChannel } from "./generation-channel";
+import { buildSceneEditProtection } from "./ecommerce-product-regions";
 
-const boundary = vi.hoisted(() => ({ request: vi.fn(), create: vi.fn(), poll: vi.fn(), structured: vi.fn(), refund: vi.fn(), rejectedBytes: new Set<string>(), unreadableStoredBytes: new Set<string>(), settings: {} as never }));
+const boundary = vi.hoisted(() => ({ request: vi.fn(), create: vi.fn(), poll: vi.fn(), structured: vi.fn(), refund: vi.fn(), rejectedBytes: new Set<string>(), unreadableStoredBytes: new Set<string>(), settings: {} as AuthSettings }));
 vi.mock("./database", async (original) => ({ ...(await original<typeof import("./database")>()), getDatabaseProvider: () => "file" }));
 vi.mock("@/lib/auth/store", async (original) => ({ ...(await original<typeof import("@/lib/auth/store")>()), getAuthSettings: async () => boundary.settings, refundUserPoints: boundary.refund }));
 vi.mock("@/lib/auth/session", () => ({ getCurrentUser: async () => ({ id: "batch-user", role: "user" }) }));
@@ -44,6 +50,7 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
     let childBeforeQuality: ImageTask | undefined;
     let baseline: string;
     let getPublicImageTask: typeof import("@/app/api/image-tasks/[id]/route").GET;
+    let recoverPublicImageTask: typeof import("@/app/api/image-tasks/[id]/route").POST;
     let runTaskWithRetry: typeof import("./agent-run-execution").runTaskWithRetry;
     let executeTasks: typeof import("./agent-run-execution").executeTasks;
     let createAgentRun: typeof import("./agent-run-store").createAgentRun;
@@ -72,7 +79,7 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
         directory = await mkdtemp(join(tmpdir(), "vozeb-agent-batch-"));
         vi.stubEnv("VOZEB_PRO_DATA_DIR", directory);
         vi.stubEnv("VOZEB_PRO_DATABASE_PROVIDER", "file");
-        ({ GET: getPublicImageTask } = await import("@/app/api/image-tasks/[id]/route"));
+        ({ GET: getPublicImageTask, POST: recoverPublicImageTask } = await import("@/app/api/image-tasks/[id]/route"));
         ({ runTaskWithRetry, executeTasks } = await import("./agent-run-execution"));
         ({ createAgentRun, getAgentRun, updateAgentRunById } = await import("./agent-run-store"));
         ({ publicAgentRun, publicAgentRunEvent } = await import("./agent-run-public"));
@@ -91,6 +98,8 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
         boundary.rejectedBytes.clear();
         boundary.unreadableStoredBytes.clear();
         boundary.settings = settings("image-model", "image-channel");
+        boundary.settings.systemChannels.find((channel) => channel.id === "image-channel")!.models = ["nano-banana-2"];
+        boundary.settings.logicalModels.find((model) => model.id === "image-model")!.bindings[0].upstreamModel = "nano-banana-2";
         childIds = [];
         legacyEmptyResults = false;
         legacyResult = undefined;
@@ -121,7 +130,14 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
         boundary.request.mockImplementation(async (url: string, init?: RequestInit) => {
             if (url.endsWith("/api/image-tasks") && init?.method === "POST") {
                 const body = JSON.parse(String(init.body));
-                const child = await createImageTask({ ...body, ...body.context, userId: "batch-user", username: "fixture-user", displayName: "Fixture User", config: { ...body.config, channelId: "image-channel" } });
+                const child = await createImageTask({
+                    ...body,
+                    ...body.context,
+                    userId: "batch-user",
+                    username: "fixture-user",
+                    displayName: "Fixture User",
+                    config: { ...body.config, ...toSystemGenerationChannel(routeEcommerceRole(boundary.settings, "image_generation")!) },
+                });
                 childIds.push(child.id);
                 expect(await createImageTaskUpstreamStep(child, "http://fixture.local", "https://public.example", "session=fixture")).toMatchObject({ state: "pending" });
                 const submitted = (await getImageTask(child.id))!;
@@ -186,22 +202,15 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
             title: "scene edit",
             type: "image",
             prompt: "调整光线",
+            optimizedPrompt: "调整光线",
             count: 1,
             dependencies: [],
             status: "ready",
             attempts: 0,
             references: [{ assetId: "scene-root", url: baseline, type: "image", ecommerceRole: "scene" }],
-            ecommerceExecution: {
-                state: "ready",
-                compilerVersion: "ecommerce-nano-banana-2.v3",
-                providerProfileId: "nano-banana-2",
-                prompt: "adjust lighting",
-                referenceRoles: [{ assetId: "scene-root", role: "scene" }],
-                parameters: { variant: "nano-banana-2", size: "120x160" },
-                canvas: plan.canvas,
-                modelSnapshot: { logicalRole: "image_generation", capability: "image", logicalModelId: "image-model", channelId: "image-channel", upstreamModel: "vendor/image-model", apiFormat: "openai" },
-            },
+            ecommerceExecution: compileEcommerceImageRequest(plan, resolveEcommerceImageProviderProfile(routeEcommerceRole(boundary.settings, "image_generation")!.snapshot)!),
         };
+        task.prompt = task.ecommerceExecution!.prompt;
         const run = (await updateAgentRunById(
             initial.id,
             {
@@ -323,7 +332,14 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
         boundary.request.mockImplementation(async (url: string, init?: RequestInit) => {
             if (url.endsWith("/api/image-tasks") && init?.method === "POST") {
                 const body = JSON.parse(String(init.body));
-                const child = await createImageTask({ ...body, ...body.context, userId: "batch-user", username: "fixture-user", displayName: "Fixture User", config: { ...body.config, channelId: "image-channel" } });
+                const child = await createImageTask({
+                    ...body,
+                    ...body.context,
+                    userId: "batch-user",
+                    username: "fixture-user",
+                    displayName: "Fixture User",
+                    config: { ...body.config, ...toSystemGenerationChannel(routeEcommerceRole(boundary.settings, "image_generation")!) },
+                });
                 childIds.push(child.id);
                 await schedulePreparedImageTask(child, reason);
                 return Response.json({ task: { id: child.id } });
@@ -355,6 +371,119 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
         expect(childIds).toHaveLength(1);
         expect(boundary.create).not.toHaveBeenCalled();
         expect(boundary.poll).not.toHaveBeenCalled();
+    });
+
+    it("resumes the same unsubmitted pending masked child without creating another child", async () => {
+        const channel = boundary.settings.systemChannels.find((value) => value.id === "image-channel")!;
+        channel.models = ["gpt-image-2.5-flare"];
+        channel.advancedConfig = { ...emptyAdvancedConfig(), protocol: "sub2api", supportsReferenceImage: true };
+        boundary.settings.logicalModels.find((model) => model.id === "image-model")!.bindings[0].upstreamModel = "gpt-image-2.5-flare";
+        const candidate = routeEcommerceRole(boundary.settings, "image_generation")!;
+        const config = toSystemGenerationChannel(candidate);
+        const source = Buffer.from(baseline.split(",")[1], "base64");
+        const region = { x: 20, y: 50, width: 35, height: 30 };
+        const sceneProtection = { ...(await buildSceneEditProtection(source, "scene-root", region, ["vase", "contact shadow"], "user_selection")), confirmation: { actorUserId: "batch-user", confirmedAt: Date.now() } };
+        const conversation = await createCreativeConversation("batch-user", { surface: "chat" });
+        const initial = (await createAgentRun("batch-user", { clientRequestId: "pending-mask-recovery", conversationId: conversation.id, surface: "chat", prompt: "只修改选区内的花瓶", assetIds: [], skillIds: [], modelIds: [] })).run;
+        const plan: EcommerceEditPlan = {
+            planVersion: "ecommerce-edit.v4",
+            operation: "scene_edit",
+            source: { productAnchorId: null, currentSceneBaselineId: "scene-root", sceneReferenceIds: [] },
+            baseline: { productFacts: null, sceneFacts: { space: "living room", composition: "eye level", lighting: "daylight" } },
+            delta: { requestedChanges: ["replace vase"], targetObjects: ["vase"], targetRegions: ["cabinet top"], manualRegion: region },
+            preserve: { productCore: [], sceneElements: ["cabinet"] },
+            strategy: "integrated_scene",
+            modelRoles: { visionAnalysis: "planner", editPlanning: "planner", generation: "image-model", qualityCheck: null },
+            continuity: { parentResultId: null, branchId: "pending-mask-branch" },
+            validation: { requiredChecks: ["requested_edit"] },
+            canvas: { mode: "exact", size: { width: 120, height: 160 }, source: "baseline", allowReframe: false },
+            protection: { scope: "local", protectedObjectIds: ["cabinet"], preserveOutsideMask: true, allowLightingChange: false },
+        };
+        const execution = compileEcommerceImageRequest(plan, resolveEcommerceImageProviderProfile(candidate.snapshot)!);
+        expect(execution).toMatchObject({ state: "ready", mask: { mode: "independent", required: true }, modelSnapshot: { imageEdit: { protocol: "sub2api", transport: "json", supportsIndependentMask: true } } });
+        const child = await createImageTask({
+            userId: initial.userId,
+            username: "fixture-user",
+            displayName: "Fixture User",
+            runId: initial.id,
+            conversationId: conversation.id,
+            parentTaskId: "local-edit",
+            source: "agent",
+            kind: "edit",
+            prompt: execution.prompt,
+            config: { ...config, size: "120x160" },
+            references: [{ id: "scene-root", name: "scene.png", dataUrl: baseline, ecommerceRole: "scene" }],
+            mask: sceneProtection.mask,
+            sceneProtection,
+            ecommerceExecution: execution,
+            attempts: [],
+        });
+        const reason = "当前协议不支持可信独立蒙版，请选择支持局部编辑的模型。";
+        await schedulePreparedImageTask(child, reason);
+        const task: AgentRunTask = {
+            ...imageTask("local-edit"),
+            prompt: execution.prompt,
+            optimizedPrompt: initial.prompt,
+            status: "needs_review",
+            attempts: 1,
+            taskId: child.id,
+            taskIds: [child.id],
+            childTasks: [{ id: child.id, status: "needs_review", attempt: 1, error: reason }],
+            references: [{ assetId: "scene-root", url: baseline, type: "image", ecommerceRole: "scene" }],
+            sceneProtection,
+            ecommerceExecution: execution,
+            error: reason,
+        };
+        const paused = (await updateAgentRunById(initial.id, {
+            status: "paused",
+            tasks: [task],
+            reviewed: true,
+            ecommerceSnapshot: {
+                version: "ecommerce-generation.v1",
+                mode: "active",
+                qualityPolicy: "disabled",
+                input: { userRequest: initial.prompt, assetIds: ["scene-root"], conversationId: conversation.id, surface: "chat" },
+                plan,
+                createdAt: Date.now(),
+                runId: initial.id,
+                userId: initial.userId,
+            },
+        }))!;
+        expect(await getStoredGenerationTaskRecord("image", child.id)).toMatchObject({ status: "pending", executionPhase: "needs_review" });
+        expect((await getImageTask(child.id))?.attempts).toEqual([]);
+        const { publicAgentRunForRequest } = await import("./agent-run-public-selection");
+        expect(await publicAgentRunForRequest(paused, new Request("http://fixture.local/api/agent-runs/fixture"))).toMatchObject({ canCheckStatus: true });
+        boundary.create.mockResolvedValue({ dataUrl: await image(120, 160, "red") });
+        const originalTransport = boundary.request.getMockImplementation()!;
+        boundary.request.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (init?.method === "POST") {
+                expect(url).toBe(`http://fixture.local/api/image-tasks/${child.id}`);
+                expect(JSON.parse(String(init.body))).toEqual({ action: "recover" });
+                return recoverPublicImageTask(new Request(url, init), { params: Promise.resolve({ id: child.id }) });
+            }
+            return originalTransport(url, init);
+        });
+        const resumed = (await updateAgentRunById(paused.id, { status: "running", executionId: "mask-resume-executor" }, undefined, ["paused"]))!;
+        await executeTasks(resumed.id, "http://fixture.local", "session=fixture", "mask-resume-executor", boundary.settings);
+        expect(await getAgentRun(resumed.id)).toMatchObject({ status: "running", tasks: [{ taskId: child.id, taskIds: [child.id], attempts: 1 }] });
+        expect(await getStoredGenerationTaskRecord("image", child.id)).toMatchObject({ executionPhase: "result_ready" });
+        const { runGenerationTaskRecoveryBatch } = await import("./generation-task-recovery-service");
+        expect(await runGenerationTaskRecoveryBatch({ origin: "http://fixture.local", publicOrigin: "https://public.example", cookie: "session=fixture", limit: 1, taskIds: [child.id] })).toMatchObject({ claimed: 1, completed: 1 });
+        await executeTasks(resumed.id, "http://fixture.local", "session=fixture", "mask-resume-executor", boundary.settings);
+        const completed = (await getAgentRun(resumed.id))!;
+        const recovered = (await getImageTask(child.id))!;
+        expect(completed).toMatchObject({ status: "completed", tasks: [{ taskId: child.id, taskIds: [child.id], attempts: 1, childTasks: [{ id: child.id, status: "completed", attempt: 1 }] }] });
+        expect(recovered).toMatchObject({ status: "success", sceneProtection, mask: sceneProtection.mask, attempts: [{ attemptNo: 1, status: "succeeded" }] });
+        expect(recovered.result?.sceneProtectionEvidence).toMatchObject({ nativeOutsideChangedPixels: 18150, compositeOutsideChangedPixels: 0 });
+        expect(boundary.create).toHaveBeenCalledTimes(1);
+        expect(boundary.create.mock.calls[0][0]).toMatchObject({ id: child.id, sceneProtection, mask: sceneProtection.mask });
+        expect(boundary.poll).not.toHaveBeenCalled();
+        expect(boundary.structured).not.toHaveBeenCalled();
+        expect(boundary.request.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+        expect(childIds).toEqual([]);
+        await executeTasks(completed.id, "http://fixture.local", "session=fixture", "mask-resume-executor", boundary.settings);
+        expect(boundary.create).toHaveBeenCalledTimes(1);
+        expect((await getAgentRun(completed.id))?.tasks[0].taskIds).toEqual([child.id]);
     });
 
     it.each(["unreadable_first", "unreadable_middle", "unreadable_last", "save_failed", "wrong_native", "stored_wrong_unreadable", "stored_valid_unreadable", "all_unreadable", "all_save_failed", "complete_shared_url", "legacy_empty_results"] as const)(
@@ -402,17 +531,9 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
                 status: "ready",
                 attempts: 0,
                 references: [{ assetId: "scene-root", url: baseline, type: "image", ecommerceRole: "scene" }],
-                ecommerceExecution: {
-                    state: "ready",
-                    compilerVersion: "ecommerce-nano-banana-2.v3",
-                    providerProfileId: "nano-banana-2",
-                    prompt: "adjust scene",
-                    referenceRoles: [{ assetId: "scene-root", role: "scene" }],
-                    parameters: { variant: "nano-banana-2", size: "120x160" },
-                    canvas: plan.canvas,
-                    modelSnapshot: { logicalRole: "image_generation", capability: "image", logicalModelId: "image-model", channelId: "image-channel", upstreamModel: "vendor/image-model", apiFormat: "openai" },
-                },
+                ecommerceExecution: compileEcommerceImageRequest(plan, resolveEcommerceImageProviderProfile(routeEcommerceRole(boundary.settings, "image_generation")!.snapshot)!),
             };
+            task.prompt = task.ecommerceExecution!.prompt;
             const run = (await updateAgentRunById(
                 initial.id,
                 {
@@ -527,17 +648,9 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
             status: "ready",
             attempts: 0,
             references: [{ assetId: "scene-root", url: baseline, type: "image", ecommerceRole: "scene" }],
-            ecommerceExecution: {
-                state: "ready",
-                compilerVersion: "ecommerce-nano-banana-2.v2",
-                providerProfileId: "nano-banana-2",
-                prompt: "adjust scene",
-                referenceRoles: [{ assetId: "scene-root", role: "scene" }],
-                parameters: { variant: "nano-banana-2", size: "120x160" },
-                canvas: plan.canvas,
-                modelSnapshot: { logicalRole: "image_generation", capability: "image", logicalModelId: "image-model", channelId: "image-channel", upstreamModel: "vendor/image-model", apiFormat: "openai" },
-            },
+            ecommerceExecution: compileEcommerceImageRequest(plan, resolveEcommerceImageProviderProfile(routeEcommerceRole(boundary.settings, "image_generation")!.snapshot)!),
         };
+        task.prompt = task.ecommerceExecution!.prompt;
         const run = (await updateAgentRunById(
             initial.id,
             {

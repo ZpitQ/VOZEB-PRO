@@ -20,6 +20,44 @@ vi.mock("./generation-task-store", () => ({ listStoredGenerationTaskRecordsByRun
 const request = new Request("http://fixture.local/api/agent/runs/run", { headers: { cookie: "fixture-session" } });
 const asset = { id: "scene", userId: "user", conversationId: "conversation", type: "image", status: "ready", serverUrl: "/api/reference-assets/scene.png", width: 999, height: 999, metadata: { private: "private-marker" } };
 describe("original run status recovery action", () => {
+    it.each(["pending", "running"] as const)("exposes a status action for the confirmed unsubmitted %s mask child", async (status) => {
+        const run = {
+            id: "run",
+            userId: "user",
+            conversationId: "conversation",
+            surface: "chat",
+            status: "paused",
+            assetIds: [],
+            tasks: [{ id: "image", type: "image", status: "needs_review", attempts: 1, count: 1, taskId: "same-child" }],
+        } as unknown as AgentRun;
+        taskRecords.list.mockResolvedValue([
+            {
+                id: "same-child",
+                type: "image",
+                userId: "user",
+                runId: run.id,
+                conversationId: run.conversationId,
+                status,
+                executionPhase: "needs_review",
+                lastUpstreamStatus: "strict_product_mask_review_required",
+                payload: {
+                    runId: run.id,
+                    kind: "edit",
+                    attempts: [],
+                    references: [{ id: "scene" }],
+                    mask: { dataUrl: "alpha-mask" },
+                    sceneProtection: { sourceAssetId: "scene", selectionSource: "user_selection", mask: { dataUrl: "alpha-mask" } },
+                    ecommerceExecution: { protection: { scope: "local" }, mask: { required: true }, referenceRoles: [{ assetId: "scene" }] },
+                    config: { apiFormat: "openai", model: "gpt-image-2.5-sunburst", advancedConfig: { protocol: "sub2api" } },
+                },
+            },
+        ]);
+        const view = await publicAgentRunForRequest(run, request);
+        expect(view.canCheckStatus).toBe(true);
+        expect(view.ecommerceSceneSelection).toBeUndefined();
+        expect(view.id).toBe(run.id);
+        expect(JSON.stringify(view)).not.toContain("alpha-mask");
+    });
     it.each(["created", "created_attempted", "created_submitted", "created_billing", "created_result", "created_lease", "created_changed", "created_unknown", "polling", "completed", "changed", "unknown", "owner", "run", "conversation", "missing"])(
         "keeps recovery available with an owned %s sibling only when every child can continue safely",
         async (state) => {

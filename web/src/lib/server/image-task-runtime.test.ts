@@ -45,6 +45,7 @@ vi.mock("@/app/api/image-tasks/image-task-support", () => ({
     resolveProxiedMediaSource: mocks.resolveMedia,
     shouldUseJsonImageEdit: vi.fn(async () => false),
     openAiImageTaskPath: vi.fn(async () => "/images/edits"),
+    resolveImageTaskEditProtocol: async (config: ImageTask["config"]) => (await import("./image-edit-protocol")).resolveImageEditProtocol(config),
 }));
 vi.mock("@/app/api/image-tasks/image-task-runner", () => ({ stableMediaUrl: vi.fn((value: string) => (value && !value.startsWith("data:") ? value : "")), writeImageGenerationLog: mocks.writeLog }));
 vi.mock("@/lib/auth/store", () => ({ getAuthSettings: mocks.getSettings, refundUserPoints: mocks.refund }));
@@ -229,13 +230,13 @@ describe("image task runtime submission safety", () => {
         expect(mocks.pollOpenAi).toHaveBeenCalledWith(expect.anything(), "same-upstream", "http://fixture", "http://fixture", "session=test", "", true);
     });
 
-    it.each(["valid", "exchanged_order", "invalid_mapping"])("keeps v4 auxiliary references and validates the frozen local baseline (%s)", async (condition) => {
+    it.each(["valid", "sub2api", "exchanged_order", "invalid_mapping", "system_changed", "product_changed", "product_json"])("keeps v4 auxiliary references and validates the frozen local baseline (%s)", async (condition) => {
         const { buildSceneEditProtection } = await import("./ecommerce-product-regions");
         const source = await sharp({ create: { width: 6, height: 4, channels: 3, background: "blue" } })
             .png()
             .toBuffer();
         state.kind = "edit";
-        state.config.advancedConfig = { ...emptyAdvancedConfig(), protocol: "openai" };
+        state.config.advancedConfig = { ...emptyAdvancedConfig(), protocol: condition === "sub2api" ? "sub2api" : "openai" };
         state.references = [
             { id: "scene", dataUrl: dataUrl(source), ecommerceRole: "scene" },
             { id: "style", dataUrl: dataUrl(source), ecommerceRole: "scene" },
@@ -260,11 +261,31 @@ describe("image task runtime submission safety", () => {
             parameters: { variant: "gpt-image-2.5-flare" },
             modelSnapshot: { logicalRole: "image_generation", capability: "image", logicalModelId: "image", channelId: "fixture", upstreamModel: "gpt-image-2.5-flare", apiFormat: "openai" },
         };
+        if (condition === "product_json") {
+            state.config.advancedConfig = { ...emptyAdvancedConfig(), referenceRule: "JSON images[].image_url" };
+            state.sceneProtection = undefined;
+            state.ecommerceExecution = undefined;
+            state.productProtection = { sourceAssetId: "scene" } as ImageTask["productProtection"];
+        }
+        if (condition.endsWith("changed")) {
+            state.config = { ...state.config, apiSource: "system", model: "gpt-image-2.5-flare", channelId: "fixture", logicalModel: "image", advancedConfig: { ...emptyAdvancedConfig(), protocol: "sub2api" } };
+            mocks.getSettings.mockResolvedValue({
+                defaultModels: { imageModel: "image" },
+                logicalModels: [{ id: "image", name: "image", capability: "image", enabled: true, bindings: [{ id: "binding", channelId: "fixture", upstreamModel: "gpt-image-2.5-flare", enabled: true, priority: 1 }] }],
+                systemChannels: [
+                    { id: "fixture", name: "image", enabled: true, baseUrl: "https://image.example.com", apiKey: "fixture-key", apiFormat: "openai", models: ["gpt-image-2.5-flare"], advancedConfig: { ...emptyAdvancedConfig(), protocol: "openai" } },
+                ],
+            });
+            if (condition === "product_changed") {
+                state.sceneProtection = undefined;
+                state.productProtection = { sourceAssetId: "scene" } as ImageTask["productProtection"];
+            }
+        }
         if (condition === "exchanged_order") state.references.reverse();
         mocks.runOpenAi.mockResolvedValue({ pending: { id: "same-upstream", pollBaseUrl: "http://fixture", mediaBaseUrl: "http://fixture" } });
         const step = await createImageTaskUpstreamStep(state, "http://fixture", "http://fixture");
-        expect(step.state).toBe(condition === "valid" ? "pending" : "needs_review");
-        if (condition === "valid") expect(mocks.runOpenAi).toHaveBeenCalledWith(expect.objectContaining({ references: state.references, mask: state.mask }), expect.anything(), expect.anything(), expect.anything(), true);
+        expect(step.state).toBe(condition === "valid" || condition === "sub2api" ? "pending" : "needs_review");
+        if (condition === "valid" || condition === "sub2api") expect(mocks.runOpenAi).toHaveBeenCalledWith(expect.objectContaining({ references: state.references, mask: state.mask }), expect.anything(), expect.anything(), expect.anything(), true);
         else expect(mocks.runOpenAi).not.toHaveBeenCalled();
     });
 

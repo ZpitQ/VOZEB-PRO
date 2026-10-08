@@ -22,7 +22,7 @@ import { decodeEcommerceCanvasSize } from "./ecommerce-generation-service";
 import type { EcommerceRoleCandidate, EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 import { boundEcommerceVisionImage } from "./ecommerce-vision-image";
 import { rankTextPlanningCandidates, requestStructuredText, type TextPlanningBodyMeasurement } from "./text-planning-runtime";
-import type { SceneEditProtectionEvidence } from "./ecommerce-product-regions";
+import { compositeSceneEdit, type SceneEditProtectionEvidence } from "./ecommerce-product-regions";
 import { SYSTEM_PROXY_JSON_BODY_MAX_BYTES } from "./system-proxy-request-limits";
 import type { ImageTaskResultEvidence } from "./image-task-store";
 
@@ -59,6 +59,8 @@ export type EcommerceCanvasQualityEvidence = {
     storedStatus?: "readable" | "unavailable";
     nativeMatches: boolean | null;
     storedMatches: boolean | null;
+    normalization?: SceneEditProtectionEvidence["normalization"];
+    mappingVerified?: boolean;
     hardFailures: string[];
 };
 
@@ -170,6 +172,11 @@ async function collectEcommerceTechnicalEvidence(input: EcommerceQualityCheckReq
                 const storedSize = stored.status === "fulfilled" ? stored.value : undefined;
                 const nativeMatches = nativeSize ? matchesEcommerceCanvas(constraint, nativeSize) : null;
                 const storedMatches = storedSize ? matchesEcommerceCanvas(constraint, storedSize) : null;
+                const mappingVerified =
+                    native.status === "fulfilled" &&
+                    stored.status === "fulfilled" &&
+                    (result?.sceneProtectionEvidence?.normalization === "uniform_scale" || result?.sceneProtectionEvidence?.normalization === "pixel_grid_scale") &&
+                    protectionChecks.some((check) => check.resultId === result.resultId && check.key === "unmodified_region" && check.status === "passed");
                 return {
                     resultId: evidence?.resultId || result!.resultId,
                     ...(evidence ? { resultIndex: evidence.resultIndex, storageStatus: evidence.storageStatus, ...(evidence.failureStage ? { failureStage: evidence.failureStage, failureReason: evidence.failureReason } : {}) } : {}),
@@ -182,7 +189,9 @@ async function collectEcommerceTechnicalEvidence(input: EcommerceQualityCheckReq
                     storedStatus: storedSize ? ("readable" as const) : ("unavailable" as const),
                     nativeMatches,
                     storedMatches,
-                    hardFailures: nativeMatches === false || storedMatches === false ? ["canvas_geometry"] : [],
+                    normalization: result?.sceneProtectionEvidence?.normalization || ("none" as const),
+                    mappingVerified,
+                    hardFailures: (nativeMatches === false && !mappingVerified) || storedMatches === false ? ["canvas_geometry"] : [],
                 };
             }),
         );
@@ -191,7 +200,7 @@ async function collectEcommerceTechnicalEvidence(input: EcommerceQualityCheckReq
             key: "canvas_geometry",
             source: "media",
             status: evidence.hardFailures.length ? "failed" : evidence.nativeStatus === "unavailable" || evidence.storedStatus === "unavailable" ? "not_applicable" : "passed",
-            reason: `native=${evidence.nativeSize ? evidence.nativeSize.width + "x" + evidence.nativeSize.height : "unavailable"};stored=${evidence.storedSize ? evidence.storedSize.width + "x" + evidence.storedSize.height : "unavailable"};constraint=${constraint.mode}:${constraint.size.width}x${constraint.size.height}`,
+            reason: `native=${evidence.nativeSize ? evidence.nativeSize.width + "x" + evidence.nativeSize.height : "unavailable"};stored=${evidence.storedSize ? evidence.storedSize.width + "x" + evidence.storedSize.height : "unavailable"};constraint=${constraint.mode}:${constraint.size.width}x${constraint.size.height};normalization=${evidence.normalization}`,
         }));
     }
     return { checks: [...geometryChecks, ...protectionChecks], canvasEvidence, sceneProtectionEvidence };
@@ -712,6 +721,21 @@ async function qualityProtectionChecks(input: EcommerceQualityCheckRequest): Pro
                     r.x + r.width <= composite.info.width &&
                     r.y + r.height <= composite.info.height;
                 if (!valid) return { ...item, status: "failed", reason: "真实源图或合成文件与独立保护证据不一致" };
+                if (proof.normalization === "uniform_scale" || proof.normalization === "pixel_grid_scale") {
+                    if (proof.nativeOutsideChangedPixels !== undefined) return { ...item, status: "failed", reason: "跨分辨率映射不得声明原生逐像素变化数量" };
+                    if (!result.nativeUrl || !proof.maskUrl) return { ...item, reason: "局部尺寸适配缺少原生图片或独立蒙版" };
+                    const [native, mask] = await Promise.all([qualityImageBytes(result.nativeUrl, input), qualityImageBytes(proof.maskUrl, input)]);
+                    const rebuilt = await compositeSceneEdit(source, native, { ...proof, mask: { ...proof.maskSize, type: "image/png", dataUrl: "data:image/png;base64," + mask.toString("base64") } });
+                    if (
+                        rebuilt.evidence.normalization !== proof.normalization ||
+                        rebuilt.evidence.nativeSize.width !== proof.nativeSize.width ||
+                        rebuilt.evidence.nativeSize.height !== proof.nativeSize.height ||
+                        rebuilt.evidence.nativeDigest !== proof.nativeDigest ||
+                        rebuilt.evidence.compositeDigest !== proof.compositeDigest ||
+                        rebuilt.evidence.mappedOutsideChangedPixels !== proof.mappedOutsideChangedPixels
+                    )
+                        return { ...item, status: "failed", reason: "真实原生图片、尺寸映射或重建成图与保护证据不一致" };
+                }
                 let outsidePixels = 0;
                 let changedPixels = 0;
                 for (let y = 0; y < composite.info.height; y++)
@@ -725,7 +749,7 @@ async function qualityProtectionChecks(input: EcommerceQualityCheckRequest): Pro
                     ...item,
                     status: changedPixels || !outsidePixels || proof.outsidePixels !== outsidePixels || proof.compositeOutsideChangedPixels !== 0 ? "failed" : "passed",
                     evidence: { baselineRegion: { ...r }, resultRegion: { ...r } },
-                    reason: `actualOutsidePixels=${outsidePixels};actualChangedPixels=${changedPixels};nativeChangedPixels=${proof.nativeOutsideChangedPixels}`,
+                    reason: `actualOutsidePixels=${outsidePixels};actualChangedPixels=${changedPixels};mappedChangedPixels=${proof.mappedOutsideChangedPixels};normalization=${proof.normalization || "none"}`,
                 };
             } catch {
                 return { ...item, reason: "无法读取真实保护源图或合成文件" };

@@ -6,6 +6,7 @@ import { scheduleGenerationTask } from "./generation-task-scheduler";
 import type { SceneEditProtection } from "./ecommerce-product-regions";
 import { normalizeEcommerceEditProtection, normalizeEcommercePhotographyPlan } from "./ecommerce-edit-plan";
 import { ECOMMERCE_REFERENCE_PURPOSES } from "./ecommerce-reference-purpose";
+import { resolveImageEditProtocol, sameImageEditProtocol } from "./image-edit-protocol";
 
 type EcommerceSettings = Parameters<typeof routeEcommerceRole>[0];
 
@@ -19,14 +20,16 @@ export class EcommerceImageTaskPreparationError extends Error {
     }
 }
 
-export function assertEcommerceImageExecutionSnapshot(settings: EcommerceSettings, execution?: EcommerceCompiledImageRequest) {
+export function assertEcommerceImageExecutionSnapshot(settings: EcommerceSettings, execution?: EcommerceCompiledImageRequest, frozenConfig?: ImageTaskConfig) {
     if (!execution) return;
     if (!validExecutionShape(execution)) throw new EcommerceImageTaskPreparationError("电商生图执行快照无效");
     const exactRoute = routeEcommerceRole(settings, "image_generation", execution.modelSnapshot);
-    const exactProfile = resolveEcommerceImageProviderProfile(execution.modelSnapshot);
+    const exactProfile = exactRoute && resolveEcommerceImageProviderProfile(exactRoute.snapshot);
+    const frozenEdit = frozenConfig && resolveImageEditProtocol(frozenConfig, exactRoute?.channel.baseUrl);
     if (
         !exactRoute ||
         !exactProfile ||
+        (frozenEdit && (!exactRoute.snapshot.imageEdit || !sameImageEditProtocol(frozenEdit, exactRoute.snapshot.imageEdit))) ||
         exactProfile.profileId !== execution.providerProfileId ||
         exactProfile.modelSnapshot.apiFormat !== execution.modelSnapshot.apiFormat ||
         compilerVersionForProfile(exactProfile.compilerFamily, Boolean(execution.protection), Boolean(execution.photography), Boolean(execution.referenceMapping)) !== execution.compilerVersion
@@ -64,12 +67,12 @@ export function prepareEcommerceImageTask(input: {
             !input.ecommerceExecution.mask?.required
         )
             throw new EcommerceImageTaskPreparationError("局部场景执行快照无效");
-        if (!input.sceneProtection) reviewReason = "请在原图上确认允许编辑的区域，包含新增物体及其接触阴影。";
-        else {
+        if (!resolveImageEditProtocol(baseConfig).supportsIndependentMask || input.ecommerceExecution.modelSnapshot.imageEdit?.supportsIndependentMask === false) reviewReason = "当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。";
+        else if (!input.sceneProtection) reviewReason = "请在原图上确认允许编辑的区域，包含新增物体及其接触阴影。";
+        if (input.sceneProtection) {
             sceneProtection = structuredClone(input.sceneProtection);
             if (sceneProtection.sourceAssetId !== input.references[0].id || sceneProtection.selectionSource !== "user_selection") throw new EcommerceImageTaskPreparationError("场景选区与原图基线不匹配");
             mask = structuredClone(sceneProtection.mask);
-            if (baseConfig.apiFormat !== "openai" || (baseConfig.advancedConfig?.protocol && !["auto", "compatible", "openai"].includes(baseConfig.advancedConfig.protocol))) reviewReason = "当前协议不支持可信独立蒙版，请选择支持局部编辑的模型。";
         }
     } else if (input.sceneProtection) throw new EcommerceImageTaskPreparationError("当前执行范围不接受局部场景保护");
     if (input.productProtectionRegions) {

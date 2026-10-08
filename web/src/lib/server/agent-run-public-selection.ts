@@ -9,7 +9,7 @@ import type { CreativeReferenceReview } from "@/lib/creative-runtime-contract";
 import { allowedEcommerceReferencePurposes } from "./ecommerce-reference-purpose";
 import { referenceReviewKind, referenceReviewQuestion, referenceSourceTuple, unsubmittedReferenceCheckpoint } from "./ecommerce-reference-recovery";
 import { listStoredGenerationTaskRecordsByRunIds } from "./generation-task-store";
-import { canContinueCreatedImageReference, canRecoverUnsubmittedImageReference } from "./generation-task-scheduler";
+import { canContinueCreatedImageReference, canRecoverUnsubmittedImageMask, canRecoverUnsubmittedImageReference } from "./generation-task-scheduler";
 
 export async function publicAgentRunForRequest(run: AgentRun, request: Request) {
     return { ...publicAgentRun(run), ecommerceSceneSelection: await sceneSelectionAction(run, request), ecommerceReferenceReview: await referenceReviewAction(run), canCheckStatus: await canCheckRunStatus(run) };
@@ -31,8 +31,8 @@ async function canCheckRunStatus(run: AgentRun) {
         const record = records.find((task) => task.id === id && task.type === "image" && task.userId === run.userId && task.runId === run.id && task.conversationId === run.conversationId);
         if (!record) return false;
         const upstream = record.upstreamTaskId || (record.payload.upstream as { id?: string } | undefined)?.id;
-        if (record.status === "running" && record.executionPhase === "needs_review") {
-            const recoverable = Boolean(upstream || canRecoverUnsubmittedImageReference(record));
+        if (["pending", "running"].includes(record.status) && record.executionPhase === "needs_review") {
+            const recoverable = Boolean((record.status === "running" && (upstream || canRecoverUnsubmittedImageReference(record))) || canRecoverUnsubmittedImageMask(record));
             needsRecovery ||= recoverable;
             return recoverable;
         }

@@ -43,6 +43,8 @@ describe("creative generation waiting", () => {
             </App>,
         );
         expect(markup).toContain("选择修改位置");
+        expect(markup).toContain("待修改的原图");
+        expect(markup).toContain("/api/reference-assets/scene.png");
         expect(markup).not.toContain("已等待");
         expect(markup).not.toContain("animate-pulse");
     });

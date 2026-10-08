@@ -126,7 +126,7 @@ export type EcommerceCanvasMediaEvidence = {
     nativeSize: EcommerceDimensions;
     storedSize: EcommerceDimensions;
     nativeUrl: string;
-    normalization: "none";
+    normalization: "none" | "uniform_scale" | "pixel_grid_scale";
 };
 export type EcommerceCanvasProviderRequest = { size?: string; aspectRatio?: string; width?: number; height?: number };
 

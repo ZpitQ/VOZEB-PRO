@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import type { EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
+import { resolveImageEditProtocol } from "./image-edit-protocol";
 
 describe("ecommerce image compiler", () => {
     it.each(["gpt-image-2.5-flare", "nano-banana-2"])("successfully compiles only authorized lighting cues for v6 product-to-scene: %s", (model) => {
@@ -182,6 +183,7 @@ function snapshot(upstreamModel: string, apiFormat: "openai" | "gemini"): Ecomme
         channelId: `${apiFormat}-channel`,
         upstreamModel,
         apiFormat,
+        imageEdit: resolveImageEditProtocol({ apiFormat, model: upstreamModel }),
     };
 }
 

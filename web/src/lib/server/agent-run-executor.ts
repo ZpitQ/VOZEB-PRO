@@ -40,7 +40,7 @@ import { ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_VERSION, resolveEco
 import { classifyReferenceRoles, resolveDualBaseline, resolveSourcesFromEcommerceReferenceDecision, type EcommerceSources } from "./ecommerce-reference-roles";
 import { analyzeEcommerceReferences, EcommerceVisualAnalysisError, type EcommerceVisualAnalysis, type EcommerceVisualAnalysisV4 } from "./ecommerce-visual-analysis";
 import { ecommerceReferenceReviewMessage, resolveEcommerceReferenceDecision } from "./ecommerce-reference-purpose";
-import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile, type EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
+import { compileEcommerceImageCandidates, type EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
 import { resolveEcommerceRoleCandidates, type EcommerceRoleCandidate } from "./ecommerce-model-routing";
 import { validateAgentPlanRequestedModels } from "./agent-run-validation";
 import { createEcommerceReferenceCheckpoint, referenceSourcesLoaded, REFERENCE_CHECKPOINT_REASONS, EcommerceReferenceSourceChangedError, EcommerceReferenceSourceReadError, type EcommerceReferenceCheckpoint } from "./ecommerce-reference-recovery";
@@ -160,14 +160,15 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             let snapshotInput = ecommerceSnapshotInput(planningInput);
             const visionCandidates = resolveEcommerceRoleCandidates(settings, "vision_analysis", "text");
             const editPlanningCandidates = resolveEcommerceRoleCandidates(settings, "edit_planning", "text");
-            const imageGenerationRole = resolveEcommerceRoleCandidates(
+            const imageGenerationCandidates = resolveEcommerceRoleCandidates(
                 {
                     ...settings,
                     ...(requestedModels.length ? { ecommerceModelRoles: { image_generation: requestedModels.map((model) => model.id) } } : {}),
                 },
                 "image_generation",
                 "image",
-            )[0];
+            );
+            let imageGenerationRole = imageGenerationCandidates[0];
             const qualityPolicy = claimed.ecommerceSnapshot?.qualityPolicy ?? (settings.ecommerceVisualQualityCheckEnabled ? "advisory" : "disabled");
             const qualityCheckRole = qualityPolicy === "advisory" ? resolveEcommerceRoleCandidates(settings, "quality_check", "text")[0] : undefined;
             const unavailableRole = [
@@ -488,14 +489,16 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 });
                 return;
             }
-            const providerProfile = resolveEcommerceImageProviderProfile(imageGenerationRole.snapshot);
-            if (!providerProfile) {
+            const compilation = compileEcommerceImageCandidates(planning.plan, imageGenerationCandidates);
+            if (!compilation) {
                 await pauseForReview("unsupported_image_provider_profile", "当前生图模型尚未配置电商编译器，请切换模型或联系管理员。", Boolean(sources.currentSceneBaselineId), undefined, { ...planningEvidence(), plan: planning.plan });
                 return;
             }
-            const ecommerceExecution = compileEcommerceImageRequest(planning.plan, providerProfile);
+            imageGenerationRole = compilation.candidate;
+            planning.plan.modelRoles.generation = imageGenerationRole.logicalModelId;
+            const ecommerceExecution = compilation.execution;
             if (ecommerceExecution.state !== "ready") {
-                await pauseForReview(ecommerceExecution.reason || "image_provider_needs_review", "当前生图模型不支持可信独立蒙版，任务已暂停等待复核。", Boolean(sources.currentSceneBaselineId), ecommerceExecution, {
+                await pauseForReview(ecommerceExecution.reason || "image_provider_needs_review", "当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。", Boolean(sources.currentSceneBaselineId), ecommerceExecution, {
                     ...planningEvidence(),
                     plan: planning.plan,
                 });

@@ -134,7 +134,7 @@ async function persistSceneProtectionResults(task: ImageTask, results: ImageTask
     if (task.kind !== "edit" || !ecommerceSceneProtectionReferencesMatch(protection.sourceAssetId, task.references, task.ecommerceExecution) || !reference || task.mask?.dataUrl !== protection.mask.dataUrl)
         throw new Error("局部场景缺少完整原图与独立蒙版");
     const source = Buffer.from((await imageReferenceToDataUrl(reference, "scene.png", origin, authContext)).split(",")[1], "base64");
-    // Validate native geometry before saving or compositing. Never normalize a wrong-size native into a local success.
+    // Validate source, mask and native aspect before any save; retain native bytes separately from the protected delivery.
     const composites = await Promise.all(results.map((item) => compositeSceneEdit(source, Buffer.from(item.dataUrl.split(",")[1], "base64"), protection)));
     const context = { ownerUserId: task.userId, source: task.source, conversationId: task.conversationId, taskId: task.id };
     const stored: StoredImageTaskMediaResult[] = [];
@@ -166,7 +166,7 @@ async function persistSceneProtectionResults(task: ImageTask, results: ImageTask
                               nativeSize: { width: native.width!, height: native.height! },
                               storedSize: { width: composite.width!, height: composite.height! },
                               nativeUrl: native.serverUrl!,
-                              normalization: "none" as const,
+                              normalization: composites[index].evidence.normalization,
                           },
                       }
                     : {}),

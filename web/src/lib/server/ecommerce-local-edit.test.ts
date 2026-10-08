@@ -7,6 +7,7 @@ import { resolveLocalEditTarget } from "./ecommerce-edit-planner";
 import { buildLocalEditProductProtection, createEcommerceLocalEditTask } from "./ecommerce-generation-service";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
+import { resolveImageEditProtocol } from "./image-edit-protocol";
 
 describe("ecommerce local edit target resolution", () => {
     it.each([
@@ -81,6 +82,7 @@ describe("ecommerce local edit compilation", () => {
                 channelId: "image-channel",
                 upstreamModel: "gpt-image-2.5-flare",
                 apiFormat: "openai",
+                imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
             })!,
         );
 
