@@ -133,7 +133,8 @@ test("ordinary 4K image requests deliver native pixels through reload, download 
     const summary = page.getByLabel("本轮创作参数", { exact: true });
     await expect(summary.getByText("请求尺寸：4096x4096", { exact: true })).toBeVisible();
     await expect(summary.getByText(/^请求画质：/)).toBeVisible();
-    await expect(summary.getByText("实际尺寸：1254×1254", { exact: true })).toBeVisible();
+    await expect(summary.getByText("原图尺寸：1254×1254", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("图像增强与版本").getByRole("status")).toContainText("当前原图 1254×1254");
     const image = page.getByTestId("creative-media-result").getByTestId("creative-primary-result").getByRole("img");
     await expect(image).toBeVisible();
     const mediaUrl = new URL((await image.getAttribute("src"))!, page.url());
@@ -152,7 +153,8 @@ test("ordinary 4K image requests deliver native pixels through reload, download 
     await expect(image).toBeVisible();
     await expect(summary.getByText("请求尺寸：4096x4096", { exact: true })).toBeVisible();
     await expect(summary.getByText(/^请求画质：/)).toBeVisible();
-    await expect(summary.getByText("实际尺寸：1254×1254", { exact: true })).toBeVisible();
+    await expect(summary.getByText("原图尺寸：1254×1254", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("图像增强与版本").getByRole("status")).toContainText("当前原图 1254×1254");
     expect(new URL((await image.getAttribute("src"))!, page.url()).pathname).toBe(mediaUrl.pathname);
     const operations = page.getByLabel("本轮创作操作", { exact: true });
     const assetId = await operations.getAttribute("data-active-asset-id");

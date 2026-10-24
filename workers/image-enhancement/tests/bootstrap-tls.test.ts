@@ -62,7 +62,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 // Public synthetic test material only. Root exported the original localhost
 // fixture with EphemeralKeySet; never use this PFX or password in deployment.
 const testPassword = "zeb-public-test-only-pfx-password-v1";
-const passwordProtectedPfx = Buffer.from(
+const encryptedPkcs12 = Buffer.from(
   "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",
   "base64",
 );
@@ -414,7 +414,7 @@ function safePublic(text: string, h: Harness) {
     h.pfxPath,
     h.storage.initialized.credential.key,
     tlsTestCertificates.localhost.pfx.toString("base64"),
-    passwordProtectedPfx.toString("base64"),
+    encryptedPkcs12.toString("base64"),
     testPassword,
   ];
   expect(
@@ -717,7 +717,7 @@ describe.skipIf(process.platform !== "win32")("bootstrap TLS assembly", () => {
           ? Buffer.alloc(0)
           : mode === "malformed"
             ? Buffer.from("synthetic-test-only-invalid-pfx")
-            : passwordProtectedPfx;
+            : encryptedPkcs12;
       if (mode === "password-protected") {
         expect(
           sha256(bytes) ===

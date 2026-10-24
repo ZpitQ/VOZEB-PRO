@@ -24,7 +24,8 @@ vi.mock("@/lib/server/database", async (original) => ({
     createPostgresRepositories: () => ({ generationLogs: { list: mocks.list } }),
 }));
 vi.mock("./generation-log-repository", async (original) => ({ ...(await original<typeof import("./generation-log-repository")>()), readGenerationLogDb: mocks.readGenerationLogDb, mutateGenerationLogDb: mocks.mutateGenerationLogDb }));
-vi.mock("./database/image-enhancement-job-repository", () => ({
+vi.mock("./database/image-enhancement-job-repository", async (original) => ({
+    ...(await original<typeof import("./database/image-enhancement-job-repository")>()),
     getEnhancementJob: mocks.getEnhancementJob,
     listEnhancementJobsForTask: mocks.listEnhancementJobsForTask,
     insertEnhancementJob: mocks.insertEnhancementJob,

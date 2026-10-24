@@ -21,6 +21,7 @@ let directory: string;
 beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), "vozeb-scene-mask-wire-"));
     vi.stubEnv("VOZEB_PRO_DATA_DIR", directory);
+    vi.stubEnv("VOZEB_PRO_DATABASE_PROVIDER", "file");
     vi.stubEnv("VOZEB_PRO_ALLOW_PRIVATE_UPSTREAMS", "1");
     vi.stubEnv("VOZEB_PRO_PRIVATE_UPSTREAM_HOSTS", "127.0.0.1");
 });

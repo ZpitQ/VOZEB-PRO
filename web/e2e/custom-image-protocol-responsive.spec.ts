@@ -178,7 +178,7 @@ test("custom Gemini image creation sends the 4K suffix and restores the full-siz
     mediaUrl.search = "";
     const media = await request.get(mediaUrl.href);
     expect(media.ok()).toBe(true);
-    expect(await sharp(await media.body()).metadata()).toMatchObject({ width: 3840, height: 2160 });
+    expect(await sharp(await media.body()).metadata()).toMatchObject(NATIVE_SIZE);
     const upstream = fixture.requests.filter((entry) => entry.method === "POST" && entry.path === "/custom/images");
     expect(upstream).toHaveLength(1);
     expect(JSON.parse(upstream[0].body.toString("utf8")).model).toBe(`${MODEL}-4k-16x9`);

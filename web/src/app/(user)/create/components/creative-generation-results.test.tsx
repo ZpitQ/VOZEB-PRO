@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { parseFragment, type DefaultTreeAdapterMap } from "parse5";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
@@ -10,6 +11,11 @@ import { CreativeImageEnhancement } from "./creative-image-enhancement";
 import { CreativeMediaResult } from "./creative-media-result";
 import { creativeResultPrompt } from "./creative-messages";
 import { CreativeVideoResult } from "./creative-video-result";
+
+function renderedText(markup: string) {
+    const text = (node: DefaultTreeAdapterMap["node"]): string => ("value" in node ? node.value : "childNodes" in node ? node.childNodes.map(text).join("") : "");
+    return text(parseFragment(markup));
+}
 
 describe("creative generation results", () => {
     it("renders a single portrait image shrink-to-fit without a switcher", () => {
@@ -50,7 +56,7 @@ describe("creative generation results", () => {
         expect(markup).not.toContain("更多生成结果");
         expect(markup).toContain('data-active="enhanced-one"');
         expect(markup).toContain('data-download="/enhanced-one.png"');
-        expect(markup.replace(/<[^>]+>/g, "")).toMatch(/当前AI增强\s*2048×2048/);
+        expect(renderedText(markup)).toMatch(/当前AI增强\s*2048×2048/);
         expect(markup).toContain("原图");
         expect(markup).toContain("AI增强");
     });
@@ -63,7 +69,7 @@ describe("creative generation results", () => {
         const original = { ...imageOriginal("native-one", "result-one", "enhancement-one"), width: 1254, height: 1536 };
         const enhanced = hasEnhanced ? { ...enhancedChild("enhanced-one", original), width: 4096, height: 3072 } : undefined;
         const markup = renderToStaticMarkup(<CreativeImageEnhancement original={original} enhanced={enhanced} activeAssetId={activeAssetId} onSelect={() => undefined} />);
-        const text = markup.replace(/<[^>]+>/g, "");
+        const text = renderedText(markup);
 
         expect(text.replace(/\s+/g, "")).toContain(`${label}${size}`);
         expect(text).not.toContain(label === "当前原图" ? "当前AI增强" : "当前原图");
@@ -91,7 +97,7 @@ describe("creative generation results", () => {
         for (const selected of [original, enhanced]) {
             const invalid = { ...selected, width, height, metadata: { ...selected.metadata, width: 4096, height: 4096, size: "4096x4096" } };
             const markup = renderToStaticMarkup(<CreativeImageEnhancement original={selected === original ? invalid : original} enhanced={selected === enhanced ? invalid : enhanced} activeAssetId={selected.id} onSelect={() => undefined} />);
-            const text = markup.replace(/<[^>]+>/g, "");
+            const text = renderedText(markup);
 
             expect(text).not.toMatch(/\d+[×x]\d+/);
             expect(text).not.toContain("×");

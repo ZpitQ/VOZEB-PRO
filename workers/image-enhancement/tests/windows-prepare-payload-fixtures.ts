@@ -758,7 +758,7 @@ export function nativeCarrierVectors(): RawVector[] {
   const bytes = Buffer.from(base.requestUtf8Base64, "base64");
   const differentBytes = carrier(`${raw} `);
   // Supply a valid internally spaced JSON whose Base64 actually needs padding.
-  const padded = carrier(bytes.length % 3 === 0 ? raw.replace("{", "{ ") : raw);
+  const padded = carrier(bytes.length % 3 === 0 ? `{ ${raw.slice(1)}` : raw);
   const alphabet =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   const padStart = padded.requestUtf8Base64.indexOf("=");

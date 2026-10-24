@@ -1360,7 +1360,7 @@ describe("bounded control-bridge response decoder", () => {
       (text: string) => text.replace('"claimed"', '"\\ud800"'),
     ],
     ["BOM", (text: string) => `\ufeff${text}`],
-    ["CR", (text: string) => text.replace("\n", "\r\n")],
+    ["CR", (text: string) => text.replaceAll("\n", "\r\n")],
     ["partial EOF", (text: string) => text.slice(0, -1)],
     ["suffix", (text: string) => `${text.trim()}{}\n`],
     ["comment", (text: string) => text.replace('"v":1', '"v":1/*x*/')],

@@ -76,7 +76,7 @@ export function CreativeMediaResult({
                 </figure>
             )}
 
-            <div className="col-start-1 row-start-2" style={{ width: mediaWidth, maxWidth: "100%" }}>
+            <div className="col-start-1 row-start-2" style={{ width: mediaWidth, minWidth: "min-content", maxWidth: "100%" }}>
                 {original.type === "image" ? (
                     <CreativeImageEnhancement
                         key={`${original.id}:${String(original.metadata.enhancementId || "")}`}
