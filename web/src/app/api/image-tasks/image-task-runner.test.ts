@@ -7,8 +7,8 @@ const mocks = vi.hoisted(() => ({ record: vi.fn(), fetch: vi.fn(), persist: vi.f
 
 vi.mock("@/lib/server/generation-log-task-service", () => ({ recordGenerationTaskLogResult: mocks.record }));
 vi.mock("@/lib/server/safe-outbound-fetch", () => ({ fetchSafeOutbound: mocks.fetch }));
-vi.mock("@/lib/server/security", async (original) => ({ ...await original<typeof import("@/lib/server/security")>(), isSafeOutboundUrl: vi.fn(() => true) }));
-vi.mock("@/lib/server/object-storage-service", async (original) => ({ ...await original<typeof import("@/lib/server/object-storage-service")>(), persistExternalMediaIfEnabled: mocks.persist }));
+vi.mock("@/lib/server/security", async (original) => ({ ...(await original<typeof import("@/lib/server/security")>()), isSafeOutboundUrl: vi.fn(() => true) }));
+vi.mock("@/lib/server/object-storage-service", async (original) => ({ ...(await original<typeof import("@/lib/server/object-storage-service")>()), persistExternalMediaIfEnabled: mocks.persist }));
 
 import { emptyAdvancedConfig } from "@/lib/channel-protocol-registry";
 import type { ImageTask } from "@/lib/server/image-task-store";
@@ -39,7 +39,15 @@ describe("writeImageGenerationLog", () => {
     });
 
     it("passes an ordinary image's existing permanent server URL alongside its expired upstream URL", async () => {
-        const media = { dataUrl: "/api/generation-log-assets/permanent/native.png", serverUrl: "/api/generation-log-assets/permanent/native.png", remoteUrl: "https://expired.example.com/native.png", width: 1254, height: 1254, resultId: "image-one:1", enhancementId: "enhancement-one" };
+        const media = {
+            dataUrl: "/api/generation-log-assets/permanent/native.png",
+            serverUrl: "/api/generation-log-assets/permanent/native.png",
+            remoteUrl: "https://expired.example.com/native.png",
+            width: 1254,
+            height: 1254,
+            resultId: "image-one:1",
+            enhancementId: "enhancement-one",
+        };
         await writeImageGenerationLog(imageTask(), "success", [media], 10);
         expect(mocks.record.mock.calls[0][0].assets[0]).toMatchObject({ serverUrl: media.serverUrl, remoteUrl: media.remoteUrl, resultId: media.resultId, enhancementId: media.enhancementId, targetSize: "1024x1024" });
     });
@@ -80,14 +88,15 @@ describe("writeImageGenerationLog", () => {
 
     it.each(["native", "disabled", "not_requested", "protected_contract", "unsupported_layers"] as const)("passes only public %s enhancement facts to the log service", async (kind) => {
         const nativeSource = { url: "/api/generation-log-assets/native.png", sha256: "a".repeat(64), width: 64, height: 64, byteLength: 128, format: "png", hasAlpha: false, provenance: "provider_native" as const };
-        const facts = kind === "native"
-            ? { resultId: "image-one:1", enhancementId: "enhancement:image-one:1", nativeSource }
-            : { resultId: "image-one:1", enhancementSkip: { status: "skipped" as const, reason: kind } };
+        const facts = kind === "native" ? { resultId: "image-one:1", enhancementId: "enhancement:image-one:1", nativeSource } : { resultId: "image-one:1", enhancementSkip: { status: "skipped" as const, reason: kind } };
         const media = {
             ...facts,
             ...(kind === "native" ? { nativeSource: { ...nativeSource, credentialRef: "private-credential" } } : { enhancementSkip: { ...facts.enhancementSkip, token: "private-token" } }),
-            dataUrl: nativeSource.url, width: 64, height: 64,
-            canvasEvidence: { nativeUrl: "private-evidence" }, unknown: "private-future",
+            dataUrl: nativeSource.url,
+            width: 64,
+            height: 64,
+            canvasEvidence: { nativeUrl: "private-evidence" },
+            unknown: "private-future",
         };
         await writeImageGenerationLog(imageTask(), "success", [media], 10);
         expect(mocks.record.mock.calls[0][0].assets[0]).toMatchObject(facts);
@@ -105,11 +114,25 @@ describe("writeImageGenerationLog", () => {
             mocks.record.mockImplementation(actualService.recordGenerationTaskLogResult);
             const caller = await import("./image-task-runner");
             const nativeSource = { url: "/api/generation-log-assets/permanent/native.png", width: 1254, height: 1254, byteLength: 1200, sha256: "a".repeat(64), format: "png", hasAlpha: false, provenance: "provider_native" as const };
-            const media = { dataUrl: nativeSource.url, serverUrl: nativeSource.url, remoteUrl: "https://expired.example.com/native.png", width: nativeSource.width, height: nativeSource.height, bytes: nativeSource.byteLength, mimeType: "image/png", resultId: "image-one:1", enhancementId: "enhancement-one", nativeSource };
+            const media = {
+                dataUrl: nativeSource.url,
+                serverUrl: nativeSource.url,
+                remoteUrl: "https://expired.example.com/native.png",
+                width: nativeSource.width,
+                height: nativeSource.height,
+                bytes: nativeSource.byteLength,
+                mimeType: "image/png",
+                resultId: "image-one:1",
+                enhancementId: "enhancement-one",
+                nativeSource,
+            };
             await caller.writeImageGenerationLog(imageTask(), "success", [media], 10);
 
             const persisted = JSON.parse(await readFile(join(directory, "generation-logs.json"), "utf8"));
-            expect(persisted.logs[0]).toMatchObject({ status: "success", assets: [{ url: nativeSource.url, serverUrl: nativeSource.url, remoteUrl: media.remoteUrl, width: 1254, height: 1254, resultId: media.resultId, enhancementId: media.enhancementId, nativeSource }] });
+            expect(persisted.logs[0]).toMatchObject({
+                status: "success",
+                assets: [{ url: nativeSource.url, serverUrl: nativeSource.url, remoteUrl: media.remoteUrl, width: 1254, height: 1254, resultId: media.resultId, enhancementId: media.enhancementId, nativeSource }],
+            });
             expect(mocks.fetch).not.toHaveBeenCalled();
             expect(mocks.persist).not.toHaveBeenCalled();
         } finally {

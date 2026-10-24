@@ -24,11 +24,9 @@ export type EnhancementPlanningInput = {
 };
 type EnhancementSkipReason = ImageEnhancementSkip["reason"] | "provider_unavailable" | "native_sufficient" | "already_enhanced" | "unsupported_transparency" | "unsupported_media_type" | "aspect_ratio_mismatch" | "unsupported_target";
 type NativeSnapshot = { source: Readonly<EnhancementSource>; target: Readonly<Dimensions> };
-export type EnhancementDecision = Readonly<NativeSnapshot & (
-    | { status: "queued"; reason: null; connection: FrozenEnhancementConnection; inference: Readonly<Dimensions> }
-    | { status: "skipped"; reason: EnhancementSkipReason }
-    | { status: "rejected"; reason: "native_invalid" }
-)>;
+export type EnhancementDecision = Readonly<
+    NativeSnapshot & ({ status: "queued"; reason: null; connection: FrozenEnhancementConnection; inference: Readonly<Dimensions> } | { status: "skipped"; reason: EnhancementSkipReason } | { status: "rejected"; reason: "native_invalid" })
+>;
 
 export function imageEnhancementExclusion(input: Pick<EnhancementPlanningInput, "enabled" | "requested4k" | "protectedContract" | "layered">): ImageEnhancementSkip | undefined {
     const reason = !input.enabled ? "disabled" : !input.requested4k ? "not_requested" : input.protectedContract ? "protected_contract" : input.layered ? "unsupported_layers" : undefined;

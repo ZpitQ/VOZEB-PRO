@@ -95,7 +95,9 @@ describe("POST /api/maintenance/generation-tasks/run", () => {
             expect(response.status).toBe(200);
             expect(await response.json()).toMatchObject({ code: 0, data: { claimed: 2, completed: 2, enhancement: { unavailable: true } } });
             expect(JSON.stringify(log.mock.calls)).not.toContain("private infrastructure failure");
-        } finally { log.mockRestore(); }
+        } finally {
+            log.mockRestore();
+        }
     });
 });
 

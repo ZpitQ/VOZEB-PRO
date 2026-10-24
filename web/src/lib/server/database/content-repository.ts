@@ -514,7 +514,17 @@ export class GenerationLogsRepository {
             ],
         );
         if (!result.rows[0]) throw new Error("generation log id belongs to another user");
-        const assets = log.assets.map(({ type, url, remoteUrl, serverUrl, mimeType, width, height, bytes, ...facts }) => ({ type, url, remoteUrl, serverUrl, mimeType, width, height, bytes, ...(type === "image" ? publicImageResultEnhancement(facts) : {}) }));
+        const assets = log.assets.map(({ type, url, remoteUrl, serverUrl, mimeType, width, height, bytes, ...facts }) => ({
+            type,
+            url,
+            remoteUrl,
+            serverUrl,
+            mimeType,
+            width,
+            height,
+            bytes,
+            ...(type === "image" ? publicImageResultEnhancement(facts) : {}),
+        }));
         await this.replaceAssets(log.id, assets);
         return { ...mapGenerationLog(result.rows[0]), assets };
     }
@@ -545,7 +555,19 @@ export class GenerationLogsRepository {
                 INSERT INTO generation_log_assets (generation_log_id, type, url, remote_url, server_url, mime_type, width, height, bytes, sort_order, enhancement_metadata)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
                 `,
-                [logId, asset.type, asset.url, asset.remoteUrl || null, asset.serverUrl || null, asset.mimeType || null, asset.width || null, asset.height || null, asset.bytes || null, index, jsonParam(asset.type === "image" ? publicImageResultEnhancement(asset) : {})],
+                [
+                    logId,
+                    asset.type,
+                    asset.url,
+                    asset.remoteUrl || null,
+                    asset.serverUrl || null,
+                    asset.mimeType || null,
+                    asset.width || null,
+                    asset.height || null,
+                    asset.bytes || null,
+                    index,
+                    jsonParam(asset.type === "image" ? publicImageResultEnhancement(asset) : {}),
+                ],
             );
         }
     }

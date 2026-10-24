@@ -58,8 +58,25 @@ describe("GET /api/image-tasks/[id]", () => {
 
     it("whitelists stable enhancement identities and native facts while hiding batch failures and unknown private fields", async () => {
         const nativeSource = { url: "/api/generation-log-assets/ready.png", width: 6, height: 4, sha256: "a".repeat(64), byteLength: 123, format: "png", hasAlpha: false, provenance: "provider_native" };
-        const publicMedia = { resultId: "image-one:3", enhancementId: "enhancement:image-one:3", nativeSource, dataUrl: "/api/generation-log-assets/ready.png", remoteUrl: "https://fixture.example/result.png", serverUrl: "/api/generation-log-assets/ready.png", width: 6, height: 4, bytes: 123, mimeType: "image/png" };
-        const privateMedia = { ...publicMedia, nativeSource: { ...nativeSource, credentialRef: "private-frozen-reference", unknownFuture: "private-native-future" }, batchEvidence: [{ resultId: "private-child:1", nativeStatus: "unavailable", failureReason: "private-read-failure" }], privateUnknown: "private-future-field", frozenConnection: { token: "private-token" } };
+        const publicMedia = {
+            resultId: "image-one:3",
+            enhancementId: "enhancement:image-one:3",
+            nativeSource,
+            dataUrl: "/api/generation-log-assets/ready.png",
+            remoteUrl: "https://fixture.example/result.png",
+            serverUrl: "/api/generation-log-assets/ready.png",
+            width: 6,
+            height: 4,
+            bytes: 123,
+            mimeType: "image/png",
+        };
+        const privateMedia = {
+            ...publicMedia,
+            nativeSource: { ...nativeSource, credentialRef: "private-frozen-reference", unknownFuture: "private-native-future" },
+            batchEvidence: [{ resultId: "private-child:1", nativeStatus: "unavailable", failureReason: "private-read-failure" }],
+            privateUnknown: "private-future-field",
+            frozenConnection: { token: "private-token" },
+        };
         mocks.getImageTask.mockResolvedValue(imageTask({ status: "success", result: { ...privateMedia, results: [privateMedia] } }));
         const body = await (await GET(new Request("http://localhost/api/image-tasks/image-one"), context)).json();
         expect(body.task.result).toEqual({ ...publicMedia, results: [publicMedia] });

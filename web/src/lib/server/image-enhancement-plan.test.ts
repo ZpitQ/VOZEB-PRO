@@ -10,7 +10,13 @@ function fixture(): EnhancementPlanningInput {
         layered: false,
         source: { url: "/api/generation-log-assets/images/fixture.png", sha256: "a".repeat(64), width: 1254, height: 1254, byteLength: 1000, format: "png", hasAlpha: false, provenance: "provider_native" },
         target: { width: 4096, height: 4096 },
-        connection: { revision: "fixture-revision", credentialRef: "fixture-profile", serviceId: "31313131-3131-4131-8131-313131313131", timeoutMs: 10000, model: { id: "fixture-model", binaryVersion: "v1", binarySha256: "b".repeat(64), modelVersion: "v1", modelSha256: "c".repeat(64), nativeScale: 4, allowedTiles: [0], defaultTile: 0, tta: false, gpuId: 0 } },
+        connection: {
+            revision: "fixture-revision",
+            credentialRef: "fixture-profile",
+            serviceId: "31313131-3131-4131-8131-313131313131",
+            timeoutMs: 10000,
+            model: { id: "fixture-model", binaryVersion: "v1", binarySha256: "b".repeat(64), modelVersion: "v1", modelSha256: "c".repeat(64), nativeScale: 4, allowedTiles: [0], defaultTile: 0, tta: false, gpuId: 0 },
+        },
     };
 }
 
@@ -63,7 +69,11 @@ describe("ordinary-image enhancement planning", () => {
         input.source = { ...input.source, width: 0 };
         expect(planImageEnhancement(input)).toMatchObject({ status: "rejected", reason: "native_invalid" });
     });
-    it.each([[1672, 941], [941, 1672], [1000, 700]])("preserves the original aspect inside the requested 4K boundary: %sx%s", (width, height) => {
+    it.each([
+        [1672, 941],
+        [941, 1672],
+        [1000, 700],
+    ])("preserves the original aspect inside the requested 4K boundary: %sx%s", (width, height) => {
         const input = fixture();
         input.source = { ...input.source, width, height };
         input.target = width >= height ? { width: 3840, height: 2160 } : { width: 2160, height: 3840 };

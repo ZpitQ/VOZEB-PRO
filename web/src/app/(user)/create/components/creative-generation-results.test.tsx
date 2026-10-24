@@ -129,7 +129,12 @@ describe("creative generation results", () => {
         original.metadata.agentTaskId = "original-image-task";
         const enhanced = { ...enhancedChild("enhanced-one", original), sourceTaskId: "enhancement-job" };
         const run: CreativeAgentRun = {
-            id: "run", conversationId: "conversation", inputMessageId: "user", assistantMessageId: "assistant", status: "completed", assetIds: [original.id],
+            id: "run",
+            conversationId: "conversation",
+            inputMessageId: "user",
+            assistantMessageId: "assistant",
+            status: "completed",
+            assetIds: [original.id],
             tasks: [
                 { id: "original-image-task", title: "原生图片", type: "image", status: "completed", optimizedPrompt: "原结果的公开优化提示词" },
                 { id: "another-image-task", title: "另一个原生图片", type: "image", status: "completed", optimizedPrompt: "其他结果的公开提示词" },

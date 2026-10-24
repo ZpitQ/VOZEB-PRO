@@ -14,7 +14,17 @@ import { CreativeResultSwitcher, useSelectedCreativeResult } from "./creative-re
 
 const ACTIONS_MIN_WIDTH = 352;
 
-export function CreativeMediaResult({ assets, fallbackRatio, renderActions, onEnhancementComplete }: { assets: CreativeAsset[]; fallbackRatio?: string; renderActions?: (activeAsset: CreativeAsset) => ReactNode; onEnhancementComplete?: (conversationId: string) => Promise<void> }) {
+export function CreativeMediaResult({
+    assets,
+    fallbackRatio,
+    renderActions,
+    onEnhancementComplete,
+}: {
+    assets: CreativeAsset[];
+    fallbackRatio?: string;
+    renderActions?: (activeAsset: CreativeAsset) => ReactNode;
+    onEnhancementComplete?: (conversationId: string) => Promise<void>;
+}) {
     const groups = useMemo(() => creativeMediaResultGroups(assets), [assets]);
     const results = useMemo(() => groups.map((group) => group.original), [groups]);
     const { selectedResult: original, selectedIndex, selectResult } = useSelectedCreativeResult(results);
@@ -67,7 +77,16 @@ export function CreativeMediaResult({ assets, fallbackRatio, renderActions, onEn
             )}
 
             <div className="col-start-1 row-start-2" style={{ width: mediaWidth, maxWidth: "100%" }}>
-                {original.type === "image" ? <CreativeImageEnhancement key={`${original.id}:${String(original.metadata.enhancementId || "")}`} original={original} enhanced={enhanced} activeAssetId={activeAsset.id} onSelect={(id) => setSelectedVariants((current) => ({ ...current, [original.id]: id }))} onEnhancementComplete={onEnhancementComplete} /> : null}
+                {original.type === "image" ? (
+                    <CreativeImageEnhancement
+                        key={`${original.id}:${String(original.metadata.enhancementId || "")}`}
+                        original={original}
+                        enhanced={enhanced}
+                        activeAssetId={activeAsset.id}
+                        onSelect={(id) => setSelectedVariants((current) => ({ ...current, [original.id]: id }))}
+                        onEnhancementComplete={onEnhancementComplete}
+                    />
+                ) : null}
                 {renderActions?.(activeAsset)}
             </div>
 
@@ -110,14 +129,26 @@ function assetUrl(asset: CreativeAsset) {
 
 export function creativeMediaResultGroups(assets: readonly CreativeAsset[]) {
     const available = assets.filter((asset) => asset.status === "ready" && asset.type !== "text" && assetUrl(asset));
-    return available.filter((asset) => !isEnhancedImageAsset(asset)).map((original) => ({
-        original,
-        enhanced: original.type === "image" ? available.filter((asset) => isEnhancedImageAsset(asset) && asset.conversationId === original.conversationId && (
-            asset.parentAssetId ? asset.parentAssetId === original.id :
-            typeof asset.metadata.parentResultId === "string" ? asset.metadata.parentResultId === original.metadata.resultId :
-            typeof asset.metadata.enhancementId === "string" && asset.metadata.enhancementId === original.metadata.enhancementId
-        )).at(-1) : undefined,
-    }));
+    return available
+        .filter((asset) => !isEnhancedImageAsset(asset))
+        .map((original) => ({
+            original,
+            enhanced:
+                original.type === "image"
+                    ? available
+                          .filter(
+                              (asset) =>
+                                  isEnhancedImageAsset(asset) &&
+                                  asset.conversationId === original.conversationId &&
+                                  (asset.parentAssetId
+                                      ? asset.parentAssetId === original.id
+                                      : typeof asset.metadata.parentResultId === "string"
+                                        ? asset.metadata.parentResultId === original.metadata.resultId
+                                        : typeof asset.metadata.enhancementId === "string" && asset.metadata.enhancementId === original.metadata.enhancementId),
+                          )
+                          .at(-1)
+                    : undefined,
+        }));
 }
 
 function isEnhancedImageAsset(asset: CreativeAsset) {

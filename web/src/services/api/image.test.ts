@@ -154,14 +154,24 @@ describe("图片任务轮询", () => {
         const fetchMock = vi.fn(async () => Response.json({ task: { id: "image-task", status: "success", result: { ...first, results: [first, second] } } }));
         vi.stubGlobal("fetch", fetchMock);
         const result = await waitForImageGenerationTask({ apiSource: "system" } as AiConfig, { id: "image-task", kind: "generation", model: "image-model" });
-        expect(result).toMatchObject({ resultId: first.resultId, enhancementSkip: { status: "skipped", reason }, results: [{ resultId: first.resultId, enhancementSkip: { status: "skipped", reason } }, { resultId: second.resultId, enhancementId: second.enhancementId, nativeSource }] });
+        expect(result).toMatchObject({
+            resultId: first.resultId,
+            enhancementSkip: { status: "skipped", reason },
+            results: [
+                { resultId: first.resultId, enhancementSkip: { status: "skipped", reason } },
+                { resultId: second.resultId, enhancementId: second.enhancementId, nativeSource },
+            ],
+        });
         expect(JSON.stringify(result)).not.toContain("private-");
         expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it.each([{ status: "queued", reason: "disabled" }, { status: "skipped", reason: "private-reason" }, null])("omits an unrecognized no-job contract on the client: %s", async (enhancementSkip) => {
         const media = { dataUrl: "/api/generation-log-assets/skipped.png", enhancementSkip };
-        vi.stubGlobal("fetch", vi.fn(async () => Response.json({ task: { id: "image-task", status: "success", result: { ...media, results: [media] } } })));
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => Response.json({ task: { id: "image-task", status: "success", result: { ...media, results: [media] } } })),
+        );
         const result = await waitForImageGenerationTask({ apiSource: "system" } as AiConfig, { id: "image-task", kind: "generation", model: "image-model" });
         expect(result).not.toHaveProperty("enhancementSkip");
         expect(result.results[0]).not.toHaveProperty("enhancementSkip");

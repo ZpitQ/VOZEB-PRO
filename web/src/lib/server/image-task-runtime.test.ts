@@ -331,7 +331,12 @@ describe("image task runtime submission safety", () => {
 
         await persistImageTaskResult(state, "http://internal", media[0].serverUrl);
         expect(state.result).toEqual({ ...media[0], results: media });
-        expect(mocks.register).toHaveBeenCalledWith(state.userId, expect.objectContaining({ assets: media.map((item) => ({ type: "image", url: item.serverUrl, width: 1254, height: 1254, bytes: 128, mimeType: "image/png", resultId: item.resultId, enhancementId: item.enhancementId, nativeSource: item.nativeSource })) }));
+        expect(mocks.register).toHaveBeenCalledWith(
+            state.userId,
+            expect.objectContaining({
+                assets: media.map((item) => ({ type: "image", url: item.serverUrl, width: 1254, height: 1254, bytes: 128, mimeType: "image/png", resultId: item.resultId, enhancementId: item.enhancementId, nativeSource: item.nativeSource })),
+            }),
+        );
         await persistImageTaskResult(state, "http://internal", media[0].serverUrl);
         expect(state.result).toEqual({ ...media[0], results: media });
         expect(mocks.writeLog).toHaveBeenCalledOnce();
@@ -339,7 +344,14 @@ describe("image task runtime submission safety", () => {
     });
 
     it("retains skipped identity through log replacement and passes it to actual asset registration", async () => {
-        const media = { resultId: `${state.id}:1`, dataUrl: "/api/generation-log-assets/skipped.png", serverUrl: "/api/generation-log-assets/skipped.png", width: 8, height: 8, enhancementSkip: { status: "skipped" as const, reason: "not_requested" as const } };
+        const media = {
+            resultId: `${state.id}:1`,
+            dataUrl: "/api/generation-log-assets/skipped.png",
+            serverUrl: "/api/generation-log-assets/skipped.png",
+            width: 8,
+            height: 8,
+            enhancementSkip: { status: "skipped" as const, reason: "not_requested" as const },
+        };
         state = { ...state, status: "running", result: { ...media, results: [media] } };
         mocks.writeLog.mockResolvedValueOnce({ assets: [{ url: "/api/generation-log-assets/logged.png", serverUrl: "/api/generation-log-assets/logged.png", width: 8, height: 8 }] });
         await persistImageTaskResult(state, "http://internal", media.serverUrl);
@@ -821,7 +833,10 @@ describe("image task runtime submission safety", () => {
             expect(result).not.toHaveProperty("nativeSource");
             expect(result).not.toHaveProperty("enhancementId");
         }
-        expect(mocks.register).toHaveBeenCalledWith(state.userId, expect.objectContaining({ assets: [1, 2].map((index) => expect.objectContaining({ resultId: `${state.id}:${index}`, enhancementSkip: { status: "skipped", reason: "unsupported_layers" } })) }));
+        expect(mocks.register).toHaveBeenCalledWith(
+            state.userId,
+            expect.objectContaining({ assets: [1, 2].map((index) => expect.objectContaining({ resultId: `${state.id}:${index}`, enhancementSkip: { status: "skipped", reason: "unsupported_layers" } })) }),
+        );
         expect(mocks.writeLog).toHaveBeenCalledOnce();
         expect(mocks.register).toHaveBeenCalledOnce();
     });

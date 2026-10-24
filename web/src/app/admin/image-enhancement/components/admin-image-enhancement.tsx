@@ -125,7 +125,15 @@ export function AdminImageEnhancement() {
                         />
                     </Form.Item>
                     <Form.Item name="modelId" label="默认增强模型" normalize={(value) => value ?? ""} extra="检查连接后显示远程 Worker 已导入的 Upscayl 模型，选择后保存。">
-                        <Select allowClear showSearch optionFilterProp="label" disabled={busy || !settings?.models.length} placeholder="请先检查连接以获取模型" notFoundContent="远程 Worker 暂未返回可用模型" options={settings?.models.map((model) => ({ value: model.id, label: `${model.id} · 原生 ×${model.nativeScale}`, title: model.modelVersion })) ?? []} />
+                        <Select
+                            allowClear
+                            showSearch
+                            optionFilterProp="label"
+                            disabled={busy || !settings?.models.length}
+                            placeholder="请先检查连接以获取模型"
+                            notFoundContent="远程 Worker 暂未返回可用模型"
+                            options={settings?.models.map((model) => ({ value: model.id, label: `${model.id} · 原生 ×${model.nativeScale}`, title: model.modelVersion })) ?? []}
+                        />
                     </Form.Item>
                 </div>
                 {trust === "custom_ca" ? (
@@ -140,10 +148,12 @@ export function AdminImageEnhancement() {
                     <Button
                         aria-label="检查连接"
                         disabled={busy || !endpoint?.trim() || (!token?.trim() && !settings?.hasToken)}
-                        onClick={() => void run(async () => {
-                            const current = dirty || !settings!.timeoutMs ? await saveForm() : settings!;
-                            return checkImageEnhancementSettings({ revision: current.revision, action: "connection" });
-                        })}
+                        onClick={() =>
+                            void run(async () => {
+                                const current = dirty || !settings!.timeoutMs ? await saveForm() : settings!;
+                                return checkImageEnhancementSettings({ revision: current.revision, action: "connection" });
+                            })
+                        }
                     >
                         检查连接
                     </Button>

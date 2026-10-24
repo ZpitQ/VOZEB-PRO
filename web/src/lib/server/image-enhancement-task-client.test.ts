@@ -29,7 +29,19 @@ const result = () => {
     const bytes = mode === "truncated-consistent" ? ai.subarray(0, 50) : ai;
     return { format: "png" as const, width: 8, height: 8, sha256: digest(bytes), byteLength: bytes.length };
 };
-const job = () => ({ serviceId, jobId, status: mode === "status-array" ? ["succeeded"] : "succeeded", reason: null, source: { sha256: digest(source), width: 2, height: 2 }, engineInput: { width: 2, height: 2 }, plan: frozen, result: mode === "status-array" ? null : result(), createdAt: 1, completedAt: 2, ...(timings === undefined ? {} : { timings }) });
+const job = () => ({
+    serviceId,
+    jobId,
+    status: mode === "status-array" ? ["succeeded"] : "succeeded",
+    reason: null,
+    source: { sha256: digest(source), width: 2, height: 2 },
+    engineInput: { width: 2, height: 2 },
+    plan: frozen,
+    result: mode === "status-array" ? null : result(),
+    createdAt: 1,
+    completedAt: 2,
+    ...(timings === undefined ? {} : { timings }),
+});
 
 beforeEach(async () => {
     mode = "ok";
@@ -38,7 +50,9 @@ beforeEach(async () => {
     receipts = [];
     timings = undefined;
     rawTimingNumber = undefined;
-    source = await sharp({ create: { width: 2, height: 2, channels: 3, background: "#dedede" } }).png().toBuffer();
+    source = await sharp({ create: { width: 2, height: 2, channels: 3, background: "#dedede" } })
+        .png()
+        .toBuffer();
     ai = await sharp(source).resize(8, 8).png().toBuffer();
     server = createServer(async (request, response) => {
         requests.push(`${request.method} ${request.url}`);
@@ -50,23 +64,41 @@ beforeEach(async () => {
         for await (const chunk of request) chunks.push(Buffer.from(chunk));
         const bytes = Buffer.concat(chunks);
         let data: unknown;
-        if (request.url === "/v1/capabilities") data = { serviceId: mode === "identity" ? jobId : serviceId, protocolVersion: "image-enhancement.v1", normalizationProfile: "srgb-upright-v1", features: { expectedStrategyFingerprint: mode !== "legacy" }, models: [{ ...model, modelSha256: mode === "weights" ? "d".repeat(64) : model.modelSha256 }], budgets: mode === "budget" ? { ...budgets, input: { ...budgets.input, maxPixels: 3 } } : mode === "native-delivery-budget" ? { ...budgets, delivery: { ...budgets.delivery, maxPixels: 36 } } : budgets, ready: mode !== "unready" };
+        if (request.url === "/v1/capabilities")
+            data = {
+                serviceId: mode === "identity" ? jobId : serviceId,
+                protocolVersion: "image-enhancement.v1",
+                normalizationProfile: "srgb-upright-v1",
+                features: { expectedStrategyFingerprint: mode !== "legacy" },
+                models: [{ ...model, modelSha256: mode === "weights" ? "d".repeat(64) : model.modelSha256 }],
+                budgets: mode === "budget" ? { ...budgets, input: { ...budgets.input, maxPixels: 3 } } : mode === "native-delivery-budget" ? { ...budgets, delivery: { ...budgets.delivery, maxPixels: 36 } } : budgets,
+                ready: mode !== "unready",
+            };
         else if (request.url === "/v1/enhancement-jobs" && request.method === "POST") {
             const boundary = String(request.headers["content-type"]).split("boundary=")[1];
             const part = bytes.toString("utf8").split(`--${boundary}`)[1];
             const plan = JSON.parse(part.split("\r\n\r\n")[1].trim()) as Record<string, unknown>;
             submissions.push({ key: request.headers["idempotency-key"] as string | undefined, plan, multipart: part });
-            if (mode === "lost-submit") { request.socket.destroy(); return; }
+            if (mode === "lost-submit") {
+                request.socket.destroy();
+                return;
+            }
             data = { job: job(), replayed: submissions.length > 1 };
         } else if (request.url === `/v1/enhancement-jobs/${jobId}/result`) {
             response.writeHead(200, { "content-type": "image/png" }).end(mode === "truncated-consistent" ? ai.subarray(0, 50) : mode === "corrupt" ? Buffer.from("corrupt") : ai);
             return;
         } else if (request.url === `/v1/enhancement-jobs/${jobId}/receipt`) {
             receipts.push(JSON.parse(bytes.toString("utf8")));
-            if (mode === "lost-receipt") { request.socket.destroy(); return; }
+            if (mode === "lost-receipt") {
+                request.socket.destroy();
+                return;
+            }
             data = { accepted: true };
         } else if (request.url === `/v1/enhancement-jobs/${jobId}`) data = { job: job() };
-        else { response.writeHead(404).end(); return; }
+        else {
+            response.writeHead(404).end();
+            return;
+        }
         const json = JSON.stringify({ code: "ok", data, msg: "OK" });
         response.writeHead(200, { "content-type": "application/json" }).end(rawTimingNumber ? json.replace('"workerExecutionMs":null', `"workerExecutionMs":${rawTimingNumber}`) : json);
     }).listen(0, "127.0.0.1");
@@ -80,7 +112,16 @@ afterEach(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 async function prepare(snapshotServiceId = serviceId, target = { width: 6, height: 6 }, frozenModel = model) {
-    const decision = planImageEnhancement({ nativeValid: true, enabled: true, requested4k: true, protectedContract: false, layered: false, source: { url: "/api/generation-log-assets/images/fixture.png", sha256: digest(source), width: 2, height: 2, byteLength: source.length, format: "png", hasAlpha: false, provenance: "provider_native" }, target, connection: { revision: "fixture-revision", credentialRef: "fixture-profile", serviceId: snapshotServiceId, timeoutMs: 10000, model: frozenModel } });
+    const decision = planImageEnhancement({
+        nativeValid: true,
+        enabled: true,
+        requested4k: true,
+        protectedContract: false,
+        layered: false,
+        source: { url: "/api/generation-log-assets/images/fixture.png", sha256: digest(source), width: 2, height: 2, byteLength: source.length, format: "png", hasAlpha: false, provenance: "provider_native" },
+        target,
+        connection: { revision: "fixture-revision", credentialRef: "fixture-profile", serviceId: snapshotServiceId, timeoutMs: 10000, model: frozenModel },
+    });
     if (decision.status !== "queued") throw new Error("expected fixture plan");
     frozen = await client.prepare(decision);
     return frozen;

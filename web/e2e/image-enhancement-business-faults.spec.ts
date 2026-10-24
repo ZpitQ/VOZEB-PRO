@@ -10,7 +10,16 @@ import { bootFacts, proveOldOwnerFence, restartSourceHashes, sanitizeRestartEvid
 import { E2E_ADMIN, e2eSettingsPatch } from "./support";
 
 const MODEL = "m5-controlled-native-image";
-const syntheticModelB = { ...fixtureModel, id: "m5-business-fixture-b", binaryVersion: "synthetic-v2", binarySha256: "d".repeat(64), modelVersion: "synthetic-v2", modelSha256: "e".repeat(64), nativeScale: 4 as const, tta: false as const } satisfies EnhancementModel;
+const syntheticModelB = {
+    ...fixtureModel,
+    id: "m5-business-fixture-b",
+    binaryVersion: "synthetic-v2",
+    binarySha256: "d".repeat(64),
+    modelVersion: "synthetic-v2",
+    modelSha256: "e".repeat(64),
+    nativeScale: 4 as const,
+    tta: false as const,
+} satisfies EnhancementModel;
 const timeoutMs = Number(process.env.VOZEB_PRO_M5_BUSINESS_TIMEOUT_MS || 10_000);
 type Fixture = Awaited<ReturnType<typeof createBusinessFaultFixture>>;
 type Run = { id: string; conversationId: string; status: string; reviewed?: boolean; reviewStatus?: string };
@@ -19,7 +28,22 @@ type SubmitCapture = { workerId: string; accepted: () => boolean; pending?: Prom
 type NativeTask = { id: string; status: string; result: unknown };
 type GenerationLog = { id: string; status: string; assets: Array<{ enhancementId?: string; enhancement?: PublicImageEnhancement }> };
 type Counts = ReturnType<Fixture["counts"]>;
-type Case = { fixture: Fixture; root: string; run: Run; native: CreativeAsset; id: string; initial: PublicImageEnhancement; baselineOwned: Awaited<ReturnType<typeof readOwnedJob>>; baselineTask: NativeTask; baselineMedia: Awaited<ReturnType<typeof mediaSnapshot>>; baselineLog: GenerationLog; generationBefore: Counts; generationDelta: Counts["counts"]; before: Counts; browserWorkerRequests: string[] };
+type Case = {
+    fixture: Fixture;
+    root: string;
+    run: Run;
+    native: CreativeAsset;
+    id: string;
+    initial: PublicImageEnhancement;
+    baselineOwned: Awaited<ReturnType<typeof readOwnedJob>>;
+    baselineTask: NativeTask;
+    baselineMedia: Awaited<ReturnType<typeof mediaSnapshot>>;
+    baselineLog: GenerationLog;
+    generationBefore: Counts;
+    generationDelta: Counts["counts"];
+    before: Counts;
+    browserWorkerRequests: string[];
+};
 const cases = [
     { id: "connection-refused", reason: "connection_failed", stage: "query", text: /无法连接|连接失败|连接.*中断|服务.*断开/ },
     { id: "authentication", reason: "authentication_failed", stage: "query", text: /访问密钥|认证|鉴权/ },
@@ -32,66 +56,67 @@ const cases = [
 
 test.skip(process.env.VOZEB_PRO_M5_BUSINESS_FAULTS !== "1", "Requires an owned isolated application with the M5 test preload and local synthetic Worker.");
 
-for (const fault of cases) test(`SR-M5-03/06 ${fault.id}: real enhancement HTTP failure preserves the persisted normal native`, async ({ page, request }, info) => {
-    const current = await beginCase(page, request, info, fault.id);
-    try {
-        if (fault.id === "connection-refused") await current.fixture.refuseConnections();
-        else await current.fixture.setFault(fault.id);
-        const failed = await drive(request, current.id, (job) => job.status === "failed", info);
-        expect(failed).toMatchObject({ status: "failed", phase: fault.stage === "query" ? "poll" : "download", reason: fault.reason, attempt: 1 });
-        const preserved = await assertOriginal(page, request, current, failed, fault.text);
-        await page.screenshot({ path: info.outputPath("native-preserved-after-http-fault.png"), fullPage: true });
-        const ledger = await current.fixture.snapshot();
-        expect(ledger.fixtureError).toBeUndefined();
-        expect(ledger.jobs).toHaveLength(1);
-        expect(ledger.jobs[0].executionCount).toBe(1);
-        expect(ledger.acceptedReceipts).toEqual([]);
-        expect(ledger.receiptRequests).toEqual([]);
-        const owned = await readOwnedJob(current.root, current.id);
-        expect(owned).not.toHaveProperty("publication");
-        expect(owned.staged || {}).toEqual({});
-        expect(await mediaSnapshot(current.root, current.id)).toEqual([]);
-        const businessId = ledger.jobs[0].jobId;
-        const resultCalls = ledger.calls.filter((call: { path: string; role: string }) => call.path === `/v1/enhancement-jobs/${businessId}/result` && call.role === "application");
-        if (fault.stage === "result") expect(resultCalls).toHaveLength(1);
-        else expect(resultCalls).toHaveLength(0);
-        if (fault.id === "incomplete-transfer") {
-            expect(resultCalls[0]).toMatchObject({ declaredBytes: current.fixture.ai.length, bodyBytes: current.fixture.ai.length - 24 });
-            expect(resultCalls[0].bodyBytes).toBeLessThan(resultCalls[0].declaredBytes);
+for (const fault of cases)
+    test(`SR-M5-03/06 ${fault.id}: real enhancement HTTP failure preserves the persisted normal native`, async ({ page, request }, info) => {
+        const current = await beginCase(page, request, info, fault.id);
+        try {
+            if (fault.id === "connection-refused") await current.fixture.refuseConnections();
+            else await current.fixture.setFault(fault.id);
+            const failed = await drive(request, current.id, (job) => job.status === "failed", info);
+            expect(failed).toMatchObject({ status: "failed", phase: fault.stage === "query" ? "poll" : "download", reason: fault.reason, attempt: 1 });
+            const preserved = await assertOriginal(page, request, current, failed, fault.text);
+            await page.screenshot({ path: info.outputPath("native-preserved-after-http-fault.png"), fullPage: true });
+            const ledger = await current.fixture.snapshot();
+            expect(ledger.fixtureError).toBeUndefined();
+            expect(ledger.jobs).toHaveLength(1);
+            expect(ledger.jobs[0].executionCount).toBe(1);
+            expect(ledger.acceptedReceipts).toEqual([]);
+            expect(ledger.receiptRequests).toEqual([]);
+            const owned = await readOwnedJob(current.root, current.id);
+            expect(owned).not.toHaveProperty("publication");
+            expect(owned.staged || {}).toEqual({});
+            expect(await mediaSnapshot(current.root, current.id)).toEqual([]);
+            const businessId = ledger.jobs[0].jobId;
+            const resultCalls = ledger.calls.filter((call: { path: string; role: string }) => call.path === `/v1/enhancement-jobs/${businessId}/result` && call.role === "application");
+            if (fault.stage === "result") expect(resultCalls).toHaveLength(1);
+            else expect(resultCalls).toHaveLength(0);
+            if (fault.id === "incomplete-transfer") {
+                expect(resultCalls[0]).toMatchObject({ declaredBytes: current.fixture.ai.length, bodyBytes: current.fixture.ai.length - 24 });
+                expect(resultCalls[0].bodyBytes).toBeLessThan(resultCalls[0].declaredBytes);
+            }
+            if (fault.id === "sha-only") {
+                const bytes = current.fixture.wrongShaPng;
+                expect(bytes.length).toBe(current.fixture.expected.byteLength);
+                expect(await decoded(bytes)).toMatchObject({ width: 5016, height: 5016, format: "png", opaque: true });
+                expect(sha256(bytes)).not.toBe(current.fixture.expected.sha256);
+                expect(resultCalls[0]).toMatchObject({ declaredBytes: bytes.length, bodyBytes: bytes.length });
+            }
+            if (fault.id === "timeout") {
+                const call = ledger.calls.find((entry: { path: string; responseStatus: number | null }) => entry.path === `/v1/enhancement-jobs/${businessId}` && entry.responseStatus === null);
+                expect(owned.decision.connection.timeoutMs).toBe(timeoutMs);
+                expect(call).toMatchObject({ responseStatus: null, bodyBytes: null, closedAt: expect.any(Number) });
+                expect(call!.closedAt).toBeGreaterThan(call!.receivedAt);
+            }
+            await evidence(info, "fault", { kind: "synthetic-HTTP-business-fault; not GPU inference or AI-quality acceptance", fault, injectedAfter: current.before, failed, preserved, owned, ledger });
+            if (fault.stage === "result") {
+                await current.fixture.setFault("ready");
+                await retryFromDesktop(page, current.id);
+                const recovered = await drive(request, current.id, (job) => job.status === "succeeded" && job.phase === "completed", info);
+                const after = await current.fixture.snapshot();
+                expect(recovered).toMatchObject({ attempt: 1, native: { sha256: sha256(current.fixture.native) } });
+                expect(after.jobs.map((job: { jobId: string }) => job.jobId)).toEqual([businessId]);
+                expect(after.jobs[0].executionCount).toBe(1);
+                expect(after.calls.filter((call: { method: string; path: string }) => call.method === "POST" && call.path === "/v1/enhancement-jobs")).toHaveLength(1);
+                expect((await readOwnedJob(current.root, current.id)).remoteResult).toEqual(owned.remoteResult);
+                expect(current.fixture.counts()).toEqual(current.before);
+                expect(await nativeTask(request, current.id)).toEqual(current.baselineTask);
+                expect((await assets(request, current.run.conversationId)).filter((asset) => asset.metadata?.enhancementId === current.id && asset.metadata?.provenance === "ai_enhanced")).toHaveLength(1);
+                await evidence(info, "same-result-recovery", { recovered, ledger: after, upstream: current.fixture.counts() });
+            }
+        } finally {
+            await finishCase(request, current, info);
         }
-        if (fault.id === "sha-only") {
-            const bytes = current.fixture.wrongShaPng;
-            expect(bytes.length).toBe(current.fixture.expected.byteLength);
-            expect(await decoded(bytes)).toMatchObject({ width: 5016, height: 5016, format: "png", opaque: true });
-            expect(sha256(bytes)).not.toBe(current.fixture.expected.sha256);
-            expect(resultCalls[0]).toMatchObject({ declaredBytes: bytes.length, bodyBytes: bytes.length });
-        }
-        if (fault.id === "timeout") {
-            const call = ledger.calls.find((entry: { path: string; responseStatus: number | null }) => entry.path === `/v1/enhancement-jobs/${businessId}` && entry.responseStatus === null);
-            expect(owned.decision.connection.timeoutMs).toBe(timeoutMs);
-            expect(call).toMatchObject({ responseStatus: null, bodyBytes: null, closedAt: expect.any(Number) });
-            expect(call!.closedAt).toBeGreaterThan(call!.receivedAt);
-        }
-        await evidence(info, "fault", { kind: "synthetic-HTTP-business-fault; not GPU inference or AI-quality acceptance", fault, injectedAfter: current.before, failed, preserved, owned, ledger });
-        if (fault.stage === "result") {
-            await current.fixture.setFault("ready");
-            await retryFromDesktop(page, current.id);
-            const recovered = await drive(request, current.id, (job) => job.status === "succeeded" && job.phase === "completed", info);
-            const after = await current.fixture.snapshot();
-            expect(recovered).toMatchObject({ attempt: 1, native: { sha256: sha256(current.fixture.native) } });
-            expect(after.jobs.map((job: { jobId: string }) => job.jobId)).toEqual([businessId]);
-            expect(after.jobs[0].executionCount).toBe(1);
-            expect(after.calls.filter((call: { method: string; path: string }) => call.method === "POST" && call.path === "/v1/enhancement-jobs")).toHaveLength(1);
-            expect((await readOwnedJob(current.root, current.id)).remoteResult).toEqual(owned.remoteResult);
-            expect(current.fixture.counts()).toEqual(current.before);
-            expect(await nativeTask(request, current.id)).toEqual(current.baselineTask);
-            expect((await assets(request, current.run.conversationId)).filter((asset) => asset.metadata?.enhancementId === current.id && asset.metadata?.provenance === "ai_enhanced")).toHaveLength(1);
-            await evidence(info, "same-result-recovery", { recovered, ledger: after, upstream: current.fixture.counts() });
-        }
-    } finally {
-        await finishCase(request, current, info);
-    }
-});
+    });
 
 test("SR-M5-06 final permanent write failure resumes staged AI, then durable receipt response loss only retries the same confirmation", async ({ page, request }, info) => {
     const current = await beginCase(page, request, info, "permanent-write-and-receipt-loss");
@@ -114,7 +139,10 @@ test("SR-M5-06 final permanent write failure resumes staged AI, then durable rec
         expect(staged.staged.ai).toMatchObject(current.fixture.expected);
         const stagedMedia = await mediaSnapshot(current.root, current.id);
         expect(stagedMedia).toHaveLength(1);
-        expect(stagedMedia[0]).toMatchObject({ sha256: current.fixture.expected.sha256, registration: { ownerUserId: staged.userId, taskId: current.id, conversationId: current.run.conversationId, scope: "generation", storageClass: "permanent", originalName: "完整AI增强.png" } });
+        expect(stagedMedia[0]).toMatchObject({
+            sha256: current.fixture.expected.sha256,
+            registration: { ownerUserId: staged.userId, taskId: current.id, conversationId: current.run.conversationId, scope: "generation", storageClass: "permanent", originalName: "完整AI增强.png" },
+        });
         const registry = JSON.parse(await readFile(path.join(current.root, "local-media-assets.json"), "utf8"));
         expect(registry.assets.some((asset: { storageKey: string }) => asset.storageKey === writeFault.storageKey)).toBe(false);
         const stagedDownload = await request.get(staged.staged.ai.url);
@@ -136,7 +164,15 @@ test("SR-M5-06 final permanent write failure resumes staged AI, then durable rec
             const retained = await request.get(`${current.fixture.endpoint}/v1/enhancement-jobs/${boundary.job.jobId}/result`, { headers: { authorization: `Bearer ${current.fixture.token}`, "x-m5-fixture-observer": "1" } });
             expect(retained.ok()).toBe(true);
             expect(sha256(await retained.body())).toBe(current.fixture.expected.sha256);
-            beforeAcceptance = { boundary, publicEnhancement: published, publication: permanent.publication, assets: children, media: await mediaSnapshot(current.root, current.id), retainedRemoteSha256: current.fixture.expected.sha256, observedAt: Date.now() };
+            beforeAcceptance = {
+                boundary,
+                publicEnhancement: published,
+                publication: permanent.publication,
+                assets: children,
+                media: await mediaSnapshot(current.root, current.id),
+                retainedRemoteSha256: current.fixture.expected.sha256,
+                observedAt: Date.now(),
+            };
             await evidence(info, "before-receipt-acceptance", beforeAcceptance);
         });
         const beforeResume = await current.fixture.snapshot();
@@ -149,7 +185,16 @@ test("SR-M5-06 final permanent write failure resumes staged AI, then durable rec
         expect(beforeAcceptance).toBeDefined();
         expect(deferred.events.filter((event) => event.stage === "published")).toHaveLength(1);
         const published = await readOwnedJob(current.root, current.id);
-        expect(published).toMatchObject({ status: "succeeded", phase: "receipt", remoteJobId: staged.remoteJobId, remoteResult: staged.remoteResult, remoteKey: staged.remoteKey, receiptId: staged.receiptId, attempt: staged.attempt, staged: { ai: staged.staged.ai } });
+        expect(published).toMatchObject({
+            status: "succeeded",
+            phase: "receipt",
+            remoteJobId: staged.remoteJobId,
+            remoteResult: staged.remoteResult,
+            remoteKey: staged.remoteKey,
+            receiptId: staged.receiptId,
+            attempt: staged.attempt,
+            staged: { ai: staged.staged.ai },
+        });
         const publishedMedia = await mediaSnapshot(current.root, current.id);
         expect(publishedMedia).toHaveLength(2);
         expect(publishedMedia.find((asset) => asset.sha256 === current.fixture.expected.sha256)).toEqual(stagedMedia[0]);
@@ -195,7 +240,24 @@ test("SR-M5-06 final permanent write failure resumes staged AI, then durable rec
         expect(current.fixture.counts()).toEqual(current.before);
         expect(current.browserWorkerRequests).toEqual([]);
         await page.screenshot({ path: info.outputPath("same-result-and-receipt-recovered.png"), fullPage: true });
-        await evidence(info, "permanent-write-and-receipt-recovery", { kind: "synthetic-protocol result; not GPU acceptance", preserved, proof, writeFault, staged, stagedMedia, beforeResume, deferred, published, publishedMedia, acceptedWithoutResponse, completed, confirmed, finalLedger, before: current.before, after: current.fixture.counts() });
+        await evidence(info, "permanent-write-and-receipt-recovery", {
+            kind: "synthetic-protocol result; not GPU acceptance",
+            preserved,
+            proof,
+            writeFault,
+            staged,
+            stagedMedia,
+            beforeResume,
+            deferred,
+            published,
+            publishedMedia,
+            acceptedWithoutResponse,
+            completed,
+            confirmed,
+            finalLedger,
+            before: current.before,
+            after: current.fixture.counts(),
+        });
     } finally {
         await finishCase(request, current, info);
     }
@@ -209,22 +271,34 @@ test("SR-M5-04/08 frozen configuration timeline: A retry stays on old verified s
     const controls: unknown[] = [];
     const checkpoint = async (phase: string) => {
         const settings = await adminSettings(request);
-        const rows = await Promise.all(family.map(async ({ owner, current }) => {
-            const task = await nativeTask(request, current.id);
-            const log = await generationLog(request, current.id);
-            return {
-                owner, runId: current.run.id, conversationId: current.run.conversationId, observedAt: Date.now(),
-                public: await enhancement(request, current.id), owned: await readOwnedJob(current.root, current.id),
-                originalNativeAsset: { id: current.native.id, url: current.native.serverUrl, width: current.native.width, height: current.native.height },
-                originalNativeTask: { id: current.baselineTask.id, status: current.baselineTask.status, resultSha256: sha256(Buffer.from(JSON.stringify(current.baselineTask.result))) },
-                currentNativeTask: { id: task.id, status: task.status, resultSha256: sha256(Buffer.from(JSON.stringify(task.result))) },
-                originalNativeLog: { id: current.baselineLog.id, status: current.baselineLog.status, nativeFactsSha256: sha256(Buffer.from(JSON.stringify(nativeLogFacts(current.baselineLog)))) },
-                currentNativeLog: { id: log.id, status: log.status, nativeFactsSha256: sha256(Buffer.from(JSON.stringify(nativeLogFacts(log)))) },
-                originalNativeMedia: current.baselineMedia, currentNativeMedia: await mediaSnapshot(current.root, current.initial.imageTaskId),
-                ordinaryCalls: { before: current.generationBefore, after: current.before, delta: current.generationDelta },
-            };
-        }));
-        timeline.push({ phase, observedAt: Date.now(), configuration: configurationFacts(settings), rows, controls: structuredClone(controls),
+        const rows = await Promise.all(
+            family.map(async ({ owner, current }) => {
+                const task = await nativeTask(request, current.id);
+                const log = await generationLog(request, current.id);
+                return {
+                    owner,
+                    runId: current.run.id,
+                    conversationId: current.run.conversationId,
+                    observedAt: Date.now(),
+                    public: await enhancement(request, current.id),
+                    owned: await readOwnedJob(current.root, current.id),
+                    originalNativeAsset: { id: current.native.id, url: current.native.serverUrl, width: current.native.width, height: current.native.height },
+                    originalNativeTask: { id: current.baselineTask.id, status: current.baselineTask.status, resultSha256: sha256(Buffer.from(JSON.stringify(current.baselineTask.result))) },
+                    currentNativeTask: { id: task.id, status: task.status, resultSha256: sha256(Buffer.from(JSON.stringify(task.result))) },
+                    originalNativeLog: { id: current.baselineLog.id, status: current.baselineLog.status, nativeFactsSha256: sha256(Buffer.from(JSON.stringify(nativeLogFacts(current.baselineLog)))) },
+                    currentNativeLog: { id: log.id, status: log.status, nativeFactsSha256: sha256(Buffer.from(JSON.stringify(nativeLogFacts(log)))) },
+                    originalNativeMedia: current.baselineMedia,
+                    currentNativeMedia: await mediaSnapshot(current.root, current.initial.imageTaskId),
+                    ordinaryCalls: { before: current.generationBefore, after: current.before, delta: current.generationDelta },
+                };
+            }),
+        );
+        timeline.push({
+            phase,
+            observedAt: Date.now(),
+            configuration: configurationFacts(settings),
+            rows,
+            controls: structuredClone(controls),
             upstream: { A: a.fixture.counts(), ...(serviceB ? { B: serviceB.counts() } : {}) },
             protocol: { A: await a.fixture.snapshot(), ...(serviceB ? { B: await serviceB.snapshot() } : {}) },
         });
@@ -430,10 +504,14 @@ test("SR-M5-04/08 frozen configuration timeline: A retry stays on old verified s
         await checkpoint("repeated actual browser/public/log reads preserve all jobs, publications and ordinary upstream counts");
         await page.screenshot({ path: info.outputPath("configuration-lifecycle-final.png"), fullPage: true });
     } finally {
-        try { await checkpoint("final observation; no pass inferred from this checkpoint"); }
-        finally {
-            try { await finishCase(request, a, info); }
-            finally { await serviceB?.close(); }
+        try {
+            await checkpoint("final observation; no pass inferred from this checkpoint");
+        } finally {
+            try {
+                await finishCase(request, a, info);
+            } finally {
+                await serviceB?.close();
+            }
         }
     }
 });
@@ -480,11 +558,20 @@ test("SR-M5-05 actual owned Web exit: new application PID reclaims the naturally
         type Boundary = { job: { jobId: string; key: string; executor: { pid: number; startTicks: string; executionId: string } }; replayed: boolean; durableAt: number };
         let firstBoundary: Boundary | undefined;
         let replayBoundary: Boundary | undefined;
-        const firstBarrier = new Promise<void>((resolve) => { releaseFirst = resolve; });
-        const replayBarrier = new Promise<void>((resolve) => { releaseReplay = resolve; });
+        const firstBarrier = new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+        });
+        const replayBarrier = new Promise<void>((resolve) => {
+            releaseReplay = resolve;
+        });
         fixture.beforeSubmitReply(async (boundary: Boundary) => {
-            if (boundary.replayed) { replayBoundary = boundary; await replayBarrier; }
-            else { firstBoundary = boundary; await firstBarrier; }
+            if (boundary.replayed) {
+                replayBoundary = boundary;
+                await replayBarrier;
+            } else {
+                firstBoundary = boundary;
+                await firstBarrier;
+            }
         });
         const owner1 = `m5-restart-boot1:${boot1.service!.pid}`;
         submitCapture = { workerId: owner1, accepted: () => Boolean(firstBoundary), stop: false };
@@ -498,10 +585,33 @@ test("SR-M5-05 actual owned Web exit: new application PID reclaims the naturally
         expect(current.baselineOwned.phase).toBe("submit");
         expect(current.baselineOwned.submittedAt).toEqual(expect.any(Number));
         expect(current.baselineOwned).not.toHaveProperty("remoteJobId");
-        await checkpoint("original native/Agent/first-review finalization is durable while first remote response remains held; ordinary generation window closes before Web exit", { first, current: { run: await runState(request, current.run.id), native: current.native, owned: current.baselineOwned, nativeTask: current.baselineTask, nativeMedia: current.baselineMedia, nativeLog: current.baselineLog, ordinaryGenerationDelta: current.generationDelta, beforeEnhancementOnly: current.before }, configuration: configurationFacts(settingsBefore) });
+        await checkpoint("original native/Agent/first-review finalization is durable while first remote response remains held; ordinary generation window closes before Web exit", {
+            first,
+            current: {
+                run: await runState(request, current.run.id),
+                native: current.native,
+                owned: current.baselineOwned,
+                nativeTask: current.baselineTask,
+                nativeMedia: current.baselineMedia,
+                nativeLog: current.baselineLog,
+                ordinaryGenerationDelta: current.generationDelta,
+                beforeEnhancementOnly: current.before,
+            },
+            configuration: configurationFacts(settingsBefore),
+        });
         stage = "durable first remote acceptance and original actual lease before Web exit";
         const leased = await readOwnedJob(root, current.id);
-        expect(leased).toMatchObject({ status: "running", phase: "submit", workerId: owner1, leaseToken: expect.any(String), leaseUntil: expect.any(Number), submittedAt: expect.any(Number), remoteKey: current.baselineOwned.remoteKey, receiptId: current.baselineOwned.receiptId, attempt: 1 });
+        expect(leased).toMatchObject({
+            status: "running",
+            phase: "submit",
+            workerId: owner1,
+            leaseToken: expect.any(String),
+            leaseUntil: expect.any(Number),
+            submittedAt: expect.any(Number),
+            remoteKey: current.baselineOwned.remoteKey,
+            receiptId: current.baselineOwned.receiptId,
+            attempt: 1,
+        });
         expect(leased).not.toHaveProperty("remoteJobId");
         expect(leased.leaseUntil).toBeGreaterThan(Date.now());
         expect(leased.leaseUntil - Date.now()).toBeLessThanOrEqual(90_000);
@@ -510,7 +620,9 @@ test("SR-M5-05 actual owned Web exit: new application PID reclaims the naturally
         expect(durableFirst.protocolProcess.pid).not.toBe(boot1.service!.pid);
         expect(durableFirst.jobs).toHaveLength(1);
         expect(durableFirst.jobs[0]).toMatchObject({ key: leased.remoteKey, jobId: first.job.jobId, executor: first.job.executor });
-        expect(durableFirst.calls.filter((call: { path: string; method: string }) => call.path === "/v1/enhancement-jobs" && call.method === "POST")).toEqual([expect.objectContaining({ key: leased.remoteKey, responseHeldAt: expect.any(Number), responseStatus: null, closedAt: null })]);
+        expect(durableFirst.calls.filter((call: { path: string; method: string }) => call.path === "/v1/enhancement-jobs" && call.method === "POST")).toEqual([
+            expect.objectContaining({ key: leased.remoteKey, responseHeldAt: expect.any(Number), responseStatus: null, closedAt: null }),
+        ]);
         const executorBefore = await fixture.observeExecutor(first.job.jobId, "before-original-Web-exit");
         expect(executorBefore.identity!.pgrp).not.toBe(boot1.cli!.pid);
         await checkpoint("remote job fsynced before response; real executor bound and live; original actual Web owns the submit lease", { first, leased, durableFirst, executorBefore });
@@ -520,7 +632,11 @@ test("SR-M5-05 actual owned Web exit: new application PID reclaims the naturally
         expect(stopped1.cliGone).toBe(true);
         expect(stopped1.serviceGone).toBe(true);
         releaseFirst();
-        const lost = await untilObserved(() => fixture!.snapshot(), (ledger) => ledger.calls.some((call: { key?: string; responseLost?: boolean }) => call.key === leased.remoteKey && call.responseLost === true), "remote observed response loss caused by original Web exit");
+        const lost = await untilObserved(
+            () => fixture!.snapshot(),
+            (ledger) => ledger.calls.some((call: { key?: string; responseLost?: boolean }) => call.key === leased.remoteKey && call.responseLost === true),
+            "remote observed response loss caused by original Web exit",
+        );
         const lostCall = lost.calls.find((call: { key?: string; responseLost?: boolean }) => call.key === leased.remoteKey && call.responseLost);
         expect(lostCall).toMatchObject({ responseStatus: null, lostAfterAcceptance: true, closedAt: expect.any(Number) });
         expect(lostCall.closedAt).toBeGreaterThanOrEqual(stopped1.signalAt);
@@ -553,19 +669,57 @@ test("SR-M5-05 actual owned Web exit: new application PID reclaims the naturally
         expect((await fixture.snapshot()).calls.filter((call: { method: string; path: string }) => call.method === "POST" && call.path === "/v1/enhancement-jobs")).toHaveLength(1);
         expect(fixture.counts()).toEqual(current.before);
         const expiryWaitStartedAt = Date.now();
-        await untilObserved(async () => Date.now(), (now) => now >= abandoned.leaseUntil, "original unmodified ninety-second lease expiration", 135_000);
+        await untilObserved(
+            async () => Date.now(),
+            (now) => now >= abandoned.leaseUntil,
+            "original unmodified ninety-second lease expiration",
+            135_000,
+        );
         const expiryObservedAt = Date.now();
         expect(await readOwnedJob(root, current.id)).toEqual(abandoned);
-        await checkpoint("different actual Web PID reads identical case/config/native; original lease expires using wall time without JSON or clock edits", { boot2: bootFacts(boot2), oldLease: { workerId: abandoned.workerId, leaseTokenSha256: sha256(Buffer.from(abandoned.leaseToken)), leaseUntil: abandoned.leaseUntil }, expiryWaitStartedAt, expiryObservedAt, executorAfterBoot, enhancementOnlyDelta: countDelta(current.before, fixture.counts()) });
+        await checkpoint("different actual Web PID reads identical case/config/native; original lease expires using wall time without JSON or clock edits", {
+            boot2: bootFacts(boot2),
+            oldLease: { workerId: abandoned.workerId, leaseTokenSha256: sha256(Buffer.from(abandoned.leaseToken)), leaseUntil: abandoned.leaseUntil },
+            expiryWaitStartedAt,
+            expiryObservedAt,
+            executorAfterBoot,
+            enhancementOnlyDelta: countDelta(current.before, fixture.counts()),
+        });
 
         stage = "boot2 actual maintenance claim and same-key replay held before reply";
         const owner2 = `m5-restart-boot2:${boot2.service!.pid}`;
         let replayOutcome: string | undefined;
-        const newRequest = advanceWorker(request, owner2, timeoutMs + 45_000).then((data) => { replayOutcome = "response"; return { kind: "response" as const, data }; }, (error: Error) => { replayOutcome = "error"; return { kind: "error" as const, message: error.message }; });
-        const replay = await untilObserved(async () => { if (replayOutcome) throw new Error(`Recovery submit finished before replay barrier: ${replayOutcome}`); return replayBoundary; }, Boolean, "same durable job replay under boot2 actual lease");
+        const newRequest = advanceWorker(request, owner2, timeoutMs + 45_000).then(
+            (data) => {
+                replayOutcome = "response";
+                return { kind: "response" as const, data };
+            },
+            (error: Error) => {
+                replayOutcome = "error";
+                return { kind: "error" as const, message: error.message };
+            },
+        );
+        const replay = await untilObserved(
+            async () => {
+                if (replayOutcome) throw new Error(`Recovery submit finished before replay barrier: ${replayOutcome}`);
+                return replayBoundary;
+            },
+            Boolean,
+            "same durable job replay under boot2 actual lease",
+        );
         expect(replay).toMatchObject({ replayed: true, job: { jobId: first.job.jobId, key: first.job.key, executor: first.job.executor } });
         const next = await readOwnedJob(root, current.id);
-        expect(next).toMatchObject({ workerId: owner2, status: "running", phase: "submit", remoteKey: abandoned.remoteKey, receiptId: abandoned.receiptId, attempt: abandoned.attempt, remotePlan: abandoned.remotePlan, decision: abandoned.decision, submittedAt: abandoned.submittedAt });
+        expect(next).toMatchObject({
+            workerId: owner2,
+            status: "running",
+            phase: "submit",
+            remoteKey: abandoned.remoteKey,
+            receiptId: abandoned.receiptId,
+            attempt: abandoned.attempt,
+            remotePlan: abandoned.remotePlan,
+            decision: abandoned.decision,
+            submittedAt: abandoned.submittedAt,
+        });
         expect(next.leaseToken).not.toBe(abandoned.leaseToken);
         expect(next.leaseUntil).toBeGreaterThan(Date.now());
         expect(replay.durableAt).toBeGreaterThanOrEqual(abandoned.leaseUntil);
@@ -610,17 +764,33 @@ test("SR-M5-05 actual owned Web exit: new application PID reclaims the naturally
                 expect(await decoded(await saved.body())).toMatchObject({ width: 4096, height: 4096, sha256: publication.publication.delivered.sha256 });
                 beforeReceipt = { boundary, publication, media, children, observedAt: Date.now() };
                 await evidence(info, "restart-permanent-publication-before-receipt", beforeReceipt);
-            } catch (error) { beforeReceiptFailure = error; throw error; }
+            } catch (error) {
+                beforeReceiptFailure = error;
+                throw error;
+            }
         });
         stage = "actual AI/final media, independent asset registration and receipt";
-        const completed = await drive(request, current.id, (job) => {
-            if (beforeReceiptFailure) throw beforeReceiptFailure;
-            expect(job.status, `Actual restart recovery failed during ${job.phase}: ${job.reason}`).not.toBe("failed");
-            return job.status === "succeeded" && job.phase === "completed";
-        }, info);
+        const completed = await drive(
+            request,
+            current.id,
+            (job) => {
+                if (beforeReceiptFailure) throw beforeReceiptFailure;
+                expect(job.status, `Actual restart recovery failed during ${job.phase}: ${job.reason}`).not.toBe("failed");
+                return job.status === "succeeded" && job.phase === "completed";
+            },
+            info,
+        );
         expect(beforeReceipt).toBeDefined();
         const confirmed = await readOwnedJob(root, current.id);
-        expect(confirmed).toMatchObject({ remoteKey: abandoned.remoteKey, remoteJobId: first.job.jobId, receiptId: abandoned.receiptId, attempt: abandoned.attempt, remotePlan: abandoned.remotePlan, decision: abandoned.decision, remoteResult: fixture.expected });
+        expect(confirmed).toMatchObject({
+            remoteKey: abandoned.remoteKey,
+            remoteJobId: first.job.jobId,
+            receiptId: abandoned.receiptId,
+            attempt: abandoned.attempt,
+            remotePlan: abandoned.remotePlan,
+            decision: abandoned.decision,
+            remoteResult: fixture.expected,
+        });
         expect(confirmed.events.filter((event: { stage: string }) => event.stage === "published")).toHaveLength(1);
         expect(confirmed.events.filter((event: { stage: string }) => event.stage === "receipt_confirmed")).toHaveLength(1);
         expect(confirmed.workerId).toBeNull();
@@ -649,7 +819,15 @@ test("SR-M5-05 actual owned Web exit: new application PID reclaims the naturally
         expect(afterDelivery.acceptedReceipts[0]).toMatchObject({ jobId: first.job.jobId, receipt: { receiptId: abandoned.receiptId, result: fixture.expected } });
         expect(businessCalls.filter((call: { path: string }) => call.path === `/v1/enhancement-jobs/${first.job.jobId}/result`)).toHaveLength(1);
         expect(afterDelivery.fixtureError).toBeUndefined();
-        await checkpoint("one complete AI plus delivered permanent registration, one child/publication/receipt and actual original/enhanced desktop downloads", { completed, confirmed, permanent, ledger: afterDelivery, ordinaryBefore: current.before, ordinaryAfter: fixture.counts(), enhancementOnlyDelta: countDelta(current.before, fixture.counts()) });
+        await checkpoint("one complete AI plus delivered permanent registration, one child/publication/receipt and actual original/enhanced desktop downloads", {
+            completed,
+            confirmed,
+            permanent,
+            ledger: afterDelivery,
+            ordinaryBefore: current.before,
+            ordinaryAfter: fixture.counts(),
+            enhancementOnlyDelta: countDelta(current.before, fixture.counts()),
+        });
 
         stage = "fresh browser, public and log reads must not resubmit or execute again";
         for (let refresh = 0; refresh < 2; refresh++) {
@@ -671,7 +849,13 @@ test("SR-M5-05 actual owned Web exit: new application PID reclaims the naturally
         const children = (await assets(request, current.run.conversationId)).filter((asset) => asset.metadata?.enhancementId === current!.id && asset.metadata?.provenance === "ai_enhanced");
         expect(children).toEqual([expect.objectContaining({ id: confirmed.publication.assetId, parentAssetId: current.native.id, width: 4096, height: 4096 })]);
         await page.screenshot({ path: info.outputPath("restart-same-job-final.png"), fullPage: true });
-        await checkpoint("repeated fresh/log/download reads add zero submit, execution, publication or ordinary generation/analysis/planning/other calls", { ledger: afterReads, confirmed, children, generationWindow: current.generationDelta, enhancementOnlyDelta: countDelta(current.before, fixture.counts()) });
+        await checkpoint("repeated fresh/log/download reads add zero submit, execution, publication or ordinary generation/analysis/planning/other calls", {
+            ledger: afterReads,
+            confirmed,
+            children,
+            generationWindow: current.generationDelta,
+            enhancementOnlyDelta: countDelta(current.before, fixture.counts()),
+        });
     } catch (error) {
         primary = error;
         if (error instanceof Error && "cleanupError" in error) cleanupFailures.push({ operation: "startup owned-process containment", message: String(error.cleanupError) });
@@ -681,13 +865,21 @@ test("SR-M5-05 actual owned Web exit: new application PID reclaims the naturally
         releaseFirst();
         releaseReplay();
         const cleanup = async (operation: string, action: () => Promise<unknown>) => {
-            try { const result = await action(); timeline.push({ stage: "cleanup", operation, observedAt: Date.now(), result }); }
-            catch (error) { cleanupFailures.push({ operation, message: error instanceof Error ? error.message : String(error) }); }
+            try {
+                const result = await action();
+                timeline.push({ stage: "cleanup", operation, observedAt: Date.now(), result });
+            } catch (error) {
+                cleanupFailures.push({ operation, message: error instanceof Error ? error.message : String(error) });
+            }
         };
         if (fixture) await cleanup("capture final remote ledger before cleanup", async () => evidence(info, "restart-final-worker-ledger", await fixture!.snapshot()));
         if (boot2) await cleanup("stop only boot2 owned application and CLI", () => stopOwnedWeb(boot2!));
         if (boot1 && !boot1.stopped) await cleanup("contain only boot1 owned application and CLI", () => stopOwnedWeb(boot1!));
-        if (fixture) await cleanup("stop only the case protocol servers and any still owned executor", async () => { await fixture!.close(); return fixture!.snapshot(); });
+        if (fixture)
+            await cleanup("stop only the case protocol servers and any still owned executor", async () => {
+                await fixture!.close();
+                return fixture!.snapshot();
+            });
         await cleanup("write first failure and cleanup outcomes separately", () => evidence(info, "restart-outcome", { primaryFailure: primary ? { failed: true } : null, cleanupFailures, timeline }));
     }
     if (primary) throw primary;
@@ -702,17 +894,62 @@ async function beginCase(page: Page, request: APIRequestContext, info: TestInfo,
         await configureNormalGeneration(request, fixture);
         return await createNativeCase(page, request, info, fixture, caseId);
     } catch (error) {
-        try { await evidence(info, "setup-worker-ledger", await fixture.snapshot()); }
-        finally { await fixture.close(); }
+        try {
+            await evidence(info, "setup-worker-ledger", await fixture.snapshot());
+        } finally {
+            await fixture.close();
+        }
         throw error;
     }
 }
 
 async function configureNormalGeneration(request: APIRequestContext, fixture: Fixture) {
     const base = e2eSettingsPatch();
-    const operation = { capability: "image" as const, source: "manual" as const, protocol: "custom" as const, apiFormat: "openai" as const, createPath: "/custom/images", editPath: "/custom/images", requestTemplate: '{"model":"{{model}}","prompt":"{{prompt}}","size":"{{size}}","quality":"{{quality}}","references":"{{images}}"}', resultField: "data.image_url", referenceRule: "base64 inline image references", supportsReferenceImage: true };
-    const channels = base.systemChannels.map((channel) => ({ ...channel, baseUrl: `${fixture.upstreamEndpoint}/v1`, models: channel.models.filter((model) => !model.includes("image")), advancedConfig: { ...channel.advancedConfig, modelCapabilities: Object.fromEntries(Object.entries(channel.advancedConfig.modelCapabilities).filter(([, capability]) => capability !== "image")), modelConfigs: Object.fromEntries(Object.entries(channel.advancedConfig.modelConfigs).filter(([model]) => !model.includes("image"))) } }));
-    const configured = await request.patch("/api/admin/settings", { data: { ...base, ecommerceGenerationEnabled: false, systemChannels: [...channels, { id: "m5-local-native", name: "M5 controlled native fixture", baseUrl: fixture.upstreamEndpoint, apiKey: "m5-local-native-test-token", apiFormat: "openai", models: [MODEL], enabled: true, advancedConfig: { ...emptyAdvancedConfig(), ...operation, modelCapabilities: { [MODEL]: "image" }, modelConfigs: { [MODEL]: operation }, operationConfigs: { image: operation } } }], logicalModels: base.logicalModels.filter((model) => model.capability !== "image"), defaultModels: { ...base.defaultModels, imageModel: MODEL }, ecommerceModelRoles: { ...base.ecommerceModelRoles, image_generation: [] }, modelPointCosts: { ...base.modelPointCosts, [MODEL]: 0 } } });
+    const operation = {
+        capability: "image" as const,
+        source: "manual" as const,
+        protocol: "custom" as const,
+        apiFormat: "openai" as const,
+        createPath: "/custom/images",
+        editPath: "/custom/images",
+        requestTemplate: '{"model":"{{model}}","prompt":"{{prompt}}","size":"{{size}}","quality":"{{quality}}","references":"{{images}}"}',
+        resultField: "data.image_url",
+        referenceRule: "base64 inline image references",
+        supportsReferenceImage: true,
+    };
+    const channels = base.systemChannels.map((channel) => ({
+        ...channel,
+        baseUrl: `${fixture.upstreamEndpoint}/v1`,
+        models: channel.models.filter((model) => !model.includes("image")),
+        advancedConfig: {
+            ...channel.advancedConfig,
+            modelCapabilities: Object.fromEntries(Object.entries(channel.advancedConfig.modelCapabilities).filter(([, capability]) => capability !== "image")),
+            modelConfigs: Object.fromEntries(Object.entries(channel.advancedConfig.modelConfigs).filter(([model]) => !model.includes("image"))),
+        },
+    }));
+    const configured = await request.patch("/api/admin/settings", {
+        data: {
+            ...base,
+            ecommerceGenerationEnabled: false,
+            systemChannels: [
+                ...channels,
+                {
+                    id: "m5-local-native",
+                    name: "M5 controlled native fixture",
+                    baseUrl: fixture.upstreamEndpoint,
+                    apiKey: "m5-local-native-test-token",
+                    apiFormat: "openai",
+                    models: [MODEL],
+                    enabled: true,
+                    advancedConfig: { ...emptyAdvancedConfig(), ...operation, modelCapabilities: { [MODEL]: "image" }, modelConfigs: { [MODEL]: operation }, operationConfigs: { image: operation } },
+                },
+            ],
+            logicalModels: base.logicalModels.filter((model) => model.capability !== "image"),
+            defaultModels: { ...base.defaultModels, imageModel: MODEL },
+            ecommerceModelRoles: { ...base.ecommerceModelRoles, image_generation: [] },
+            modelPointCosts: { ...base.modelPointCosts, [MODEL]: 0 },
+        },
+    });
     expect(configured.ok()).toBe(true);
 }
 
@@ -724,7 +961,9 @@ async function createNativeCase(page: Page, request: APIRequestContext, info: Te
     expect(session.ok()).toBe(true);
     expect((await session.json()).user).toMatchObject({ role: "admin" });
     const browserWorkerRequests: string[] = [];
-    page.on("request", (entry) => { if (new URL(entry.url()).origin === fixture.endpoint) browserWorkerRequests.push(entry.url()); });
+    page.on("request", (entry) => {
+        if (new URL(entry.url()).origin === fixture.endpoint) browserWorkerRequests.push(entry.url());
+    });
     const generationBefore = fixture.counts();
     await page.goto("/create", { waitUntil: "domcontentloaded" });
     await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
@@ -747,19 +986,35 @@ async function createNativeCase(page: Page, request: APIRequestContext, info: Te
         // The actual first submission can occur inside the maintenance call that finishes the native run.
         let requestFailed = false;
         let requestFailure: unknown;
-        submitCapture.pending = expect.poll(async () => {
-            if (submitCapture.stop) return true;
-            try { await advanceWorker(request, submitCapture.workerId, timeoutMs + 45_000); }
-            catch (error) { requestFailed = true; requestFailure = error; return true; }
-            return submitCapture.accepted();
-        }, { timeout: info.timeout }).toBe(true).then(
-            () => (submitCapture.outcome = { kind: requestFailed ? "error" : "response", ...(requestFailed ? { message: requestFailure instanceof Error ? requestFailure.message : String(requestFailure) } : {}), observedAt: Date.now() }),
-            (error: Error) => (submitCapture.outcome = { kind: "error", message: error.message, observedAt: Date.now() }),
+        submitCapture.pending = expect
+            .poll(
+                async () => {
+                    if (submitCapture.stop) return true;
+                    try {
+                        await advanceWorker(request, submitCapture.workerId, timeoutMs + 45_000);
+                    } catch (error) {
+                        requestFailed = true;
+                        requestFailure = error;
+                        return true;
+                    }
+                    return submitCapture.accepted();
+                },
+                { timeout: info.timeout },
+            )
+            .toBe(true)
+            .then(
+                () => (submitCapture.outcome = { kind: requestFailed ? "error" : "response", ...(requestFailed ? { message: requestFailure instanceof Error ? requestFailure.message : String(requestFailure) } : {}), observedAt: Date.now() }),
+                (error: Error) => (submitCapture.outcome = { kind: "error", message: error.message, observedAt: Date.now() }),
+            );
+        await untilObserved(
+            async () => {
+                if (submitCapture.outcome) throw new Error(`First native-driving request finished before owned Web exit: ${submitCapture.outcome.kind}`);
+                return submitCapture.accepted();
+            },
+            Boolean,
+            "first fsynced acceptance with its actual request still pending",
+            info.timeout,
         );
-        await untilObserved(async () => {
-            if (submitCapture.outcome) throw new Error(`First native-driving request finished before owned Web exit: ${submitCapture.outcome.kind}`);
-            return submitCapture.accepted();
-        }, Boolean, "first fsynced acceptance with its actual request still pending", info.timeout);
         const acceptedJob = (await fixture.snapshot()).jobs[0];
         expect(acceptedJob).toBeDefined();
         const matching = (JSON.parse(await readFile(path.join(root, "image-enhancement-jobs.json"), "utf8")) as Array<{ id: string; remoteKey: string }>).find((job) => job.remoteKey === acceptedJob.key);
@@ -791,20 +1046,29 @@ async function createNativeCase(page: Page, request: APIRequestContext, info: Te
         const finalizationBatches: unknown[] = [];
         let finalizationFailed = false;
         let finalizationFailure: unknown;
-        await expect.poll(async () => {
-            try {
-                if (submitCapture.outcome) throw new Error(`First held submit ended during native finalization: ${submitCapture.outcome.kind}`);
-                let state = await readOriginalRunFinalization();
-                if (state.status !== "completed" || ["review_pending", "reviewing"].includes(state.reviewStatus || "")) {
-                    const data = await advanceWorker(request, finalizeWorkerId, timeoutMs + 45_000);
-                    expect(data.enhancement.claimed).toBe(0);
-                    finalizationBatches.push({ workerId: finalizeWorkerId, observedAt: Date.now(), data });
-                    state = await readOriginalRunFinalization();
-                }
-                expect(["failed", "cancelled", "paused"]).not.toContain(state.status);
-                return state.status === "completed" && !["review_pending", "reviewing"].includes(state.reviewStatus || "");
-            } catch (error) { finalizationFailed = true; finalizationFailure = error; return true; }
-        }, { timeout: info.timeout }).toBe(true);
+        await expect
+            .poll(
+                async () => {
+                    try {
+                        if (submitCapture.outcome) throw new Error(`First held submit ended during native finalization: ${submitCapture.outcome.kind}`);
+                        let state = await readOriginalRunFinalization();
+                        if (state.status !== "completed" || ["review_pending", "reviewing"].includes(state.reviewStatus || "")) {
+                            const data = await advanceWorker(request, finalizeWorkerId, timeoutMs + 45_000);
+                            expect(data.enhancement.claimed).toBe(0);
+                            finalizationBatches.push({ workerId: finalizeWorkerId, observedAt: Date.now(), data });
+                            state = await readOriginalRunFinalization();
+                        }
+                        expect(["failed", "cancelled", "paused"]).not.toContain(state.status);
+                        return state.status === "completed" && !["review_pending", "reviewing"].includes(state.reviewStatus || "");
+                    } catch (error) {
+                        finalizationFailed = true;
+                        finalizationFailure = error;
+                        return true;
+                    }
+                },
+                { timeout: info.timeout },
+            )
+            .toBe(true);
         if (finalizationFailed) throw finalizationFailure;
         const afterFinalization = fixture.counts();
         const finalizationDelta = countDelta(beforeFinalization, afterFinalization);
@@ -818,17 +1082,54 @@ async function createNativeCase(page: Page, request: APIRequestContext, info: Te
         expect((await enhancement(request, acceptedOwned.id)).native).toEqual(firstNative.native);
         expect(await mediaSnapshot(root, firstNative.imageTaskId)).toEqual(firstNativeMedia);
         const afterOwner = await readOwnedJob(root, acceptedOwned.id);
-        expect(afterOwner).toMatchObject({ workerId: acceptedOwned.workerId, leaseToken: acceptedOwned.leaseToken, remoteKey: acceptedOwned.remoteKey, remotePlan: acceptedOwned.remotePlan, receiptId: acceptedOwned.receiptId, submittedAt: acceptedOwned.submittedAt });
+        expect(afterOwner).toMatchObject({
+            workerId: acceptedOwned.workerId,
+            leaseToken: acceptedOwned.leaseToken,
+            remoteKey: acceptedOwned.remoteKey,
+            remotePlan: acceptedOwned.remotePlan,
+            receiptId: acceptedOwned.receiptId,
+            submittedAt: acceptedOwned.submittedAt,
+        });
         expect(afterOwner).not.toHaveProperty("remoteJobId");
         const heldLedger = await fixture.snapshot();
         expect(heldLedger.jobs).toHaveLength(1);
         expect(heldLedger.jobs[0].jobId).toBe(acceptedJob.jobId);
         expect(heldLedger.calls.filter((call: { method: string; path: string }) => call.method === "POST" && call.path === "/v1/enhancement-jobs")).toEqual([expect.objectContaining({ jobId: acceptedJob.jobId, responseStatus: null, closedAt: null })]);
         expect(sha256(await readFile(path.resolve("src/lib/server/generation-task-store.ts")))).toBe(finalizationStoreSourceSha256);
-        await evidence(info, "restart-original-native-finalization-window", { runId: run.id, finalizationStoreSourceSha256, firstRemoteJob: acceptedJob, firstAcceptedNative: { public: firstNative, task: firstNativeTask, media: firstNativeMedia, decoded: firstDecoded, owner: acceptedOwned }, ownerAfterFinalization: afterOwner, stateBeforeFinalization, stateAfterFinalization: await readOriginalRunFinalization(), beforeFinalization, afterFinalization, finalizationDelta, finalizationBatches, scope: "original native run and its first review finish under the first submit's still-live lease; subsequent restart/enhancement windows require all upstream categories to stay zero" });
-    } else await expect.poll(async () => { await advanceWorker(request); return (await runState(request, run.id)).status; }, { timeout: info.timeout }).toBe("completed");
+        await evidence(info, "restart-original-native-finalization-window", {
+            runId: run.id,
+            finalizationStoreSourceSha256,
+            firstRemoteJob: acceptedJob,
+            firstAcceptedNative: { public: firstNative, task: firstNativeTask, media: firstNativeMedia, decoded: firstDecoded, owner: acceptedOwned },
+            ownerAfterFinalization: afterOwner,
+            stateBeforeFinalization,
+            stateAfterFinalization: await readOriginalRunFinalization(),
+            beforeFinalization,
+            afterFinalization,
+            finalizationDelta,
+            finalizationBatches,
+            scope: "original native run and its first review finish under the first submit's still-live lease; subsequent restart/enhancement windows require all upstream categories to stay zero",
+        });
+    } else
+        await expect
+            .poll(
+                async () => {
+                    await advanceWorker(request);
+                    return (await runState(request, run.id)).status;
+                },
+                { timeout: info.timeout },
+            )
+            .toBe("completed");
     let native: CreativeAsset | undefined;
-    await expect.poll(async () => { native = (await assets(request, run.conversationId)).find((asset) => asset.sourceRunId === run.id && asset.metadata?.enhancementId && asset.metadata?.provenance !== "ai_enhanced"); return Boolean(native); }, { timeout: info.timeout }).toBe(true);
+    await expect
+        .poll(
+            async () => {
+                native = (await assets(request, run.conversationId)).find((asset) => asset.sourceRunId === run.id && asset.metadata?.enhancementId && asset.metadata?.provenance !== "ai_enhanced");
+                return Boolean(native);
+            },
+            { timeout: info.timeout },
+        )
+        .toBe(true);
     expect(native).toMatchObject({ width: 1254, height: 1254, metadata: { nativeSource: { width: 1254, height: 1254, sha256: sha256(fixture.native), byteLength: fixture.native.length, provenance: "provider_native" } } });
     const id = String(native!.metadata.enhancementId);
     const initial = skipped || submitCapture ? await enhancement(request, id) : await drive(request, id, (job) => job.status === "running" && job.phase === "poll", info);
@@ -839,7 +1140,16 @@ async function createNativeCase(page: Page, request: APIRequestContext, info: Te
         expect(owned).not.toHaveProperty("remoteJobId");
         expect(owned).not.toHaveProperty("remotePlan");
     } else if (submitCapture) {
-        expect(owned).toMatchObject({ status: "running", phase: "submit", remotePlan: expect.any(Object), submittedAt: expect.any(Number), workerId: submitCapture.workerId, leaseToken: expect.any(String), attempt: 1, decision: { connection: { timeoutMs } } });
+        expect(owned).toMatchObject({
+            status: "running",
+            phase: "submit",
+            remotePlan: expect.any(Object),
+            submittedAt: expect.any(Number),
+            workerId: submitCapture.workerId,
+            leaseToken: expect.any(String),
+            attempt: 1,
+            decision: { connection: { timeoutMs } },
+        });
         expect(owned).not.toHaveProperty("remoteJobId");
     } else expect(owned).toMatchObject({ remoteJobId: expect.any(String), remoteStatus: "running", attempt: 1, decision: { connection: { timeoutMs } } });
     const baselineTask = await nativeTask(request, id);
@@ -861,7 +1171,21 @@ async function createNativeCase(page: Page, request: APIRequestContext, info: Te
     await page.goto(`/create?conversationId=${encodeURIComponent(run.conversationId)}`, { waitUntil: "domcontentloaded" });
     await expect(page.getByTestId("creative-media-result")).toHaveCount(1);
     await page.getByTestId("creative-media-result").getByRole("button", { name: "原图", exact: true }).click();
-    await evidence(info, `persisted-native-before-fault-${caseId}`, { kind: "qualified original byte reuse with controlled normal generation; synthetic enhancement protocol only", caseId, proof, run, native, initial, baselineTask, baselineMedia, baselineLog, generationBefore, generationDelta, upstream: before, remote: await fixture.snapshot() });
+    await evidence(info, `persisted-native-before-fault-${caseId}`, {
+        kind: "qualified original byte reuse with controlled normal generation; synthetic enhancement protocol only",
+        caseId,
+        proof,
+        run,
+        native,
+        initial,
+        baselineTask,
+        baselineMedia,
+        baselineLog,
+        generationBefore,
+        generationDelta,
+        upstream: before,
+        remote: await fixture.snapshot(),
+    });
     return { fixture, root, run, native: native!, id, initial, baselineOwned: owned, baselineTask, baselineMedia, baselineLog, generationBefore, generationDelta, before, browserWorkerRequests };
 }
 
@@ -975,7 +1299,18 @@ async function qualify(request: APIRequestContext, fixture: Fixture) {
 
 async function drive(request: APIRequestContext, id: string, accepts: (job: PublicImageEnhancement) => boolean, info: TestInfo) {
     let job = await enhancement(request, id);
-    await expect.poll(async () => { if (!accepts(job)) { await advanceWorker(request); job = await enhancement(request, id); } return accepts(job); }, { timeout: info.timeout }).toBe(true);
+    await expect
+        .poll(
+            async () => {
+                if (!accepts(job)) {
+                    await advanceWorker(request);
+                    job = await enhancement(request, id);
+                }
+                return accepts(job);
+            },
+            { timeout: info.timeout },
+        )
+        .toBe(true);
     return job;
 }
 async function enhancement(request: APIRequestContext, id: string): Promise<PublicImageEnhancement> {
@@ -1012,7 +1347,10 @@ async function adminSettings(request: APIRequestContext): Promise<ImageEnhanceme
     return (await reply.json()).data;
 }
 async function advanceWorker(request: APIRequestContext, workerId = "m5-business-fault-acceptance", requestTimeout?: number) {
-    const reply = await request.post("/api/maintenance/generation-tasks/run", { headers: { authorization: "Bearer vozeb-pro-e2e-worker-token-separate-32chars", "x-vozeb-pro-worker-id": workerId }, ...(requestTimeout === undefined ? {} : { timeout: requestTimeout }) });
+    const reply = await request.post("/api/maintenance/generation-tasks/run", {
+        headers: { authorization: "Bearer vozeb-pro-e2e-worker-token-separate-32chars", "x-vozeb-pro-worker-id": workerId },
+        ...(requestTimeout === undefined ? {} : { timeout: requestTimeout }),
+    });
     expect(reply.ok()).toBe(true);
     return (await reply.json()).data;
 }

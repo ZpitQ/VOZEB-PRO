@@ -285,7 +285,7 @@ export async function listCreativeAssets(conversationId: string, userId: string,
         const result = await (executor || { query: postgresQuery }).query("SELECT * FROM creative_assets WHERE conversation_id = $1 AND user_id = $2 AND status <> 'deleted' ORDER BY created_at ASC, ordinal ASC", [conversationId, userId]);
         return result.rows.map(mapAsset);
     }
-    return (fileDb || await readRuntimeFile()).assets.filter((item) => item.conversationId === conversationId && item.userId === userId && item.status !== "deleted").sort((a, b) => a.createdAt - b.createdAt || a.ordinal - b.ordinal);
+    return (fileDb || (await readRuntimeFile())).assets.filter((item) => item.conversationId === conversationId && item.userId === userId && item.status !== "deleted").sort((a, b) => a.createdAt - b.createdAt || a.ordinal - b.ordinal);
 }
 
 export async function listRecentCreativeMediaAssets(conversationId: string, userId: string, limit = 20) {

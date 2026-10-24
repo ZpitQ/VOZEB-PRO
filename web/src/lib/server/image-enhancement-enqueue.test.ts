@@ -11,11 +11,46 @@ import type { FrozenImageEnhancementPolicy } from "./image-enhancement-config";
 
 const userId = "enhancement-enqueue-fixture-owner";
 const pg = process.env.VOZEB_PRO_RUN_POSTGRES_INTEGRATION === "1" && process.env.VOZEB_PRO_ECOMMERCE_ISOLATED_DATABASE === "1";
-const policy: FrozenImageEnhancementPolicy = { revision: "policy-one", enabled: true, connection: { revision: "policy-one", credentialRef: "credential-fixture", serviceId: "service-fixture", timeoutMs: 60_000, model: { id: "model-fixture", binaryVersion: "v1", binarySha256: "b".repeat(64), modelVersion: "v1", modelSha256: "c".repeat(64), nativeScale: 4, allowedTiles: [256], defaultTile: 256, tta: false, gpuId: 0 } } };
+const policy: FrozenImageEnhancementPolicy = {
+    revision: "policy-one",
+    enabled: true,
+    connection: {
+        revision: "policy-one",
+        credentialRef: "credential-fixture",
+        serviceId: "service-fixture",
+        timeoutMs: 60_000,
+        model: { id: "model-fixture", binaryVersion: "v1", binarySha256: "b".repeat(64), modelVersion: "v1", modelSha256: "c".repeat(64), nativeScale: 4, allowedTiles: [256], defaultTile: 256, tta: false, gpuId: 0 },
+    },
+};
 function nativeTask(): ImageTask {
     const id = randomUUID();
-    const media = { resultId: `${id}:1`, enhancementId: `enhancement:${id}:1`, dataUrl: "/api/generation-log-assets/native.png", serverUrl: "/api/generation-log-assets/native.png", width: 1254, height: 1254, bytes: 1000, mimeType: "image/png", nativeSource: { url: "/api/generation-log-assets/native.png", sha256: "a".repeat(64), width: 1254, height: 1254, byteLength: 1000, format: "png", hasAlpha: false, provenance: "provider_native" as const } };
-    return { id, userId, username: "fixture", displayName: "fixture", kind: "generation", source: "image-workbench", status: "running", createdAt: Date.now(), updatedAt: Date.now(), config: { baseUrl: "https://fixture.invalid", apiKey: "system", apiFormat: "openai", model: "fixture", quality: "4k", size: "4096x4096" }, references: [], prompt: "fixture", enhancementPolicy: structuredClone(policy), result: { ...media, results: [media] } };
+    const media = {
+        resultId: `${id}:1`,
+        enhancementId: `enhancement:${id}:1`,
+        dataUrl: "/api/generation-log-assets/native.png",
+        serverUrl: "/api/generation-log-assets/native.png",
+        width: 1254,
+        height: 1254,
+        bytes: 1000,
+        mimeType: "image/png",
+        nativeSource: { url: "/api/generation-log-assets/native.png", sha256: "a".repeat(64), width: 1254, height: 1254, byteLength: 1000, format: "png", hasAlpha: false, provenance: "provider_native" as const },
+    };
+    return {
+        id,
+        userId,
+        username: "fixture",
+        displayName: "fixture",
+        kind: "generation",
+        source: "image-workbench",
+        status: "running",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        config: { baseUrl: "https://fixture.invalid", apiKey: "system", apiFormat: "openai", model: "fixture", quality: "4k", size: "4096x4096" },
+        references: [],
+        prompt: "fixture",
+        enhancementPolicy: structuredClone(policy),
+        result: { ...media, results: [media] },
+    };
 }
 for (const provider of ["file", "postgres"] as const) {
     describe.skipIf(provider === "postgres" && !pg)(`${provider} image completion enhancement outbox`, () => {
@@ -46,7 +81,15 @@ for (const provider of ["file", "postgres"] as const) {
             const task = await createStoredGenerationTask("image", nativeTask(), 60_000);
             const completed = await transitionImageTask(task, ["running"], { status: "success", result: task.result });
             const [job] = await listEnhancementJobsForTask(task.id, userId);
-            expect(job).toMatchObject({ id: task.result!.enhancementId, imageTaskId: task.id, resultId: task.result!.resultId, status: "queued", phase: "prepare", attempt: 1, decision: { status: "queued", source: task.result!.nativeSource, target: { width: 4096, height: 4096 }, inference: { width: 5016, height: 5016 }, connection: policy.connection } });
+            expect(job).toMatchObject({
+                id: task.result!.enhancementId,
+                imageTaskId: task.id,
+                resultId: task.result!.resultId,
+                status: "queued",
+                phase: "prepare",
+                attempt: 1,
+                decision: { status: "queued", source: task.result!.nativeSource, target: { width: 4096, height: 4096 }, inference: { width: 5016, height: 5016 }, connection: policy.connection },
+            });
             expect(completed?.status).toBe("success");
             expect((await getImageTask(task.id))?.result).toEqual(task.result);
             expect(await transitionImageTask(task, ["running"], { status: "success", result: task.result })).toBeNull();

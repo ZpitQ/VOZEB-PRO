@@ -29,18 +29,43 @@ function candidate(userId: string, status: ImageEnhancementJob["status"]): Image
     const id = randomUUID();
     const now = Date.now();
     const decision = planImageEnhancement({
-        nativeValid: true, enabled: status !== "skipped", requested4k: true, protectedContract: false, layered: false,
+        nativeValid: true,
+        enabled: status !== "skipped",
+        requested4k: true,
+        protectedContract: false,
+        layered: false,
         source: { url: `/api/generation-log-assets/${media.source}`, width: 1254, height: 1254, sha256: "a".repeat(64), byteLength: 1000, format: "png", hasAlpha: false, provenance: "provider_native" },
         target: { width: 4096, height: 4096 },
-        connection: { revision: "fixture-policy", credentialRef: "fixture-credential", serviceId: "fixture-service", timeoutMs: 60_000, model: { id: "fixture-model", binaryVersion: "v1", binarySha256: "b".repeat(64), modelVersion: "v1", modelSha256: "c".repeat(64), nativeScale: 4, allowedTiles: [256], defaultTile: 256, tta: false, gpuId: 0 } },
+        connection: {
+            revision: "fixture-policy",
+            credentialRef: "fixture-credential",
+            serviceId: "fixture-service",
+            timeoutMs: 60_000,
+            model: { id: "fixture-model", binaryVersion: "v1", binarySha256: "b".repeat(64), modelVersion: "v1", modelSha256: "c".repeat(64), nativeScale: 4, allowedTiles: [256], defaultTile: 256, tta: false, gpuId: 0 },
+        },
     });
     return {
-        id, userId, imageTaskId, resultId: "fixture-result", decision, status, phase: "completed", reason: decision.reason,
-        attempt: 1, remoteKey: `enhancement:${id}:1`, receiptId: randomUUID(),
+        id,
+        userId,
+        imageTaskId,
+        resultId: "fixture-result",
+        decision,
+        status,
+        phase: "completed",
+        reason: decision.reason,
+        attempt: 1,
+        remoteKey: `enhancement:${id}:1`,
+        receiptId: randomUUID(),
         staged: { ai: artifact(media.stagedAi), delivered: artifact(media.stagedDelivered) },
         publication: { ai: artifact(media.publishedAi), delivered: artifact(media.publishedDelivered), assetId: null, publishedAt: now },
-        events: [], cancelRequested: status === "cancelled", createdAt: now, updatedAt: now,
-        nextPollAt: null, workerId: null, leaseToken: null, leaseUntil: null,
+        events: [],
+        cancelRequested: status === "cancelled",
+        createdAt: now,
+        updatedAt: now,
+        nextPollAt: null,
+        workerId: null,
+        leaseToken: null,
+        leaseUntil: null,
     };
 }
 

@@ -48,7 +48,16 @@ export async function registerAgentTaskAssets(run: AgentRun, task: AgentRunTask,
             ordinal,
             type: task.type,
             title: records.length > 1 ? `${task.title} ${index + 1}` : task.title,
-            metadata: { agentTaskId: task.id, model: task.model, surface: run.surface, projectId: run.projectId, parentAssetIds, ...(ecommerceContinuity ? { ecommerceContinuity } : {}), ...publicResultMetadata(record), ...(task.type === "image" ? publicImageResultEnhancement(record) : {}) },
+            metadata: {
+                agentTaskId: task.id,
+                model: task.model,
+                surface: run.surface,
+                projectId: run.projectId,
+                parentAssetIds,
+                ...(ecommerceContinuity ? { ecommerceContinuity } : {}),
+                ...publicResultMetadata(record),
+                ...(task.type === "image" ? publicImageResultEnhancement(record) : {}),
+            },
         };
         if (task.type === "text") {
             if (textContent) inputs.push({ ...base, textContent });

@@ -171,7 +171,16 @@ describe("image enhancement administrator configuration", () => {
     });
     it("persists the creation-time policy independently of later settings", async () => {
         const enabled = await qualified();
-        const input = { userId: "enhancement-fixture-user", username: "fixture", displayName: "fixture", kind: "generation" as const, source: "image-workbench" as const, config: { baseUrl: "https://fixture.invalid", apiKey: "", apiFormat: "openai" as const, model: "fixture-image", size: "4096x4096" }, prompt: "fixture", references: [] };
+        const input = {
+            userId: "enhancement-fixture-user",
+            username: "fixture",
+            displayName: "fixture",
+            kind: "generation" as const,
+            source: "image-workbench" as const,
+            config: { baseUrl: "https://fixture.invalid", apiKey: "", apiFormat: "openai" as const, model: "fixture-image", size: "4096x4096" },
+            prompt: "fixture",
+            references: [],
+        };
         const original = await createImageTask(input);
         const policy = original.enhancementPolicy!;
         expect(policy).toMatchObject({ revision: enabled.revision, enabled: true, connection: { serviceId, model } });
@@ -251,7 +260,17 @@ describe("image enhancement administrator configuration", () => {
         await configured();
         requests = [];
         capabilityReadiness = [false, true];
-        expect(await check("sample")).toMatchObject({ ready: true, check: { state: "ready", reason: "ready", serviceId, bootId: "boot-fixture", jobId, sample: { input: { width: 2, height: 2 }, inference: { width: 8, height: 8 }, output: { width: 8, height: 8 }, sha256: createHash("sha256").update(image).digest("hex"), byteLength: image.length } } });
+        expect(await check("sample")).toMatchObject({
+            ready: true,
+            check: {
+                state: "ready",
+                reason: "ready",
+                serviceId,
+                bootId: "boot-fixture",
+                jobId,
+                sample: { input: { width: 2, height: 2 }, inference: { width: 8, height: 8 }, output: { width: 8, height: 8 }, sha256: createHash("sha256").update(image).digest("hex"), byteLength: image.length },
+            },
+        });
         expect(capabilityReadiness).toEqual([]);
         expect(requests).toEqual(["GET /v1/capabilities", "GET /v1/self-test", `GET /v1/enhancement-jobs/${jobId}`, `GET /v1/enhancement-jobs/${jobId}/result`, "GET /v1/self-test", "GET /v1/capabilities"]);
     });

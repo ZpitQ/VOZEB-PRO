@@ -236,10 +236,15 @@ function GenerationLogEnhancementSection({ asset }: { asset: GenerationLogAsset 
     const native = enhancement?.native || asset.nativeSource || asset;
     const nativeUrl = browserReadableMediaUrl(enhancement?.native.url || asset.nativeSource?.url || generationLogAssetAccessUrl(asset));
     const reason = enhancement?.reason || skip?.reason;
-    const noEncoding = enhancement?.status === "succeeded" && enhancement.ai && enhancement.enhanced
-        && formatEnhancementSize(enhancement.ai) !== "未取得"
-        && enhancement.ai.width === enhancement.target.width && enhancement.ai.height === enhancement.target.height
-        && enhancement.ai.width === enhancement.enhanced.width && enhancement.ai.height === enhancement.enhanced.height;
+    const noEncoding =
+        enhancement?.status === "succeeded" &&
+        enhancement.ai &&
+        enhancement.enhanced &&
+        formatEnhancementSize(enhancement.ai) !== "未取得" &&
+        enhancement.ai.width === enhancement.target.width &&
+        enhancement.ai.height === enhancement.target.height &&
+        enhancement.ai.width === enhancement.enhanced.width &&
+        enhancement.ai.height === enhancement.enhanced.height;
     return (
         <section className="mt-3 space-y-3" data-testid="generation-log-enhancement" data-result-id={asset.resultId}>
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -277,9 +282,19 @@ function GenerationLogEnhancementSection({ asset }: { asset: GenerationLogAsset 
                             </li>
                         ))}
                     </ol>
-                ) : <span className="text-xs">未取得</span>}
+                ) : (
+                    <span className="text-xs">未取得</span>
+                )}
             </div>
-            {nativeUrl ? <a className="inline-flex rounded border border-stone-300 bg-stone-50 px-2 py-1 text-xs font-medium !text-stone-700 hover:bg-stone-100 dark:border-stone-600 dark:bg-stone-900 dark:!text-stone-200 dark:hover:bg-stone-800" href={`${nativeUrl}${nativeUrl.includes("?") ? "&" : "?"}download=1`} download>下载原图</a> : null}
+            {nativeUrl ? (
+                <a
+                    className="inline-flex rounded border border-stone-300 bg-stone-50 px-2 py-1 text-xs font-medium !text-stone-700 hover:bg-stone-100 dark:border-stone-600 dark:bg-stone-900 dark:!text-stone-200 dark:hover:bg-stone-800"
+                    href={`${nativeUrl}${nativeUrl.includes("?") ? "&" : "?"}download=1`}
+                    download
+                >
+                    下载原图
+                </a>
+            ) : null}
         </section>
     );
 }

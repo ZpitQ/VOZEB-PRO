@@ -15,11 +15,13 @@ test("administrator refreshes independent enhancement facts while preserving ori
         expect(registered.ok()).toBe(true);
         await page.context().addCookies((await request.storageState()).cookies);
     }
-    const native = await sharp({ create: { width: 1254, height: 1254, channels: 3, background: "#b7c1ca" } }).png().toBuffer();
+    const native = await sharp({ create: { width: 1254, height: 1254, channels: 3, background: "#b7c1ca" } })
+        .png()
+        .toBuffer();
     const nativeHash = createHash("sha256").update(native).digest("hex");
     const upload = await request.post("/api/reference-assets", { data: { type: "image", persistent: true, originalName: "admin-enhancement-log-native.png", dataUrl: `data:image/png;base64,${native.toString("base64")}` } });
     expect(upload.ok(), "The isolated authenticated media fixture must upload successfully").toBe(true);
-    const uploaded = await upload.json() as { url: string; bytes: number; mimeType: string };
+    const uploaded = (await upload.json()) as { url: string; bytes: number; mimeType: string };
     expect(uploaded.url).toMatch(/^\/api\/reference-assets\/permanent\//);
     expect(uploaded.bytes).toBe(native.length);
     expect(uploaded.mimeType).toBe("image/png");
@@ -28,14 +30,51 @@ test("administrator refreshes independent enhancement facts while preserving ori
     let listReads = 0;
     const unexpected: string[] = [];
     const summary = (): PublicImageEnhancement => ({
-        id: "fixture-enhancement", imageTaskId: "fixture-image-task", resultId: "fixture-result-one", status: completed ? "succeeded" : "running", phase: completed ? "receipt" : "poll", reason: null, attempt: 2,
-        native: { url: nativeUrl, width: 1254, height: 1254, byteLength: native.length, sha256: nativeHash, format: "png", provenance: "provider_native" }, plannedInference: { width: 5016, height: 5016 }, target: { width: 4096, height: 4096 }, model: { id: "fixture-model", binaryVersion: "binary-v2", modelVersion: "model-v3" },
+        id: "fixture-enhancement",
+        imageTaskId: "fixture-image-task",
+        resultId: "fixture-result-one",
+        status: completed ? "succeeded" : "running",
+        phase: completed ? "receipt" : "poll",
+        reason: null,
+        attempt: 2,
+        native: { url: nativeUrl, width: 1254, height: 1254, byteLength: native.length, sha256: nativeHash, format: "png", provenance: "provider_native" },
+        plannedInference: { width: 5016, height: 5016 },
+        target: { width: 4096, height: 4096 },
+        model: { id: "fixture-model", binaryVersion: "binary-v2", modelVersion: "model-v3" },
         timings: completed ? { workerQueueMs: 0, workerExecutionMs: 500.25, deliveryEncodingMs: 2.75 } : { workerQueueMs: 0, workerExecutionMs: 125.5 },
-        ...(completed ? { ai: { width: 5016, height: 5016, byteLength: 5000, sha256: "b".repeat(64), format: "png" }, enhanced: { url: "/api/generation-log-assets/fixture-delivered.png", width: 4096, height: 4096, byteLength: 4000, sha256: "c".repeat(64), format: "png", assetId: "fixture-child" } } : {}),
-        events: [{ stage: "prepared", at: 1000, attempt: 2 }, { stage: completed ? "published" : "worker_running", at: 2000, attempt: 2 }], canRetry: false, canCancel: !completed,
+        ...(completed
+            ? {
+                  ai: { width: 5016, height: 5016, byteLength: 5000, sha256: "b".repeat(64), format: "png" },
+                  enhanced: { url: "/api/generation-log-assets/fixture-delivered.png", width: 4096, height: 4096, byteLength: 4000, sha256: "c".repeat(64), format: "png", assetId: "fixture-child" },
+              }
+            : {}),
+        events: [
+            { stage: "prepared", at: 1000, attempt: 2 },
+            { stage: completed ? "published" : "worker_running", at: 2000, attempt: 2 },
+        ],
+        canRetry: false,
+        canCancel: !completed,
     });
     const fixtureLog = (): StoredGenerationLog => ({
-        id: "fixture-admin-log", userId: "fixture-owner", accountId: "0001", username: "creator", displayName: "创作者", kind: "image", source: "image-workbench", status: "success", title: "管理员增强日志夹具", prompt: "公开需求", model: "image-model", summary: "完成", durationMs: 1000, count: 3, successCount: 3, failCount: 0, taskId: "fixture-image-task", createdAt: "2026-10-23T00:00:00.000Z", updatedAt: "2026-10-23T00:00:01.000Z",
+        id: "fixture-admin-log",
+        userId: "fixture-owner",
+        accountId: "0001",
+        username: "creator",
+        displayName: "创作者",
+        kind: "image",
+        source: "image-workbench",
+        status: "success",
+        title: "管理员增强日志夹具",
+        prompt: "公开需求",
+        model: "image-model",
+        summary: "完成",
+        durationMs: 1000,
+        count: 3,
+        successCount: 3,
+        failCount: 0,
+        taskId: "fixture-image-task",
+        createdAt: "2026-10-23T00:00:00.000Z",
+        updatedAt: "2026-10-23T00:00:01.000Z",
         assets: [
             { type: "image", url: nativeUrl, width: 1254, height: 1254, bytes: native.length, resultId: "fixture-result-one", enhancementId: "fixture-enhancement", enhancement: summary() },
             { type: "image", url: nativeUrl, width: 1254, height: 1254, resultId: "fixture-result-two", enhancementSkip: { status: "skipped", reason: "protected_contract" } },
@@ -77,7 +116,8 @@ test("administrator refreshes independent enhancement facts while preserving ori
     await expect.poll(() => listReads).toBeGreaterThan(previousReads);
     await row.getByRole("button", { name: "详情", exact: true }).click();
     await expect(first.getByRole("status")).toHaveText("增强成功");
-    for (const text of ["确认接收", "原生实际尺寸", "1254 × 1254", "完整 AI 实际尺寸", "实际交付尺寸", "fixture-model", "binary-v2", "model-v3", "第 2 次尝试", "交付已保存", "0 ms", "500.25 ms", "2.75 ms"]) await expect(first.getByText(text, { exact: true }).first()).toBeVisible();
+    for (const text of ["确认接收", "原生实际尺寸", "1254 × 1254", "完整 AI 实际尺寸", "实际交付尺寸", "fixture-model", "binary-v2", "model-v3", "第 2 次尝试", "交付已保存", "0 ms", "500.25 ms", "2.75 ms"])
+        await expect(first.getByText(text, { exact: true }).first()).toBeVisible();
     await expect(first.getByText("5016 × 5016", { exact: true })).toHaveCount(2);
     await expect(first.getByText("4096 × 4096", { exact: true })).toHaveCount(2);
     await expect(modal.getByText("成功 3 / 失败 0 / 共 3", { exact: true })).toBeVisible();
@@ -87,9 +127,15 @@ test("administrator refreshes independent enhancement facts while preserving ori
     expect(await download.failure()).toBeNull();
     const downloadedPath = info.outputPath("native-download.png");
     await download.saveAs(downloadedPath);
-    expect(createHash("sha256").update(await readFile(downloadedPath)).digest("hex")).toBe(nativeHash);
+    expect(
+        createHash("sha256")
+            .update(await readFile(downloadedPath))
+            .digest("hex"),
+    ).toBe(nativeHash);
     expect(new URL(download.url()).pathname).toBe(nativeUrl);
-    const bounds = await first.locator(".grid").evaluate((element) => ({ display: getComputedStyle(element).display, children: [...element.children].map((child) => ({ left: child.getBoundingClientRect().left, width: child.getBoundingClientRect().width })) }));
+    const bounds = await first
+        .locator(".grid")
+        .evaluate((element) => ({ display: getComputedStyle(element).display, children: [...element.children].map((child) => ({ left: child.getBoundingClientRect().left, width: child.getBoundingClientRect().width })) }));
     expect(bounds.display).toBe("grid");
     expect(bounds.children[1]!.left).toBeGreaterThan(bounds.children[0]!.left);
     expect(await modal.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);

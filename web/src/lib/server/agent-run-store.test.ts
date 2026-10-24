@@ -296,15 +296,60 @@ describe("explicit saved native and published enhancement baselines", () => {
     });
 
     it.each<[string, (history: ReturnType<typeof generatedImageHistory>) => void]>([
-        ["failed native task", (history) => { history.imageTask.status = "error"; }],
-        ["different native task owner", (history) => { history.imageTask.userId = "other-user"; }],
-        ["different native task conversation", (history) => { history.imageTask.conversationId = "other-conversation"; }],
-        ["different native task run", (history) => { history.imageTask.runId = "other-run"; }],
-        ["unregistered native asset", (history) => { history.run.assetIds = []; }],
-        ["unknown saved result", (history) => { history.imageTask.result.resultId = "other-result"; }],
-        ["different native delivery", (history) => { history.imageTask.result.serverUrl = "/api/generation-log-assets/different.png"; }],
-        ["different native canvas", (history) => { history.imageTask.result.width = 4096; }],
-        ["non-native persisted provenance", (history) => { history.imageTask.result.nativeSource.provenance = "ai_enhanced"; }],
+        [
+            "failed native task",
+            (history) => {
+                history.imageTask.status = "error";
+            },
+        ],
+        [
+            "different native task owner",
+            (history) => {
+                history.imageTask.userId = "other-user";
+            },
+        ],
+        [
+            "different native task conversation",
+            (history) => {
+                history.imageTask.conversationId = "other-conversation";
+            },
+        ],
+        [
+            "different native task run",
+            (history) => {
+                history.imageTask.runId = "other-run";
+            },
+        ],
+        [
+            "unregistered native asset",
+            (history) => {
+                history.run.assetIds = [];
+            },
+        ],
+        [
+            "unknown saved result",
+            (history) => {
+                history.imageTask.result.resultId = "other-result";
+            },
+        ],
+        [
+            "different native delivery",
+            (history) => {
+                history.imageTask.result.serverUrl = "/api/generation-log-assets/different.png";
+            },
+        ],
+        [
+            "different native canvas",
+            (history) => {
+                history.imageTask.result.width = 4096;
+            },
+        ],
+        [
+            "non-native persisted provenance",
+            (history) => {
+                history.imageTask.result.nativeSource.provenance = "ai_enhanced";
+            },
+        ],
     ])("rejects explicit ordinary metadata backed by %s", async (_reason, invalidate) => {
         const history = generatedImageHistory();
         invalidate(history);
@@ -323,17 +368,72 @@ describe("explicit saved native and published enhancement baselines", () => {
     });
 
     it.each<[string, (history: ReturnType<typeof generatedImageHistory>) => void]>([
-        ["failed publication", (history) => { history.publication.status = "failed"; }],
-        ["different publication owner", (history) => { history.publication.userId = "other-user"; }],
-        ["different published child", (history) => { history.publication.publication.assetId = "other-child"; }],
-        ["different source task", (history) => { history.publication.imageTaskId = "other-task"; }],
-        ["different source result", (history) => { history.publication.resultId = "other-result"; }],
-        ["different native digest", (history) => { history.publication.decision.source.sha256 = "3".repeat(64); }],
-        ["different delivery URL", (history) => { history.publication.publication.delivered.url = "/api/generation-log-assets/different.png"; }],
-        ["different delivery dimensions", (history) => { history.publication.publication.delivered.width = 2048; }],
-        ["different delivery bytes", (history) => { history.publication.publication.delivered.byteLength += 1; }],
-        ["different delivery digest", (history) => { history.publication.publication.delivered.sha256 = "3".repeat(64); }],
-        ["different parent asset", (history) => { history.enhanced.parentAssetId = "unknown-parent"; }],
+        [
+            "failed publication",
+            (history) => {
+                history.publication.status = "failed";
+            },
+        ],
+        [
+            "different publication owner",
+            (history) => {
+                history.publication.userId = "other-user";
+            },
+        ],
+        [
+            "different published child",
+            (history) => {
+                history.publication.publication.assetId = "other-child";
+            },
+        ],
+        [
+            "different source task",
+            (history) => {
+                history.publication.imageTaskId = "other-task";
+            },
+        ],
+        [
+            "different source result",
+            (history) => {
+                history.publication.resultId = "other-result";
+            },
+        ],
+        [
+            "different native digest",
+            (history) => {
+                history.publication.decision.source.sha256 = "3".repeat(64);
+            },
+        ],
+        [
+            "different delivery URL",
+            (history) => {
+                history.publication.publication.delivered.url = "/api/generation-log-assets/different.png";
+            },
+        ],
+        [
+            "different delivery dimensions",
+            (history) => {
+                history.publication.publication.delivered.width = 2048;
+            },
+        ],
+        [
+            "different delivery bytes",
+            (history) => {
+                history.publication.publication.delivered.byteLength += 1;
+            },
+        ],
+        [
+            "different delivery digest",
+            (history) => {
+                history.publication.publication.delivered.sha256 = "3".repeat(64);
+            },
+        ],
+        [
+            "different parent asset",
+            (history) => {
+                history.enhanced.parentAssetId = "unknown-parent";
+            },
+        ],
     ])("rejects an enhancement child with %s", async (_reason, invalidate) => {
         const history = generatedImageHistory();
         invalidate(history);
@@ -372,23 +472,69 @@ function generatedImageHistory(resultSlot = 1) {
     const url = "/api/generation-log-assets/native.png";
     const nativeSource = { url, sha256: "1".repeat(64), width: 1254, height: 1254, byteLength: 1000, format: "png", hasAlpha: false, provenance: "provider_native" };
     const result = { resultId: `image-native:${resultSlot}`, enhancementId: `enhancement:image-native:${resultSlot}`, dataUrl: url, serverUrl: url, width: 1254, height: 1254, bytes: 1000, mimeType: "image/png", nativeSource };
-    const run: AgentRun = { ...canvasRun(), id: "ordinary-run", surface: "chat", status: "completed", assetIds: ["native-asset"], tasks: [{ ...canvasRun().tasks[0], status: "completed", taskId: "image-native", taskIds: ["image-native"], assetIds: ["native-asset"], result: structuredClone(result), childTasks: [{ id: "image-native", status: "completed", attempt: 1, result: structuredClone(result) }] }] };
+    const run: AgentRun = {
+        ...canvasRun(),
+        id: "ordinary-run",
+        surface: "chat",
+        status: "completed",
+        assetIds: ["native-asset"],
+        tasks: [
+            {
+                ...canvasRun().tasks[0],
+                status: "completed",
+                taskId: "image-native",
+                taskIds: ["image-native"],
+                assetIds: ["native-asset"],
+                result: structuredClone(result),
+                childTasks: [{ id: "image-native", status: "completed", attempt: 1, result: structuredClone(result) }],
+            },
+        ],
+    };
     const imageTask = { id: "image-native", userId: "user", conversationId: "conversation", runId: run.id, surface: "chat", status: "success", result };
-    const native = { id: "native-asset", userId: "user", conversationId: "conversation", sourceRunId: run.id, sourceTaskId: imageTask.id, ordinal: 0, type: "image", status: "ready", serverUrl: url, width: 1254, height: 1254, bytes: 1000, metadata: { resultId: result.resultId, enhancementId: result.enhancementId, nativeSource: structuredClone(nativeSource) } };
+    const native = {
+        id: "native-asset",
+        userId: "user",
+        conversationId: "conversation",
+        sourceRunId: run.id,
+        sourceTaskId: imageTask.id,
+        ordinal: 0,
+        type: "image",
+        status: "ready",
+        serverUrl: url,
+        width: 1254,
+        height: 1254,
+        bytes: 1000,
+        metadata: { resultId: result.resultId, enhancementId: result.enhancementId, nativeSource: structuredClone(nativeSource) },
+    };
     const delivered = { url: "/api/generation-log-assets/enhanced.png", width: 4096, height: 4096, byteLength: 2000, sha256: "2".repeat(64), format: "png" };
     const publication = {
-        id: result.enhancementId, userId: "user", imageTaskId: imageTask.id, resultId: result.resultId, status: "succeeded", phase: "receipt",
+        id: result.enhancementId,
+        userId: "user",
+        imageTaskId: imageTask.id,
+        resultId: result.resultId,
+        status: "succeeded",
+        phase: "receipt",
         decision: { status: "queued", reason: null, source: structuredClone(nativeSource), target: { width: 4096, height: 4096 } },
         publication: { assetId: "enhanced-asset", delivered, ai: { ...delivered, url: "/api/generation-log-assets/complete-ai.png", width: 5016, height: 5016, sha256: "4".repeat(64) }, publishedAt: 3 },
     };
-    const enhanced = { ...native, id: "enhanced-asset", sourceTaskId: publication.id, parentAssetId: native.id, serverUrl: delivered.url, width: delivered.width, height: delivered.height, bytes: delivered.byteLength, metadata: { provenance: "ai_enhanced", enhancementId: publication.id, parentResultId: result.resultId, parentAssetIds: [native.id], nativeSha256: nativeSource.sha256, sha256: delivered.sha256 } };
+    const enhanced = {
+        ...native,
+        id: "enhanced-asset",
+        sourceTaskId: publication.id,
+        parentAssetId: native.id,
+        serverUrl: delivered.url,
+        width: delivered.width,
+        height: delivered.height,
+        bytes: delivered.byteLength,
+        metadata: { provenance: "ai_enhanced", enhancementId: publication.id, parentResultId: result.resultId, parentAssetIds: [native.id], nativeSha256: nativeSource.sha256, sha256: delivered.sha256 },
+    };
     return { run, imageTask, native, enhanced, publication };
 }
 
 function bindGeneratedImageHistory(history: ReturnType<typeof generatedImageHistory>) {
     mocks.queryStoredGenerationTasks.mockResolvedValue([history.run]);
-    mocks.getStoredGenerationTask.mockImplementation(async (type: string, id: string) => type === "agent" && id === history.run.id ? history.run : type === "image" && id === history.imageTask.id ? history.imageTask : null);
-    mocks.getEnhancementJob.mockImplementation(async (id: string) => id === history.publication.id ? history.publication : null);
+    mocks.getStoredGenerationTask.mockImplementation(async (type: string, id: string) => (type === "agent" && id === history.run.id ? history.run : type === "image" && id === history.imageTask.id ? history.imageTask : null));
+    mocks.getEnhancementJob.mockImplementation(async (id: string) => (id === history.publication.id ? history.publication : null));
     mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[]) => [history.native, history.enhanced].filter((asset) => ids.includes(asset.id)));
 }
 

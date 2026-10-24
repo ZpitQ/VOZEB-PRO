@@ -13,7 +13,8 @@ export function planImageTaskEnhancement(task: ImageTask, result: NonNullable<Im
         enabled: task.enhancementPolicy?.enabled ?? false,
         requested4k: resolveResultSize(task.config.quality, "1:1") === resolveResultSize("4k", "1:1"),
         protectedContract: Boolean(task.ecommerceExecution?.canvas || task.sceneProtection || task.productProtection || task.mask),
-        layered: task.config.outputMode === "layers", source,
+        layered: task.config.outputMode === "layers",
+        source,
         target: parseImageDimensions(resolveResultSize(task.config.quality, task.config.size || "auto") || "") || { width: 0, height: 0 },
         connection: task.enhancementPolicy?.connection ?? null,
     });
@@ -27,13 +28,25 @@ export async function enqueueImageEnhancement(task: ImageTask, executor?: QueryE
         const decision = planImageTaskEnhancement(task, result);
         const now = task.updatedAt;
         const job: ImageEnhancementJob = {
-            id: result.enhancementId, userId: task.userId, imageTaskId: task.id, resultId: result.resultId, decision,
+            id: result.enhancementId,
+            userId: task.userId,
+            imageTaskId: task.id,
+            resultId: result.resultId,
+            decision,
             status: decision.status === "rejected" ? "failed" : decision.status,
-            phase: decision.status === "queued" ? "prepare" : "completed", reason: decision.reason,
-            attempt: 1, remoteKey: `${result.enhancementId}:1`, receiptId: randomUUID(),
+            phase: decision.status === "queued" ? "prepare" : "completed",
+            reason: decision.reason,
+            attempt: 1,
+            remoteKey: `${result.enhancementId}:1`,
+            receiptId: randomUUID(),
             events: [{ stage: decision.status, at: now, attempt: 1, ...(decision.reason ? { reason: decision.reason } : {}) }],
-            cancelRequested: false, createdAt: now, updatedAt: now, nextPollAt: decision.status === "queued" ? now : null,
-            workerId: null, leaseToken: null, leaseUntil: null,
+            cancelRequested: false,
+            createdAt: now,
+            updatedAt: now,
+            nextPollAt: decision.status === "queued" ? now : null,
+            workerId: null,
+            leaseToken: null,
+            leaseUntil: null,
         };
         await insertEnhancementJob(job, executor);
     }

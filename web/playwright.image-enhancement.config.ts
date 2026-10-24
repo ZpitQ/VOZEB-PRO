@@ -36,16 +36,18 @@ export default defineConfig({
     webServer: servers.map((server, index) => ({
         ...server,
         reuseExistingServer: false,
-        ...(index === servers.length - 1 ? {
-            command: `pnpm exec next dev --hostname 127.0.0.1 --port ${process.env.VOZEB_PRO_E2E_PORT}`,
-            env: {
-                ...server.env,
-                VOZEB_PRO_DATA_DIR: data,
-                VOZEB_PRO_DATABASE_PROVIDER: "file",
-                DATABASE_URL: "",
-                VOZEB_PRO_M5_BUSINESS_PRELOAD: "1",
-                NODE_OPTIONS: `--import=${preload}`,
-            },
-        } : {}),
+        ...(index === servers.length - 1
+            ? {
+                  command: `pnpm exec next dev --hostname 127.0.0.1 --port ${process.env.VOZEB_PRO_E2E_PORT}`,
+                  env: {
+                      ...server.env,
+                      VOZEB_PRO_DATA_DIR: data,
+                      VOZEB_PRO_DATABASE_PROVIDER: "file",
+                      DATABASE_URL: "",
+                      VOZEB_PRO_M5_BUSINESS_PRELOAD: "1",
+                      NODE_OPTIONS: `--import=${preload}`,
+                  },
+              }
+            : {}),
     })),
 });

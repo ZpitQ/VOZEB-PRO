@@ -13,7 +13,36 @@ const now = 1000;
 const leaseMs = 90_000;
 function candidate(): ImageEnhancementJob {
     const id = randomUUID();
-    return { id, userId, imageTaskId: "fixture-task", resultId: "fixture-result", decision: planImageEnhancement({ nativeValid: true, enabled: false, requested4k: true, protectedContract: false, layered: false, source: { url: "/api/generation-log-assets/images/fixture.png", width: 1254, height: 1254, sha256: "a".repeat(64), byteLength: 1000, format: "png", hasAlpha: false, provenance: "provider_native" }, target: { width: 4096, height: 4096 }, connection: null }), status: "queued", phase: "prepare", reason: null, attempt: 1, remoteKey: `enhancement:${id}:1`, receiptId: randomUUID(), events: [], cancelRequested: false, createdAt: now, updatedAt: now, nextPollAt: now, workerId: null, leaseToken: null, leaseUntil: null };
+    return {
+        id,
+        userId,
+        imageTaskId: "fixture-task",
+        resultId: "fixture-result",
+        decision: planImageEnhancement({
+            nativeValid: true,
+            enabled: false,
+            requested4k: true,
+            protectedContract: false,
+            layered: false,
+            source: { url: "/api/generation-log-assets/images/fixture.png", width: 1254, height: 1254, sha256: "a".repeat(64), byteLength: 1000, format: "png", hasAlpha: false, provenance: "provider_native" },
+            target: { width: 4096, height: 4096 },
+            connection: null,
+        }),
+        status: "queued",
+        phase: "prepare",
+        reason: null,
+        attempt: 1,
+        remoteKey: `enhancement:${id}:1`,
+        receiptId: randomUUID(),
+        events: [],
+        cancelRequested: false,
+        createdAt: now,
+        updatedAt: now,
+        nextPollAt: now,
+        workerId: null,
+        leaseToken: null,
+        leaseUntil: null,
+    };
 }
 for (const provider of ["file", "postgres"] as const) {
     describe.skipIf(provider === "postgres" && !pg)(`${provider} durable enhancement queue`, () => {
@@ -93,27 +122,39 @@ for (const provider of ["file", "postgres"] as const) {
         });
         it("rolls back failed mutations and rejects identity changes", async () => {
             const original = await insertEnhancementJob(candidate());
-            await expect(mutateEnhancementJob(original.id, userId, (job) => { job.reason = "uncommitted"; throw new Error("fixture rollback"); })).rejects.toThrow("fixture rollback");
+            await expect(
+                mutateEnhancementJob(original.id, userId, (job) => {
+                    job.reason = "uncommitted";
+                    throw new Error("fixture rollback");
+                }),
+            ).rejects.toThrow("fixture rollback");
             expect(await getEnhancementJob(original.id, userId)).toEqual(original);
             await expect(mutateEnhancementJob(original.id, userId, (job) => ({ ...job, resultId: "different-result" }))).rejects.toThrow("enhancement_identity_conflict");
         });
         it("awaits asynchronous durable effects before persisting a leased mutation", async () => {
             const original = await insertEnhancementJob(candidate());
             const [claimed] = await claimEnhancementJobs({ workerId: "worker-a", now, leaseMs, limit: 1 });
-            const changed = await mutateEnhancementJob(original.id, userId, async (job, executor) => {
-                await Promise.resolve();
-                expect(Boolean(executor)).toBe(provider === "postgres");
-                return { ...job, reason: "effect_committed" };
-            }, { token: claimed.leaseToken!, now });
+            const changed = await mutateEnhancementJob(
+                original.id,
+                userId,
+                async (job, executor) => {
+                    await Promise.resolve();
+                    expect(Boolean(executor)).toBe(provider === "postgres");
+                    return { ...job, reason: "effect_committed" };
+                },
+                { token: claimed.leaseToken!, now },
+            );
             expect(changed?.reason).toBe("effect_committed");
             expect((await getEnhancementJob(original.id, userId))?.reason).toBe("effect_committed");
         });
         it("does not persist a mutation when its asynchronous effect fails", async () => {
             const original = await insertEnhancementJob(candidate());
-            await expect(mutateEnhancementJob(original.id, userId, async () => {
-                await Promise.resolve();
-                throw new Error("fixture asynchronous effect failed");
-            })).rejects.toThrow("fixture asynchronous effect failed");
+            await expect(
+                mutateEnhancementJob(original.id, userId, async () => {
+                    await Promise.resolve();
+                    throw new Error("fixture asynchronous effect failed");
+                }),
+            ).rejects.toThrow("fixture asynchronous effect failed");
             expect(await getEnhancementJob(original.id, userId)).toEqual(original);
         });
         it("keeps the frozen native reference immutable during later mutations", async () => {

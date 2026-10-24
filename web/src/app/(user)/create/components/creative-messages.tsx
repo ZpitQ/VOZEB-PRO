@@ -354,7 +354,12 @@ function CreativeMediaRound({
                                     ) : null}
                                 </>
                             ) : mediaOutputs.length ? (
-                                <CreativeMediaResult assets={mediaOutputs} fallbackRatio={run?.tasks.find((task) => task.type === "image")?.ratio || run?.generationPreferences?.image?.size} renderActions={renderRoundActions} onEnhancementComplete={onEnhancementComplete} />
+                                <CreativeMediaResult
+                                    assets={mediaOutputs}
+                                    fallbackRatio={run?.tasks.find((task) => task.type === "image")?.ratio || run?.generationPreferences?.image?.size}
+                                    renderActions={renderRoundActions}
+                                    onEnhancementComplete={onEnhancementComplete}
+                                />
                             ) : assistantMessage.status === "completed" && textOutputs.length ? (
                                 <CreativeRoundActions outputAssets={outputAssets} run={run} selectedAssetIds={selectedAssetIds} onToggleAsset={onToggleAsset} />
                             ) : null}
@@ -590,7 +595,7 @@ function CreativeRoundActions({ outputAssets, activeAsset, run, selectedAssetIds
     const copyText = useCopyText();
     const [copyingPrompt, setCopyingPrompt] = useState(false);
     const downloads = agentAssetDownloads(activeAsset ? [activeAsset] : outputAssets);
-    const allDownloads = agentAssetDownloads(creativeMediaResultGroups(outputAssets).map((group) => activeAsset && (activeAsset.id === group.original.id || activeAsset.id === group.enhanced?.id) ? activeAsset : group.enhanced || group.original));
+    const allDownloads = agentAssetDownloads(creativeMediaResultGroups(outputAssets).map((group) => (activeAsset && (activeAsset.id === group.original.id || activeAsset.id === group.enhanced?.id) ? activeAsset : group.enhanced || group.original)));
     const referenceAction = creativeReferenceAction(activeAsset, selectedAssetIds);
     const primaryDownload = downloads[0];
     const mode = creativeRunMode(run);

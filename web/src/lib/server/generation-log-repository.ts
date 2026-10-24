@@ -392,7 +392,19 @@ export async function insertPostgresGenerationLogAssets(db: QueryExecutor, logId
             INSERT INTO generation_log_assets (generation_log_id, type, url, remote_url, server_url, mime_type, width, height, bytes, sort_order, enhancement_metadata)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
             `,
-            [logId, asset.type, asset.url, asset.remoteUrl || null, asset.serverUrl || null, asset.mimeType || null, asset.width || null, asset.height || null, asset.bytes || null, index, JSON.stringify(asset.type === "image" ? publicImageResultEnhancement(asset) : {})],
+            [
+                logId,
+                asset.type,
+                asset.url,
+                asset.remoteUrl || null,
+                asset.serverUrl || null,
+                asset.mimeType || null,
+                asset.width || null,
+                asset.height || null,
+                asset.bytes || null,
+                index,
+                JSON.stringify(asset.type === "image" ? publicImageResultEnhancement(asset) : {}),
+            ],
         );
     }
 }

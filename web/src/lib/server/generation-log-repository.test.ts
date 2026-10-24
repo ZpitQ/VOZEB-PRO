@@ -43,9 +43,20 @@ describe("generation log asset normalization", () => {
 
     it("retains public enhancement identities and native facts without copying nested private data or rewriting permanent media", async () => {
         const nativeSource = { url: "/api/generation-log-assets/native.png", width: 1254, height: 1254, byteLength: 1200, sha256: "a".repeat(64), format: "png", hasAlpha: false, provenance: "provider_native" as const };
-        const asset = { type: "image" as const, url: nativeSource.url, resultId: "task-one:result-one", enhancementId: "enhancement-one", nativeSource: { ...nativeSource, evidencePath: "private-native-path" }, enhancement: { token: "private-stale-summary" }, credentialRef: "private-credential" };
+        const asset = {
+            type: "image" as const,
+            url: nativeSource.url,
+            resultId: "task-one:result-one",
+            enhancementId: "enhancement-one",
+            nativeSource: { ...nativeSource, evidencePath: "private-native-path" },
+            enhancement: { token: "private-stale-summary" },
+            credentialRef: "private-credential",
+        };
 
-        for (const actual of [(await normalizeAssets([asset as unknown as Parameters<typeof normalizeAssets>[0][number]], { ownerUserId: "user-one", source: "agent" }))[0], normalizeStoredAsset(asset as unknown as Parameters<typeof normalizeStoredAsset>[0])]) {
+        for (const actual of [
+            (await normalizeAssets([asset as unknown as Parameters<typeof normalizeAssets>[0][number]], { ownerUserId: "user-one", source: "agent" }))[0],
+            normalizeStoredAsset(asset as unknown as Parameters<typeof normalizeStoredAsset>[0]),
+        ]) {
             expect(actual).toMatchObject({ resultId: asset.resultId, enhancementId: asset.enhancementId, nativeSource });
             expect(JSON.stringify(actual)).not.toContain("private-");
             expect(actual).not.toHaveProperty("enhancement");
@@ -55,7 +66,14 @@ describe("generation log asset normalization", () => {
     });
 
     it("reuses already persisted media even when its remote source URL is also present", async () => {
-        const asset = { type: "image" as const, url: "https://cdn.example.com/native.png", remoteUrl: "https://cdn.example.com/native.png", serverUrl: "/api/generation-log-assets/native.png", resultId: "native-result-one", enhancementId: "enhancement-one" };
+        const asset = {
+            type: "image" as const,
+            url: "https://cdn.example.com/native.png",
+            remoteUrl: "https://cdn.example.com/native.png",
+            serverUrl: "/api/generation-log-assets/native.png",
+            resultId: "native-result-one",
+            enhancementId: "enhancement-one",
+        };
         const [actual] = await normalizeAssets([asset], { ownerUserId: "user-one", source: "agent" });
         expect(actual).toMatchObject({ url: asset.serverUrl, serverUrl: asset.serverUrl, resultId: asset.resultId, enhancementId: asset.enhancementId });
         expect(mocks.fetchSafeOutbound).not.toHaveBeenCalled();
@@ -74,7 +92,10 @@ describe("generation log asset normalization", () => {
         const image = { type: "image" as const, url: "/api/generation-log-assets/native.png", enhancementSkip: { status: "skipped", reason: "private-arbitrary-reason" } };
         expect(normalizeStoredAsset(image as unknown as Parameters<typeof normalizeStoredAsset>[0])).not.toHaveProperty("enhancementSkip");
         const video = { ...image, type: "video" as const, resultId: "video-result", enhancementId: "video-enhancement" };
-        for (const actual of [(await normalizeAssets([video as unknown as Parameters<typeof normalizeAssets>[0][number]], { ownerUserId: "user-one", source: "agent" }))[0], normalizeStoredAsset(video as unknown as Parameters<typeof normalizeStoredAsset>[0])]) {
+        for (const actual of [
+            (await normalizeAssets([video as unknown as Parameters<typeof normalizeAssets>[0][number]], { ownerUserId: "user-one", source: "agent" }))[0],
+            normalizeStoredAsset(video as unknown as Parameters<typeof normalizeStoredAsset>[0]),
+        ]) {
             expect(actual).not.toHaveProperty("resultId");
             expect(actual).not.toHaveProperty("enhancementId");
             expect(actual).not.toHaveProperty("enhancementSkip");

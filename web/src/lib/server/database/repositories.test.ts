@@ -844,8 +844,29 @@ describe("split Postgres repositories", () => {
         const timestamp = "2026-01-01T00:00:00.000Z";
         const { executor, query } = mockExecutor([[{ id: "log-one", user_id: "user-one", kind: "image", status: "success", created_at: timestamp, updated_at: timestamp }], [], []]);
         const nativeSource = { url: "/api/generation-log-assets/native.png", width: 1254, height: 1254, byteLength: 1200, sha256: "a".repeat(64), format: "png", hasAlpha: false, provenance: "provider_native" as const };
-        const assets = [{ type: "image" as const, url: nativeSource.url, resultId: "native-result-one", enhancementId: "enhancement-one", nativeSource: { ...nativeSource, evidencePath: "private-native-path" }, enhancement: { token: "private-stale-summary" } }];
-        await createPostgresRepositories(executor).generationLogs.upsert({ id: "log-one", userId: "user-one", username: "user", displayName: "User", kind: "image", source: "image-workbench", status: "success", title: "Image", prompt: "prompt", model: "image-model", summary: "done", durationMs: 1, count: 1, successCount: 1, failCount: 0, assets, createdAt: timestamp, updatedAt: timestamp });
+        const assets = [
+            { type: "image" as const, url: nativeSource.url, resultId: "native-result-one", enhancementId: "enhancement-one", nativeSource: { ...nativeSource, evidencePath: "private-native-path" }, enhancement: { token: "private-stale-summary" } },
+        ];
+        await createPostgresRepositories(executor).generationLogs.upsert({
+            id: "log-one",
+            userId: "user-one",
+            username: "user",
+            displayName: "User",
+            kind: "image",
+            source: "image-workbench",
+            status: "success",
+            title: "Image",
+            prompt: "prompt",
+            model: "image-model",
+            summary: "done",
+            durationMs: 1,
+            count: 1,
+            successCount: 1,
+            failCount: 0,
+            assets,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        });
 
         expect(queryArgs(query, 2)[0]).toContain("enhancement_metadata");
         const parameters = queryArgs(query, 2)[1] as unknown[];
@@ -858,7 +879,20 @@ describe("split Postgres repositories", () => {
         const nativeSource = { url: "/api/generation-log-assets/native.png", width: 1254, height: 1254, byteLength: 1200, sha256: "a".repeat(64), format: "png", hasAlpha: false, provenance: "provider_native" as const };
         const { executor, query } = mockExecutor([
             [{ id: "log-one", user_id: "user-one", kind: "image", status: "success", created_at: timestamp, updated_at: timestamp, total_count: 1 }],
-            [{ generation_log_id: "log-one", type: "image", url: nativeSource.url, enhancement_metadata: { resultId: "native-result-one", enhancementId: "enhancement-one", nativeSource: { ...nativeSource, evidencePath: "private-native-path" }, enhancementSkip: { status: "skipped", reason: "unsupported_layers", raw: "private-skip" }, token: "private-payload" } }],
+            [
+                {
+                    generation_log_id: "log-one",
+                    type: "image",
+                    url: nativeSource.url,
+                    enhancement_metadata: {
+                        resultId: "native-result-one",
+                        enhancementId: "enhancement-one",
+                        nativeSource: { ...nativeSource, evidencePath: "private-native-path" },
+                        enhancementSkip: { status: "skipped", reason: "unsupported_layers", raw: "private-skip" },
+                        token: "private-payload",
+                    },
+                },
+            ],
         ]);
         const result = await createPostgresRepositories(executor).generationLogs.list({ userId: "user-one", pageSize: 1 });
         expect(result.items[0]?.assets[0]).toMatchObject({ resultId: "native-result-one", enhancementId: "enhancement-one", nativeSource, enhancementSkip: { status: "skipped", reason: "unsupported_layers" } });

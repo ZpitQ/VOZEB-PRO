@@ -13,7 +13,36 @@ const pg = process.env.VOZEB_PRO_RUN_POSTGRES_INTEGRATION === "1" && process.env
 type NativeTask = { id: string; userId: string; status: string; createdAt: number; updatedAt: number; result?: { url: string } };
 function enhancement(task: NativeTask): ImageEnhancementJob {
     const id = randomUUID();
-    return { id, userId, imageTaskId: task.id, resultId: `${task.id}:1`, decision: planImageEnhancement({ nativeValid: true, enabled: false, requested4k: true, protectedContract: false, layered: false, source: { url: "/api/generation-log-assets/images/fixture.png", width: 1254, height: 1254, sha256: "a".repeat(64), byteLength: 1000, format: "png", hasAlpha: false, provenance: "provider_native" }, target: { width: 4096, height: 4096 }, connection: null }), status: "skipped", phase: "completed", reason: "disabled", attempt: 1, remoteKey: `enhancement:${id}:1`, receiptId: randomUUID(), events: [], cancelRequested: false, createdAt: Date.now(), updatedAt: Date.now(), nextPollAt: null, workerId: null, leaseToken: null, leaseUntil: null };
+    return {
+        id,
+        userId,
+        imageTaskId: task.id,
+        resultId: `${task.id}:1`,
+        decision: planImageEnhancement({
+            nativeValid: true,
+            enabled: false,
+            requested4k: true,
+            protectedContract: false,
+            layered: false,
+            source: { url: "/api/generation-log-assets/images/fixture.png", width: 1254, height: 1254, sha256: "a".repeat(64), byteLength: 1000, format: "png", hasAlpha: false, provenance: "provider_native" },
+            target: { width: 4096, height: 4096 },
+            connection: null,
+        }),
+        status: "skipped",
+        phase: "completed",
+        reason: "disabled",
+        attempt: 1,
+        remoteKey: `enhancement:${id}:1`,
+        receiptId: randomUUID(),
+        events: [],
+        cancelRequested: false,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        nextPollAt: null,
+        workerId: null,
+        leaseToken: null,
+        leaseUntil: null,
+    };
 }
 for (const provider of ["file", "postgres"] as const) {
     describe.skipIf(provider === "postgres" && !pg)(`${provider} native success and enhancement durability`, () => {
@@ -56,10 +85,12 @@ for (const provider of ["file", "postgres"] as const) {
         });
         it("does not publish native success when its durable effect throws", async () => {
             const candidate = enhancement(task);
-            await expect(transitionStoredGenerationTask<NativeTask>("image", task.id, userId, ["pending"], { status: "success" }, 60_000, undefined, async (_next, executor) => {
-                await insertEnhancementJob(candidate, executor);
-                throw new Error("fixture interrupted completion");
-            })).rejects.toThrow("fixture interrupted completion");
+            await expect(
+                transitionStoredGenerationTask<NativeTask>("image", task.id, userId, ["pending"], { status: "success" }, 60_000, undefined, async (_next, executor) => {
+                    await insertEnhancementJob(candidate, executor);
+                    throw new Error("fixture interrupted completion");
+                }),
+            ).rejects.toThrow("fixture interrupted completion");
             expect((await getStoredGenerationTask<NativeTask>("image", task.id))?.status).toBe("pending");
             // JSON files can retain a pre-success intent; execution must gate it on native success.
             expect(await getEnhancementJob(candidate.id, userId)).toEqual(provider === "postgres" ? null : candidate);

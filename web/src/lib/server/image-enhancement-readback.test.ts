@@ -18,7 +18,9 @@ describe("permanent enhancement readback budget", () => {
     beforeAll(async () => {
         vi.stubEnv("VOZEB_PRO_MAINTENANCE_TOKEN", "m".repeat(32));
         vi.stubEnv("VOZEB_PRO_WORKER_TOKEN", "w".repeat(32));
-        bytes = await sharp({ create: { width: 3200, height: 2400, channels: 3, background: "#736b64" } }).png({ compressionLevel: 0 }).toBuffer();
+        bytes = await sharp({ create: { width: 3200, height: 2400, channels: 3, background: "#736b64" } })
+            .png({ compressionLevel: 0 })
+            .toBuffer();
         expect(bytes.length).toBeGreaterThan(MAX_INLINE_IMAGE_BYTES);
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
         const address = server.address();
@@ -26,7 +28,7 @@ describe("permanent enhancement readback budget", () => {
         origin = `http://127.0.0.1:${address.port}`;
     });
     afterAll(async () => {
-        await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
         vi.unstubAllEnvs();
     });
     for (const transfer of ["length", "chunked"]) {

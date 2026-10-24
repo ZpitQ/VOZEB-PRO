@@ -349,7 +349,9 @@ describe("image task result persistence", () => {
     it("uses the frozen disabled policy for a successful result without creating enhancement work", async () => {
         const task = imageTask({ model: "other-image-model", size: "1:1", quality: "1k" });
         task.enhancementPolicy = { revision: "frozen-disabled", enabled: false, connection: null };
-        const { results: [result] } = await prepare(task, { dataUrl: dataUrl(await imageBytes(8, 8)) }, "http://fixture.local", "fixture");
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(await imageBytes(8, 8)) }, "http://fixture.local", "fixture");
         expect(result).toHaveProperty("enhancementSkip", { status: "skipped", reason: "disabled" });
         expect(result).not.toHaveProperty("nativeSource");
         expect(result).not.toHaveProperty("enhancementId");
@@ -424,14 +426,20 @@ describe("image task result persistence", () => {
     it("keeps the original 4K-native variant unchanged even when it already exceeds the delivery target", async () => {
         const task = imageTask({ model: "other-image-model", size: "1:1", quality: "4k" });
         const source = await imageBytes(4100, 4100);
-        const { results: [result] } = await prepare(task, { dataUrl: dataUrl(source) }, "http://fixture.local", "fixture");
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(source) }, "http://fixture.local", "fixture");
         expect(result).toMatchObject({ width: 4100, height: 4100, bytes: source.length, nativeSource: { width: 4100, height: 4100, byteLength: source.length } });
         expect(await readFile(assetPath(result.serverUrl!))).toEqual(source);
     });
     it.each([0, 1])("records actual transparency rather than the existence of an alpha channel: %s", async (alpha) => {
-        const source = await sharp({ create: { width: 8, height: 8, channels: 4, background: { r: 255, g: 255, b: 255, alpha } } }).png().toBuffer();
+        const source = await sharp({ create: { width: 8, height: 8, channels: 4, background: { r: 255, g: 255, b: 255, alpha } } })
+            .png()
+            .toBuffer();
         const task = imageTask({ model: "other-image-model", size: "1:1", quality: "4k" });
-        const { results: [result] } = await prepare(task, { dataUrl: dataUrl(source) }, "http://fixture.local", "fixture");
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(source) }, "http://fixture.local", "fixture");
         expect(result.nativeSource).toMatchObject({ hasAlpha: alpha === 0, width: 8, height: 8 });
         expect(await readFile(assetPath(result.serverUrl!))).toEqual(source);
     });

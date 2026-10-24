@@ -5,7 +5,21 @@ import { join } from "node:path";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ resolve: vi.fn(), prepare: vi.fn(), submit: vi.fn(), query: vi.fn(), download: vi.fn(), acknowledge: vi.fn(), cancel: vi.fn(), close: vi.fn(), readSource: vi.fn(), store: vi.fn(), beforeWrite: vi.fn(), snapshotRequested: vi.fn(), enterLock: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+    resolve: vi.fn(),
+    prepare: vi.fn(),
+    submit: vi.fn(),
+    query: vi.fn(),
+    download: vi.fn(),
+    acknowledge: vi.fn(),
+    cancel: vi.fn(),
+    close: vi.fn(),
+    readSource: vi.fn(),
+    store: vi.fn(),
+    beforeWrite: vi.fn(),
+    snapshotRequested: vi.fn(),
+    enterLock: vi.fn(),
+}));
 vi.mock("./data-adapter", async (importOriginal) => {
     const actual = await importOriginal<typeof import("./data-adapter")>();
     const { AsyncLocalStorage } = await import("node:async_hooks");
@@ -16,19 +30,23 @@ vi.mock("./data-adapter", async (importOriginal) => {
     };
     const withJsonDataFileLock: typeof actual.withJsonDataFileLock = (name, callback, options) => {
         if (name === "generation-tasks.json") mocks.snapshotRequested();
-        return actual.withJsonDataFileLock(name, async () => {
-            const ancestors = held.getStore() || [];
-            mocks.enterLock(name, ancestors);
-            return held.run([...ancestors, name], callback);
-        }, options);
+        return actual.withJsonDataFileLock(
+            name,
+            async () => {
+                const ancestors = held.getStore() || [];
+                mocks.enterLock(name, ancestors);
+                return held.run([...ancestors, name], callback);
+            },
+            options,
+        );
     };
     return { ...actual, writeJsonDataFile, withJsonDataFileLock };
 });
-vi.mock("./image-enhancement-config", async (importOriginal) => ({ ...await importOriginal<typeof import("./image-enhancement-config")>(), resolveImageEnhancementConnection: mocks.resolve }));
-vi.mock("./image-enhancement-worker-client", async (importOriginal) => ({ ...await importOriginal<typeof import("./image-enhancement-worker-client")>(), createEnhancementTaskClient: () => mocks }));
+vi.mock("./image-enhancement-config", async (importOriginal) => ({ ...(await importOriginal<typeof import("./image-enhancement-config")>()), resolveImageEnhancementConnection: mocks.resolve }));
+vi.mock("./image-enhancement-worker-client", async (importOriginal) => ({ ...(await importOriginal<typeof import("./image-enhancement-worker-client")>()), createEnhancementTaskClient: () => mocks }));
 vi.mock("@/app/api/image-tasks/image-task-support", () => ({ imageReferenceToDataUrl: mocks.readSource }));
-vi.mock("./maintenance-auth", async (importOriginal) => ({ ...await importOriginal<typeof import("./maintenance-auth")>(), maintenanceWorkerContext: () => "fixture-worker-context" }));
-vi.mock("./generation-log-repository", async (importOriginal) => ({ ...await importOriginal<typeof import("./generation-log-repository")>(), writeAssetBytes: mocks.store }));
+vi.mock("./maintenance-auth", async (importOriginal) => ({ ...(await importOriginal<typeof import("./maintenance-auth")>()), maintenanceWorkerContext: () => "fixture-worker-context" }));
+vi.mock("./generation-log-repository", async (importOriginal) => ({ ...(await importOriginal<typeof import("./generation-log-repository")>()), writeAssetBytes: mocks.store }));
 
 import { getEnhancementJob, listEnhancementJobsForTask, mutateEnhancementJob } from "./database/image-enhancement-job-repository";
 import { createStoredGenerationTask, type StoredGenerationTaskRecord } from "./generation-task-store";
@@ -40,10 +58,22 @@ import type { FrozenImageEnhancementPolicy } from "./image-enhancement-config";
 import type { FrozenWorkerEnhancementPlan, RemoteEnhancementJob } from "./image-enhancement-worker-client";
 import * as generationTasks from "./generation-task-store";
 
-const policy: FrozenImageEnhancementPolicy = { revision: "policy-one", enabled: true, connection: { revision: "policy-one", credentialRef: "credential-fixture", serviceId: "31313131-3131-4131-8131-313131313131", timeoutMs: 60_000, model: { id: "model-fixture", binaryVersion: "v1", binarySha256: "b".repeat(64), modelVersion: "v1", modelSha256: "c".repeat(64), nativeScale: 4, allowedTiles: [0], defaultTile: 0, tta: false, gpuId: 0 } } };
+const policy: FrozenImageEnhancementPolicy = {
+    revision: "policy-one",
+    enabled: true,
+    connection: {
+        revision: "policy-one",
+        credentialRef: "credential-fixture",
+        serviceId: "31313131-3131-4131-8131-313131313131",
+        timeoutMs: 60_000,
+        model: { id: "model-fixture", binaryVersion: "v1", binarySha256: "b".repeat(64), modelVersion: "v1", modelSha256: "c".repeat(64), nativeScale: 4, allowedTiles: [0], defaultTile: 0, tta: false, gpuId: 0 },
+    },
+};
 function barrier() {
     let release!: () => void;
-    const reached = new Promise<void>((resolve) => { release = resolve; });
+    const reached = new Promise<void>((resolve) => {
+        release = resolve;
+    });
     return { reached, release };
 }
 
@@ -66,14 +96,63 @@ describe("file enhancement completion visibility", () => {
         const conversation = await createCreativeConversation(userId, { surface: "chat", title: "fixture" });
         const taskId = randomUUID();
         const id = `enhancement:${taskId}:1`;
-        const source = await sharp({ create: { width: 32, height: 32, channels: 3, background: "white" } }).png().toBuffer();
+        const source = await sharp({ create: { width: 32, height: 32, channels: 3, background: "white" } })
+            .png()
+            .toBuffer();
         const ai = await sharp(source).resize(128, 128).png().toBuffer();
         const native = { url: "/api/generation-log-assets/native.png", sha256: createHash("sha256").update(source).digest("hex"), width: 32, height: 32, byteLength: source.length, format: "png", hasAlpha: false, provenance: "provider_native" as const };
         const media = { resultId: `${taskId}:1`, enhancementId: id, dataUrl: native.url, serverUrl: native.url, nativeSource: native, width: 32, height: 32, bytes: source.length, mimeType: "image/png" };
         const result = { ...media, results: [media] };
-        const task = await createStoredGenerationTask<ImageTask>("image", { id: taskId, userId, username: "fixture", displayName: "fixture", kind: "generation", source: "image-workbench", conversationId: conversation.id, runId: "fixture-run", status: "running", createdAt: Date.now(), updatedAt: Date.now(), config: { baseUrl: "https://fixture.invalid", apiKey: "system", apiFormat: "openai", model: "fixture", quality: "4k", size: "64x64" }, prompt: "fixture", references: [], enhancementPolicy: structuredClone(policy) }, 60_000);
-        const [original] = await registerCreativeAssets([{ userId, conversationId: conversation.id, sourceRunId: task.runId, sourceTaskId: task.id, ordinal: 0, type: "image", title: "native", storageKind: "local", serverUrl: native.url, width: 32, height: 32, mimeType: "image/png", bytes: source.length }]);
-        const plan: FrozenWorkerEnhancementPlan = { protocolVersion: "image-enhancement.v1", scope: "full_image", target: { width: 64, height: 64, format: "png" }, normalizationProfile: "srgb-upright-v1", engine: { modelId: "model-fixture", binaryVersion: "v1", binarySha256: "b".repeat(64), modelVersion: "v1", modelSha256: "c".repeat(64), nativeScale: 4, tile: 0, tta: false, gpuId: 0 }, budgets: { input: { maxBytes: 1_000_000, maxPixels: 1_000_000 }, ai: { maxBytes: 1_000_000, maxPixels: 1_000_000 }, delivery: { maxBytes: 1_000_000, maxPixels: 1_000_000 } }, sourceSha256: native.sha256, source: native, strategyFingerprint: "d".repeat(64), planFingerprint: "e".repeat(64) };
+        const task = await createStoredGenerationTask<ImageTask>(
+            "image",
+            {
+                id: taskId,
+                userId,
+                username: "fixture",
+                displayName: "fixture",
+                kind: "generation",
+                source: "image-workbench",
+                conversationId: conversation.id,
+                runId: "fixture-run",
+                status: "running",
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+                config: { baseUrl: "https://fixture.invalid", apiKey: "system", apiFormat: "openai", model: "fixture", quality: "4k", size: "64x64" },
+                prompt: "fixture",
+                references: [],
+                enhancementPolicy: structuredClone(policy),
+            },
+            60_000,
+        );
+        const [original] = await registerCreativeAssets([
+            {
+                userId,
+                conversationId: conversation.id,
+                sourceRunId: task.runId,
+                sourceTaskId: task.id,
+                ordinal: 0,
+                type: "image",
+                title: "native",
+                storageKind: "local",
+                serverUrl: native.url,
+                width: 32,
+                height: 32,
+                mimeType: "image/png",
+                bytes: source.length,
+            },
+        ]);
+        const plan: FrozenWorkerEnhancementPlan = {
+            protocolVersion: "image-enhancement.v1",
+            scope: "full_image",
+            target: { width: 64, height: 64, format: "png" },
+            normalizationProfile: "srgb-upright-v1",
+            engine: { modelId: "model-fixture", binaryVersion: "v1", binarySha256: "b".repeat(64), modelVersion: "v1", modelSha256: "c".repeat(64), nativeScale: 4, tile: 0, tta: false, gpuId: 0 },
+            budgets: { input: { maxBytes: 1_000_000, maxPixels: 1_000_000 }, ai: { maxBytes: 1_000_000, maxPixels: 1_000_000 }, delivery: { maxBytes: 1_000_000, maxPixels: 1_000_000 } },
+            sourceSha256: native.sha256,
+            source: native,
+            strategyFingerprint: "d".repeat(64),
+            planFingerprint: "e".repeat(64),
+        };
         let remote: RemoteEnhancementJob = { jobId: randomUUID(), status: "queued", reason: null, result: null, createdAt: Date.now(), completedAt: null };
         const stored = new Map<string, Buffer>();
         mocks.resolve.mockResolvedValue({ endpoint: "http://fixture.invalid", token: "fixture", serviceId: policy.connection!.serviceId, timeoutMs: 60_000, trust: "system", caPem: "" });
@@ -111,7 +190,12 @@ describe("file enhancement completion visibility", () => {
         let consuming: ReturnType<typeof runImageEnhancementBatch> | undefined;
         try {
             completion = transitionImageTask(task, ["running"], { status: "success", result });
-            await Promise.race([successWrite.reached, completion.then(() => { throw new Error("Native completion did not reach the held success write"); })]);
+            await Promise.race([
+                successWrite.reached,
+                completion.then(() => {
+                    throw new Error("Native completion did not reach the held success write");
+                }),
+            ]);
             expect(await getImageTask(task.id)).toMatchObject({ status: "running" });
             expect((await getImageTask(task.id))?.result).toBeUndefined();
             const [intent] = await listEnhancementJobsForTask(task.id, userId);
@@ -123,7 +207,9 @@ describe("file enhancement completion visibility", () => {
                 return mutateFile(mutator);
             };
             vi.spyOn(generationTasks, "withGenerationTaskFileMutation").mockImplementation(observeMutation);
-            mocks.snapshotRequested.mockImplementation(() => { snapshotRequested.release(); });
+            mocks.snapshotRequested.mockImplementation(() => {
+                snapshotRequested.release();
+            });
             consuming = run();
             // Observe the actual snapshot request, or an incorrect terminal batch, before releasing the producer.
             await Promise.race([snapshotRequested.reached, consuming]);
@@ -156,7 +242,20 @@ describe("file enhancement completion visibility", () => {
             expect(mocks.acknowledge).not.toHaveBeenCalled();
             await due();
             await run();
-            expect(await listEnhancementJobsForTask(task.id, userId)).toEqual([expect.objectContaining({ id: intent.id, status: "succeeded", phase: "completed", reason: null, attempt: 1, remoteKey: intent.remoteKey, receiptId: intent.receiptId, decision: intent.decision, nextPollAt: null, receiptConfirmedAt: expect.any(Number) })]);
+            expect(await listEnhancementJobsForTask(task.id, userId)).toEqual([
+                expect.objectContaining({
+                    id: intent.id,
+                    status: "succeeded",
+                    phase: "completed",
+                    reason: null,
+                    attempt: 1,
+                    remoteKey: intent.remoteKey,
+                    receiptId: intent.receiptId,
+                    decision: intent.decision,
+                    nextPollAt: null,
+                    receiptConfirmedAt: expect.any(Number),
+                }),
+            ]);
             expect(await getImageTask(task.id)).toMatchObject({ status: "success", result });
             const assets = await listCreativeAssets(conversation.id, userId);
             expect(assets).toHaveLength(2);

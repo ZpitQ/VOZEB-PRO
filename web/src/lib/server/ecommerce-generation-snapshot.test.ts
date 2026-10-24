@@ -245,11 +245,7 @@ describe("ecommerce generation shadow snapshot", () => {
             { ...imageAsset("remote", "remote", "/api/assets/unused"), serverUrl: undefined, remoteUrl: "https://cdn.example.test/reference.png" },
         ];
         const before = structuredClone(assets);
-        const input = buildEcommercePlanningInput(
-            { conversationId: "conversation", surface: "chat", prompt: "edit the selected image", referencedAssetIds: ["saved", "remote"] },
-            assets,
-            { summary: "", recentMessages: [] } as never,
-        );
+        const input = buildEcommercePlanningInput({ conversationId: "conversation", surface: "chat", prompt: "edit the selected image", referencedAssetIds: ["saved", "remote"] }, assets, { summary: "", recentMessages: [] } as never);
         expect(input.assetCandidates.map((asset) => asset.url)).toEqual(["/api/generation-log-assets/permanent/native.png", "https://cdn.example.test/reference.png"]);
         expect(assets).toEqual(before);
     });

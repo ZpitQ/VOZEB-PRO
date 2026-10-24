@@ -30,11 +30,21 @@ export function publicImageResultEnhancement(input: ImageResultEnhancementInput)
     const result: PublicImageResultEnhancement = {};
     if (typeof input.resultId === "string" && input.resultId) result.resultId = input.resultId;
     if (typeof input.enhancementId === "string" && input.enhancementId) result.enhancementId = input.enhancementId;
-    const native = input.nativeSource && typeof input.nativeSource === "object" ? input.nativeSource as Record<string, unknown> : null;
-    if (native && typeof native.url === "string" && typeof native.sha256 === "string" && typeof native.format === "string" && typeof native.width === "number" && typeof native.height === "number" && typeof native.byteLength === "number" && typeof native.hasAlpha === "boolean" && (native.provenance === "provider_native" || native.provenance === "ai_enhanced")) {
+    const native = input.nativeSource && typeof input.nativeSource === "object" ? (input.nativeSource as Record<string, unknown>) : null;
+    if (
+        native &&
+        typeof native.url === "string" &&
+        typeof native.sha256 === "string" &&
+        typeof native.format === "string" &&
+        typeof native.width === "number" &&
+        typeof native.height === "number" &&
+        typeof native.byteLength === "number" &&
+        typeof native.hasAlpha === "boolean" &&
+        (native.provenance === "provider_native" || native.provenance === "ai_enhanced")
+    ) {
         result.nativeSource = { url: native.url, sha256: native.sha256, width: native.width, height: native.height, byteLength: native.byteLength, format: native.format, hasAlpha: native.hasAlpha, provenance: native.provenance };
     }
-    const skip = input.enhancementSkip && typeof input.enhancementSkip === "object" ? input.enhancementSkip as Record<string, unknown> : null;
+    const skip = input.enhancementSkip && typeof input.enhancementSkip === "object" ? (input.enhancementSkip as Record<string, unknown>) : null;
     if (skip?.status === "skipped" && (skip.reason === "disabled" || skip.reason === "not_requested" || skip.reason === "protected_contract" || skip.reason === "unsupported_layers")) result.enhancementSkip = { status: "skipped", reason: skip.reason };
     return result;
 }

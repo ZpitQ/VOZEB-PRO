@@ -210,7 +210,12 @@ test("a legacy ratio skip can enhance the existing image once without generating
 });
 
 test("a no-job skip makes no enhancement request for any supported skip reason", async ({ page }) => {
-    const cases: Array<[ImageEnhancementSkip["reason"], string]> = [["disabled", "未启用AI增强"], ["not_requested", "本次未请求AI增强"], ["protected_contract", "保护图像保持原图"], ["unsupported_layers", "分层结果保持原图"]];
+    const cases: Array<[ImageEnhancementSkip["reason"], string]> = [
+        ["disabled", "未启用AI增强"],
+        ["not_requested", "本次未请求AI增强"],
+        ["protected_contract", "保护图像保持原图"],
+        ["unsupported_layers", "分层结果保持原图"],
+    ];
     for (const [reason, label] of cases) {
         const fixture = await mockEnhancementRound(page, { skip: reason });
         await openRound(page, fixture.id);
@@ -396,7 +401,7 @@ async function releaseStaleAssets(page: Page, id: string, release: () => void, a
     const responsePending = page.waitForResponse((response) => response.request().method() === "GET" && new URL(response.url()).pathname === `/api/creative/conversations/${id}/assets`);
     release();
     const response = await responsePending;
-    const body = await response.json() as { data: { assets: CreativeAsset[] } };
+    const body = (await response.json()) as { data: { assets: CreativeAsset[] } };
     expect(body.data.assets.map((asset) => asset.id)).not.toContain(absentChildId);
     expect(await response.finished()).toBeNull();
 }
@@ -444,11 +449,16 @@ async function expectTightImage(result: Locator) {
 
 function gate() {
     let release: () => void = () => undefined;
-    const promise = new Promise<void>((resolve) => { release = resolve; });
+    const promise = new Promise<void>((resolve) => {
+        release = resolve;
+    });
     return { promise, release };
 }
 
-async function mockEnhancementRound(page: Page, options: { status?: PublicImageEnhancement["status"]; reason?: string; skip?: ImageEnhancementSkip["reason"]; publishChild?: boolean; failRead?: boolean; persistentMedia?: boolean; enhancedSize?: { width: number; height: number } }) {
+async function mockEnhancementRound(
+    page: Page,
+    options: { status?: PublicImageEnhancement["status"]; reason?: string; skip?: ImageEnhancementSkip["reason"]; publishChild?: boolean; failRead?: boolean; persistentMedia?: boolean; enhancedSize?: { width: number; height: number } },
+) {
     const prefix = `enhancement-${randomUUID()}`;
     const id = `conversation-${prefix}`;
     const runId = `run-${prefix}`;
@@ -457,8 +467,40 @@ async function mockEnhancementRound(page: Page, options: { status?: PublicImageE
     const now = Date.now();
     let nativeUrl = `/api/reference-assets/${prefix}/native.png`;
     let enhancedUrl = `/api/reference-assets/${prefix}/enhanced.png`;
-    const original: CreativeAsset = { id: `native-${prefix}`, userId: "fixture-user", conversationId: id, messageId: `assistant-${runId}`, sourceRunId: runId, sourceTaskId: "image-task", ordinal: 0, type: "image", status: "ready", title: "原图结果", serverUrl: nativeUrl, mimeType: "image/png", width: 1024, height: 1024, metadata: { resultId, agentTaskId: "image-task", ...(options.skip ? { enhancementSkip: { status: "skipped", reason: options.skip } } : { enhancementId }) }, createdAt: now, updatedAt: now };
-    const child: CreativeAsset = { ...original, id: `child-${prefix}`, messageId: undefined, sourceTaskId: enhancementId, parentAssetId: original.id, title: "AI增强结果", serverUrl: enhancedUrl, width: 2048, height: 2048, ...options.enhancedSize, metadata: { provenance: "ai_enhanced", enhancementId, parentResultId: resultId, parentAssetIds: [original.id], nativeSha256: "a".repeat(64), sha256: "b".repeat(64) }, createdAt: now + 1, updatedAt: now + 1 };
+    const original: CreativeAsset = {
+        id: `native-${prefix}`,
+        userId: "fixture-user",
+        conversationId: id,
+        messageId: `assistant-${runId}`,
+        sourceRunId: runId,
+        sourceTaskId: "image-task",
+        ordinal: 0,
+        type: "image",
+        status: "ready",
+        title: "原图结果",
+        serverUrl: nativeUrl,
+        mimeType: "image/png",
+        width: 1024,
+        height: 1024,
+        metadata: { resultId, agentTaskId: "image-task", ...(options.skip ? { enhancementSkip: { status: "skipped", reason: options.skip } } : { enhancementId }) },
+        createdAt: now,
+        updatedAt: now,
+    };
+    const child: CreativeAsset = {
+        ...original,
+        id: `child-${prefix}`,
+        messageId: undefined,
+        sourceTaskId: enhancementId,
+        parentAssetId: original.id,
+        title: "AI增强结果",
+        serverUrl: enhancedUrl,
+        width: 2048,
+        height: 2048,
+        ...options.enhancedSize,
+        metadata: { provenance: "ai_enhanced", enhancementId, parentResultId: resultId, parentAssetIds: [original.id], nativeSha256: "a".repeat(64), sha256: "b".repeat(64) },
+        createdAt: now + 1,
+        updatedAt: now + 1,
+    };
     let status: PublicImageEnhancement["status"] = options.status || "queued";
     let assets = [original, ...(status === "succeeded" && options.publishChild !== false ? [child] : [])];
     let failRead = Boolean(options.failRead);
@@ -486,14 +528,35 @@ async function mockEnhancementRound(page: Page, options: { status?: PublicImageE
         { id: `assistant-${runId}`, conversationId: id, runId, sequence: 2, role: "assistant", status: "completed", content: "图片已生成。", metadata: {}, createdAt: now + 1, updatedAt: now + 1 },
     ];
     const conversation = { id, userId: "fixture-user", surface: "chat", source: "agent", title: "增强变体回归", status: "active", contextSummary: "", contextSummaryThroughSequence: 0, createdAt: now, updatedAt: now, lastMessageAt: now };
-    const run = { id: runId, conversationId: id, inputMessageId: messages[0].id, assistantMessageId: messages[1].id, status: "completed", prompt: messages[0].content, referencedAssetIds: [], requestedModelIds: ["image-gen"], generationPreferences: { mode: "image", image: { size: "1:1", quality: "high" } }, assetIds: [original.id], tasks: [{ id: "image-task", title: "生成图片", type: "image", model: "image-gen", ratio: "1:1", quality: "high", count: 1, status: "completed", optimizedPrompt: "公开商品图提示词" }], createdAt: now, updatedAt: now + 1000 };
-    const nativeBytes = await sharp({ create: { width: 1024, height: 1024, channels: 3, background: "#51869d" } }).png().toBuffer();
-    const enhancedBytes = await sharp({ create: { width: child.width!, height: child.height!, channels: 3, background: "#709e81" } }).png().toBuffer();
+    const run = {
+        id: runId,
+        conversationId: id,
+        inputMessageId: messages[0].id,
+        assistantMessageId: messages[1].id,
+        status: "completed",
+        prompt: messages[0].content,
+        referencedAssetIds: [],
+        requestedModelIds: ["image-gen"],
+        generationPreferences: { mode: "image", image: { size: "1:1", quality: "high" } },
+        assetIds: [original.id],
+        tasks: [{ id: "image-task", title: "生成图片", type: "image", model: "image-gen", ratio: "1:1", quality: "high", count: 1, status: "completed", optimizedPrompt: "公开商品图提示词" }],
+        createdAt: now,
+        updatedAt: now + 1000,
+    };
+    const nativeBytes = await sharp({ create: { width: 1024, height: 1024, channels: 3, background: "#51869d" } })
+        .png()
+        .toBuffer();
+    const enhancedBytes = await sharp({ create: { width: child.width!, height: child.height!, channels: 3, background: "#709e81" } })
+        .png()
+        .toBuffer();
     if (options.persistentMedia) {
-        for (const [asset, bytes, name] of [[original, nativeBytes, "native.png"], [child, enhancedBytes, "enhanced.png"]] as const) {
+        for (const [asset, bytes, name] of [
+            [original, nativeBytes, "native.png"],
+            [child, enhancedBytes, "enhanced.png"],
+        ] as const) {
             const response = await page.context().request.post("/api/reference-assets", { data: { type: "image", persistent: true, originalName: `E2E ${name}`, dataUrl: `data:image/png;base64,${bytes.toString("base64")}` } });
             expect(response.ok(), "The isolated authenticated media fixture must upload successfully").toBe(true);
-            const uploaded = await response.json() as { url: string; bytes: number; mimeType: string };
+            const uploaded = (await response.json()) as { url: string; bytes: number; mimeType: string };
             expect(uploaded.url).toMatch(/^\/api\/reference-assets\/permanent\//);
             expect(uploaded.bytes).toBe(bytes.length);
             expect(uploaded.mimeType).toBe("image/png");
@@ -509,14 +572,33 @@ async function mockEnhancementRound(page: Page, options: { status?: PublicImageE
     child.metadata.nativeSha256 = nativeSha256;
     child.metadata.sha256 = enhancedSha256;
     original.metadata.nativeSource = { url: nativeUrl, width: 1024, height: 1024, sha256: nativeSha256, byteLength: nativeBytes.length, format: "png", hasAlpha: false, provenance: "provider_native" };
-    const job = (): PublicImageEnhancement => ({ id: enhancementId, imageTaskId: "native-task", resultId, status, phase: status === "succeeded" ? "completed" : "poll", reason: options.reason || null, attempt: controls.filter((action) => action === "retry").length + 1, native: { url: nativeUrl, width: 1024, height: 1024, sha256: nativeSha256, byteLength: nativeBytes.length, format: "png", provenance: "provider_native" }, target: { width: child.width!, height: child.height! }, ...(status === "succeeded" ? { enhanced: { url: enhancedUrl, assetId: child.id, width: child.width!, height: child.height!, sha256: enhancedSha256, byteLength: enhancedBytes.length, format: "png" } } : {}), events: [], canRetry: status === "failed" || (status === "skipped" && options.reason === "aspect_ratio_mismatch"), canCancel: status === "queued" || status === "running" });
+    const job = (): PublicImageEnhancement => ({
+        id: enhancementId,
+        imageTaskId: "native-task",
+        resultId,
+        status,
+        phase: status === "succeeded" ? "completed" : "poll",
+        reason: options.reason || null,
+        attempt: controls.filter((action) => action === "retry").length + 1,
+        native: { url: nativeUrl, width: 1024, height: 1024, sha256: nativeSha256, byteLength: nativeBytes.length, format: "png", provenance: "provider_native" },
+        target: { width: child.width!, height: child.height! },
+        ...(status === "succeeded" ? { enhanced: { url: enhancedUrl, assetId: child.id, width: child.width!, height: child.height!, sha256: enhancedSha256, byteLength: enhancedBytes.length, format: "png" } } : {}),
+        events: [],
+        canRetry: status === "failed" || (status === "skipped" && options.reason === "aspect_ratio_mismatch"),
+        canCancel: status === "queued" || status === "running",
+    });
 
     await page.route(new RegExp(`/api/reference-assets/${prefix}/(?:second-)?(?:native|enhanced)\\.png(?:\\?.*)?$`), async (route) => {
         const url = new URL(route.request().url());
         const originalBytes = url.pathname.endsWith("enhanced.png") ? enhancedBytes : nativeBytes;
         const previewWidth = Number(url.searchParams.get("width"));
         const webp = url.searchParams.get("format") === "webp";
-        const body = webp ? await sharp(originalBytes).resize({ ...(previewWidth > 0 ? { width: previewWidth } : {}), withoutEnlargement: true }).webp().toBuffer() : originalBytes;
+        const body = webp
+            ? await sharp(originalBytes)
+                  .resize({ ...(previewWidth > 0 ? { width: previewWidth } : {}), withoutEnlargement: true })
+                  .webp()
+                  .toBuffer()
+            : originalBytes;
         await route.fulfill({ body, contentType: webp ? "image/webp" : "image/png" });
     });
     await page.route(/\/api\/creative\/conversations(?:\?.*)?$/, (route) => route.fulfill({ json: { code: 0, data: { conversations: [conversation], hasMore: false }, msg: "OK" } }));
@@ -567,30 +649,109 @@ async function mockEnhancementRound(page: Page, options: { status?: PublicImageE
         await route.fulfill({ json: failRead ? { code: 1, data: null, msg: "private-read-failure-details" } : { code: 0, data: job(), msg: "OK" } });
         completedJobReadCount += 1;
     });
-    return { id, original, child, controls, generatedRequests, nativeSha256, enhancedSha256, jobReads: () => jobReadCount, finishedJobReads: () => completedJobReadCount, pendingJobReads: () => pendingJobRequests.size, firstJobRead: () => firstJobRead.promise, assetReads: () => assetReadCount, finishedAssetReads: () => completedAssetReadCount, assetSnapshots: () => assetSnapshots, messageReads: () => messageReadCount,
-        finish: () => { status = "succeeded"; assets = [...assets.filter((asset) => asset.id !== child.id), child]; },
-        allowReads: () => { failRead = false; },
-        holdJobReads: () => { jobReadGate = gate(); return jobReadGate.release; },
-        holdNextAssetRead: () => { nextAssetGate = gate(); return nextAssetGate.release; },
-        holdAssetReads: () => { assetReadGate = gate(); return assetReadGate.release; },
-        holdNextControl: () => { nextControlGate = gate(); return nextControlGate.release; },
+    return {
+        id,
+        original,
+        child,
+        controls,
+        generatedRequests,
+        nativeSha256,
+        enhancedSha256,
+        jobReads: () => jobReadCount,
+        finishedJobReads: () => completedJobReadCount,
+        pendingJobReads: () => pendingJobRequests.size,
+        firstJobRead: () => firstJobRead.promise,
+        assetReads: () => assetReadCount,
+        finishedAssetReads: () => completedAssetReadCount,
+        assetSnapshots: () => assetSnapshots,
+        messageReads: () => messageReadCount,
+        finish: () => {
+            status = "succeeded";
+            assets = [...assets.filter((asset) => asset.id !== child.id), child];
+        },
+        allowReads: () => {
+            failRead = false;
+        },
+        holdJobReads: () => {
+            jobReadGate = gate();
+            return jobReadGate.release;
+        },
+        holdNextAssetRead: () => {
+            nextAssetGate = gate();
+            return nextAssetGate.release;
+        },
+        holdAssetReads: () => {
+            assetReadGate = gate();
+            return assetReadGate.release;
+        },
+        holdNextControl: () => {
+            nextControlGate = gate();
+            return nextControlGate.release;
+        },
         addRound: async () => {
             const secondRunId = `second-${runId}`;
             const secondEnhancementId = `second-${enhancementId}`;
             const secondResultId = `second-${resultId}`;
             const secondNativeUrl = `/api/reference-assets/${prefix}/second-native.png`;
-            const secondOriginal: CreativeAsset = { ...original, id: `second-${original.id}`, messageId: `assistant-${secondRunId}`, sourceRunId: secondRunId, sourceTaskId: "second-image-task", title: "第二轮原图结果", serverUrl: secondNativeUrl, metadata: { ...original.metadata, nativeSource: { ...(original.metadata.nativeSource as Record<string, unknown>), url: secondNativeUrl }, resultId: secondResultId, enhancementId: secondEnhancementId, agentTaskId: "second-image-task" } };
-            const secondChild: CreativeAsset = { ...child, id: `second-${child.id}`, parentAssetId: secondOriginal.id, sourceRunId: secondRunId, sourceTaskId: secondEnhancementId, title: "第二轮AI增强结果", serverUrl: `/api/reference-assets/${prefix}/second-enhanced.png`, metadata: { ...child.metadata, parentResultId: secondResultId, enhancementId: secondEnhancementId, parentAssetIds: [secondOriginal.id] } };
+            const secondOriginal: CreativeAsset = {
+                ...original,
+                id: `second-${original.id}`,
+                messageId: `assistant-${secondRunId}`,
+                sourceRunId: secondRunId,
+                sourceTaskId: "second-image-task",
+                title: "第二轮原图结果",
+                serverUrl: secondNativeUrl,
+                metadata: { ...original.metadata, nativeSource: { ...(original.metadata.nativeSource as Record<string, unknown>), url: secondNativeUrl }, resultId: secondResultId, enhancementId: secondEnhancementId, agentTaskId: "second-image-task" },
+            };
+            const secondChild: CreativeAsset = {
+                ...child,
+                id: `second-${child.id}`,
+                parentAssetId: secondOriginal.id,
+                sourceRunId: secondRunId,
+                sourceTaskId: secondEnhancementId,
+                title: "第二轮AI增强结果",
+                serverUrl: `/api/reference-assets/${prefix}/second-enhanced.png`,
+                metadata: { ...child.metadata, parentResultId: secondResultId, enhancementId: secondEnhancementId, parentAssetIds: [secondOriginal.id] },
+            };
             const secondUser = { ...messages[0], id: `user-${secondRunId}`, runId: secondRunId, sequence: 3, content: "生成第二张商业商品图" };
             const secondAssistant = { ...messages[1], id: `assistant-${secondRunId}`, runId: secondRunId, sequence: 4 };
             const secondRun = { ...run, id: secondRunId, prompt: secondUser.content, inputMessageId: secondUser.id, assistantMessageId: secondAssistant.id, assetIds: [secondOriginal.id], tasks: [{ ...run.tasks[0], id: "second-image-task" }] };
             let secondStatus: PublicImageEnhancement["status"] = "running";
-            const publish = () => { assets = [...assets.filter((asset) => asset.id !== secondChild.id), secondChild]; };
+            const publish = () => {
+                assets = [...assets.filter((asset) => asset.id !== secondChild.id), secondChild];
+            };
             assets = [...assets, secondOriginal];
             messages.push(secondUser, secondAssistant);
             await page.route(new RegExp(`/api/agent/runs/${secondRunId}$`), (route) => route.fulfill({ json: { code: 0, data: { run: secondRun }, msg: "OK" } }));
-            await page.route(new RegExp(`/api/image-enhancements/${secondEnhancementId}$`), (route) => route.fulfill({ json: { code: 0, data: { ...job(), id: secondEnhancementId, imageTaskId: "second-native-task", resultId: secondResultId, status: secondStatus, phase: secondStatus === "succeeded" ? "completed" : "poll", canRetry: false, canCancel: secondStatus === "running", native: { ...job().native, url: secondOriginal.serverUrl }, enhanced: secondStatus === "succeeded" ? { url: secondChild.serverUrl, assetId: secondChild.id, width: 2048, height: 2048, sha256: enhancedSha256, byteLength: enhancedBytes.length, format: "png" } : undefined }, msg: "OK" } }));
-            return { original: secondOriginal, child: secondChild, publish, finish: () => { secondStatus = "succeeded"; publish(); } };
+            await page.route(new RegExp(`/api/image-enhancements/${secondEnhancementId}$`), (route) =>
+                route.fulfill({
+                    json: {
+                        code: 0,
+                        data: {
+                            ...job(),
+                            id: secondEnhancementId,
+                            imageTaskId: "second-native-task",
+                            resultId: secondResultId,
+                            status: secondStatus,
+                            phase: secondStatus === "succeeded" ? "completed" : "poll",
+                            canRetry: false,
+                            canCancel: secondStatus === "running",
+                            native: { ...job().native, url: secondOriginal.serverUrl },
+                            enhanced: secondStatus === "succeeded" ? { url: secondChild.serverUrl, assetId: secondChild.id, width: 2048, height: 2048, sha256: enhancedSha256, byteLength: enhancedBytes.length, format: "png" } : undefined,
+                        },
+                        msg: "OK",
+                    },
+                }),
+            );
+            return {
+                original: secondOriginal,
+                child: secondChild,
+                publish,
+                finish: () => {
+                    secondStatus = "succeeded";
+                    publish();
+                },
+            };
         },
     };
 }

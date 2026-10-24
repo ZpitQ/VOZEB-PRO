@@ -308,31 +308,55 @@ async function savedNativeResult(asset: CreativeAsset, run: AgentRun) {
     if (!task || task.id !== asset.sourceTaskId || task.userId !== run.userId || task.conversationId !== run.conversationId || task.runId !== run.id || task.status !== "success") return null;
     const result = (task.result?.results?.length ? task.result.results : task.result ? [task.result] : []).find((candidate) => candidate.resultId === asset.metadata.resultId);
     const source = result?.nativeSource;
-    return result && source && result.resultId && result.resultId === asset.metadata.resultId &&
-        source.provenance === "provider_native" && /^[a-f0-9]{64}$/.test(source.sha256) &&
+    return result &&
+        source &&
+        result.resultId &&
+        result.resultId === asset.metadata.resultId &&
+        source.provenance === "provider_native" &&
+        /^[a-f0-9]{64}$/.test(source.sha256) &&
         [source.width, source.height, source.byteLength].every((value) => Number.isSafeInteger(value) && value > 0) &&
-        source.url === (result.serverUrl || result.dataUrl) && source.url === asset.serverUrl &&
-        source.width === result.width && source.width === asset.width && source.height === result.height && source.height === asset.height &&
-        source.byteLength === result.bytes && source.byteLength === asset.bytes &&
+        source.url === (result.serverUrl || result.dataUrl) &&
+        source.url === asset.serverUrl &&
+        source.width === result.width &&
+        source.width === asset.width &&
+        source.height === result.height &&
+        source.height === asset.height &&
+        source.byteLength === result.bytes &&
+        source.byteLength === asset.bytes &&
         (!asset.metadata.nativeSource || isDeepStrictEqual(asset.metadata.nativeSource, source))
-        ? result : null;
+        ? result
+        : null;
 }
 
 async function publishedEnhancementBaseline(asset: CreativeAsset, run: AgentRun): Promise<CreativeAsset | null> {
     if (!asset.sourceTaskId || !asset.parentAssetId) return null;
     const job = await getEnhancementJob(asset.sourceTaskId, run.userId);
     const delivered = job?.publication?.delivered;
-    if (!job || job.id !== asset.sourceTaskId || job.userId !== run.userId || job.status !== "succeeded" || job.decision.status !== "queued" || !delivered ||
-        job.publication?.assetId !== asset.id || asset.ordinal !== 0 || asset.serverUrl !== delivered.url ||
-        asset.width !== delivered.width || asset.height !== delivered.height || asset.bytes !== delivered.byteLength ||
-        asset.metadata.provenance !== "ai_enhanced" || asset.metadata.enhancementId !== job.id || asset.metadata.parentResultId !== job.resultId ||
-        asset.metadata.sha256 !== delivered.sha256 || !/^[a-f0-9]{64}$/.test(delivered.sha256) ||
-        !isDeepStrictEqual(asset.metadata.parentAssetIds, [asset.parentAssetId])) return null;
+    if (
+        !job ||
+        job.id !== asset.sourceTaskId ||
+        job.userId !== run.userId ||
+        job.status !== "succeeded" ||
+        job.decision.status !== "queued" ||
+        !delivered ||
+        job.publication?.assetId !== asset.id ||
+        asset.ordinal !== 0 ||
+        asset.serverUrl !== delivered.url ||
+        asset.width !== delivered.width ||
+        asset.height !== delivered.height ||
+        asset.bytes !== delivered.byteLength ||
+        asset.metadata.provenance !== "ai_enhanced" ||
+        asset.metadata.enhancementId !== job.id ||
+        asset.metadata.parentResultId !== job.resultId ||
+        asset.metadata.sha256 !== delivered.sha256 ||
+        !/^[a-f0-9]{64}$/.test(delivered.sha256) ||
+        !isDeepStrictEqual(asset.metadata.parentAssetIds, [asset.parentAssetId])
+    )
+        return null;
     const parent = (await getCreativeAssetsByIds([asset.parentAssetId], run.userId)).find((candidate) => candidate.id === asset.parentAssetId);
     if (!parent || parent.userId !== run.userId || parent.conversationId !== run.conversationId || parent.sourceRunId !== run.id || parent.sourceTaskId !== job.imageTaskId || parent.type !== "image" || parent.status !== "ready") return null;
     const original = await savedNativeResult(parent, run);
-    if (!original || original.resultId !== job.resultId || original.enhancementId !== job.id ||
-        !isDeepStrictEqual(original.nativeSource, job.decision.source) || asset.metadata.nativeSha256 !== original.nativeSource?.sha256) return null;
+    if (!original || original.resultId !== job.resultId || original.enhancementId !== job.id || !isDeepStrictEqual(original.nativeSource, job.decision.source) || asset.metadata.nativeSha256 !== original.nativeSource?.sha256) return null;
     if (run.ecommerceSnapshot) return validBaselineQuality(run, true) && (await hasEcommerceResultLineage(parent, run)) ? baselineWithEvidence(asset, run) : null;
     return baselineWithEvidence(asset, run, parent.id);
 }

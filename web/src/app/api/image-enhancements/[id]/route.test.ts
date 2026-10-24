@@ -6,7 +6,7 @@ import { publicImageEnhancement } from "@/lib/server/image-enhancement-public";
 const mocks = vi.hoisted(() => ({ currentUser: vi.fn(), getJob: vi.fn(), retry: vi.fn(), cancel: vi.fn(), runBatch: vi.fn() }));
 vi.mock("@/lib/auth/session", () => ({ getCurrentUser: mocks.currentUser }));
 vi.mock("@/lib/server/database/image-enhancement-job-repository", async (importOriginal) => ({
-    ...await importOriginal<typeof import("@/lib/server/database/image-enhancement-job-repository")>(),
+    ...(await importOriginal<typeof import("@/lib/server/database/image-enhancement-job-repository")>()),
     getEnhancementJob: mocks.getJob,
 }));
 vi.mock("@/lib/server/image-enhancement-service", () => ({ retryImageEnhancement: mocks.retry, cancelImageEnhancement: mocks.cancel, runImageEnhancementBatch: mocks.runBatch }));
@@ -15,20 +15,54 @@ import { GET, POST } from "./route";
 
 const context = { params: Promise.resolve({ id: "enhancement:fixture:1" }) };
 function request(action?: unknown, raw?: string) {
-    return new Request("http://localhost/api/image-enhancements/enhancement%3Afixture%3A1", action === undefined && raw === undefined ? undefined : {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: raw ?? JSON.stringify({ action, userId: "private-forged-owner" }),
-    });
+    return new Request(
+        "http://localhost/api/image-enhancements/enhancement%3Afixture%3A1",
+        action === undefined && raw === undefined
+            ? undefined
+            : {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: raw ?? JSON.stringify({ action, userId: "private-forged-owner" }),
+              },
+    );
 }
 function fixture(): ImageEnhancementJob {
     return {
-        id: "enhancement:fixture:1", userId: "fixture-owner", imageTaskId: "fixture", resultId: "fixture:1",
-        decision: planImageEnhancement({ nativeValid: true, enabled: true, requested4k: true, protectedContract: false, layered: false,
+        id: "enhancement:fixture:1",
+        userId: "fixture-owner",
+        imageTaskId: "fixture",
+        resultId: "fixture:1",
+        decision: planImageEnhancement({
+            nativeValid: true,
+            enabled: true,
+            requested4k: true,
+            protectedContract: false,
+            layered: false,
             source: { url: "/api/generation-log-assets/native.png", width: 1254, height: 1254, byteLength: 1000, sha256: "a".repeat(64), hasAlpha: false, format: "png", provenance: "provider_native" },
-            target: { width: 4096, height: 4096 }, connection: { revision: "private-revision", credentialRef: "private-credential", serviceId: "private-service", timeoutMs: 60_000,
-                model: { id: "fixture-model", binaryVersion: "binary-v1", binarySha256: "b".repeat(64), modelVersion: "model-v1", modelSha256: "c".repeat(64), nativeScale: 4, allowedTiles: [0], defaultTile: 0, tta: false, gpuId: 0 } } }),
-        status: "failed", phase: "poll", reason: "connection_failed", attempt: 1, remoteKey: "private-remote-key", remoteJobId: "private-remote-job", receiptId: "private-receipt",
-        events: [{ stage: "failed", at: 2000, attempt: 1, reason: "connection_failed" }], cancelRequested: false, createdAt: 1000, updatedAt: 2000, nextPollAt: null,
-        workerId: "private-worker", leaseToken: "private-lease", leaseUntil: 90000,
+            target: { width: 4096, height: 4096 },
+            connection: {
+                revision: "private-revision",
+                credentialRef: "private-credential",
+                serviceId: "private-service",
+                timeoutMs: 60_000,
+                model: { id: "fixture-model", binaryVersion: "binary-v1", binarySha256: "b".repeat(64), modelVersion: "model-v1", modelSha256: "c".repeat(64), nativeScale: 4, allowedTiles: [0], defaultTile: 0, tta: false, gpuId: 0 },
+            },
+        }),
+        status: "failed",
+        phase: "poll",
+        reason: "connection_failed",
+        attempt: 1,
+        remoteKey: "private-remote-key",
+        remoteJobId: "private-remote-job",
+        receiptId: "private-receipt",
+        events: [{ stage: "failed", at: 2000, attempt: 1, reason: "connection_failed" }],
+        cancelRequested: false,
+        createdAt: 1000,
+        updatedAt: 2000,
+        nextPollAt: null,
+        workerId: "private-worker",
+        leaseToken: "private-lease",
+        leaseUntil: 90000,
     };
 }
 

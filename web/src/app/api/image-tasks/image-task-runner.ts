@@ -12,13 +12,7 @@ export function stableMediaUrl(value?: string) {
     return value && !value.startsWith("data:") && !value.startsWith("blob:") ? value : "";
 }
 
-export async function writeImageGenerationLog(
-    task: ImageTask,
-    status: "success" | "failed",
-    result: ImageLogMedia[] | ImageLogMedia | string,
-    durationMs: number,
-    error?: string,
-) {
+export async function writeImageGenerationLog(task: ImageTask, status: "success" | "failed", result: ImageLogMedia[] | ImageLogMedia | string, durationMs: number, error?: string) {
     const results = Array.isArray(result) ? result : [result];
     const preserveNativeSize = task.config.advancedConfig?.protocol === "custom" && isCustomGeminiImageModel(task.config.model) && !parseImageDimensions(task.config.size || "");
     const targetSize = task.ecommerceExecution?.canvas || task.config.outputMode === "layers" || preserveNativeSize ? undefined : resolveResultSize(task.config.quality, task.config.size || "auto");

@@ -49,12 +49,34 @@ async function advance(request: APIRequestContext) {
 }
 async function waitRun(request: APIRequestContext, id: string, info: TestInfo) {
     let run = await runState(request, id);
-    await expect.poll(async () => { if (["planning", "running"].includes(run.status)) { await advance(request); run = await runState(request, id); } return ["planning", "running"].includes(run.status); }, { timeout: info.timeout }).toBe(false);
+    await expect
+        .poll(
+            async () => {
+                if (["planning", "running"].includes(run.status)) {
+                    await advance(request);
+                    run = await runState(request, id);
+                }
+                return ["planning", "running"].includes(run.status);
+            },
+            { timeout: info.timeout },
+        )
+        .toBe(false);
     return run;
 }
 async function waitEnhancement(request: APIRequestContext, id: string, accepts: (job: PublicImageEnhancement) => boolean, info: TestInfo) {
     let job = await enhancement(request, id);
-    await expect.poll(async () => { if (!accepts(job)) { await advance(request); job = await enhancement(request, id); } return accepts(job); }, { timeout: info.timeout }).toBe(true);
+    await expect
+        .poll(
+            async () => {
+                if (!accepts(job)) {
+                    await advance(request);
+                    job = await enhancement(request, id);
+                }
+                return accepts(job);
+            },
+            { timeout: info.timeout },
+        )
+        .toBe(true);
     return job;
 }
 async function persistedRun(root: string, id: string): Promise<AgentRun> {
@@ -90,13 +112,15 @@ async function freezeScene(request: APIRequestContext, root: string, id: string)
     expect(output).toMatchObject({ sourceRunId: id });
     const taskIds = run.tasks.flatMap((task) => task.taskIds || (task.taskId ? [task.taskId] : []));
     expect(taskIds).toHaveLength(1);
-    const imageTasks = await Promise.all(taskIds.map(async (taskId) => {
-        const response = await request.get(`/api/image-tasks/${encodeURIComponent(taskId)}`);
-        expect(response.ok()).toBe(true);
-        const task = (await response.json()).task;
-        expect(task.status).toBe("success");
-        return task;
-    }));
+    const imageTasks = await Promise.all(
+        taskIds.map(async (taskId) => {
+            const response = await request.get(`/api/image-tasks/${encodeURIComponent(taskId)}`);
+            expect(response.ok()).toBe(true);
+            const task = (await response.json()).task;
+            expect(task.status).toBe("success");
+            return task;
+        }),
+    );
     const records = JSON.parse(await readFile(path.join(root, "generation-tasks.json"), "utf8")) as Array<{ id: string; type: string; userId: string; payload: ImageTask }>;
     const persistedResults = taskIds.map((id) => {
         const record = records.find((entry) => entry.id === id && entry.type === "image" && entry.userId === run.userId);
@@ -157,10 +181,52 @@ async function qualify(request: APIRequestContext, fixture: Fixture) {
 }
 async function configureGeneration(request: APIRequestContext, fixture: Fixture, ecommerce: boolean) {
     const base = e2eSettingsPatch();
-    const channels = base.systemChannels.map((channel) => ({ ...channel, baseUrl: `${fixture.upstreamEndpoint}/v1`, ...(ecommerce ? {} : { models: channel.models.filter((model) => !model.includes("image")), advancedConfig: { ...channel.advancedConfig, modelCapabilities: Object.fromEntries(Object.entries(channel.advancedConfig.modelCapabilities).filter(([, capability]) => capability !== "image")), modelConfigs: Object.fromEntries(Object.entries(channel.advancedConfig.modelConfigs).filter(([model]) => !model.includes("image"))) } }) }));
-    const operation = { capability: "image" as const, source: "manual" as const, protocol: "custom" as const, apiFormat: "openai" as const, createPath: "/custom/images", editPath: "/custom/images", requestTemplate: '{"model":"{{model}}","prompt":"{{prompt}}","size":"{{size}}","quality":"{{quality}}","references":"{{images}}"}', resultField: "data.image_url", referenceRule: "base64 inline image references", supportsReferenceImage: true };
-    const normal = { id: "m5-local-native", name: "M5 controlled native fixture", baseUrl: fixture.upstreamEndpoint, apiKey: "m5-local-native-test-token", apiFormat: "openai", models: [MODEL], enabled: true, advancedConfig: { ...emptyAdvancedConfig(), ...operation, modelCapabilities: { [MODEL]: "image" }, modelConfigs: { [MODEL]: operation }, operationConfigs: { image: operation } } };
-    const response = await request.patch("/api/admin/settings", { data: { ...base, ecommerceGenerationEnabled: ecommerce, systemChannels: [...channels, normal], defaultModels: { ...base.defaultModels, imageModel: ecommerce ? "e2e-ecommerce-image" : MODEL }, ...(ecommerce ? {} : { logicalModels: base.logicalModels.filter((model) => model.capability !== "image"), ecommerceModelRoles: { ...base.ecommerceModelRoles, image_generation: [] } }), modelPointCosts: { ...base.modelPointCosts, [MODEL]: 0 } } });
+    const channels = base.systemChannels.map((channel) => ({
+        ...channel,
+        baseUrl: `${fixture.upstreamEndpoint}/v1`,
+        ...(ecommerce
+            ? {}
+            : {
+                  models: channel.models.filter((model) => !model.includes("image")),
+                  advancedConfig: {
+                      ...channel.advancedConfig,
+                      modelCapabilities: Object.fromEntries(Object.entries(channel.advancedConfig.modelCapabilities).filter(([, capability]) => capability !== "image")),
+                      modelConfigs: Object.fromEntries(Object.entries(channel.advancedConfig.modelConfigs).filter(([model]) => !model.includes("image"))),
+                  },
+              }),
+    }));
+    const operation = {
+        capability: "image" as const,
+        source: "manual" as const,
+        protocol: "custom" as const,
+        apiFormat: "openai" as const,
+        createPath: "/custom/images",
+        editPath: "/custom/images",
+        requestTemplate: '{"model":"{{model}}","prompt":"{{prompt}}","size":"{{size}}","quality":"{{quality}}","references":"{{images}}"}',
+        resultField: "data.image_url",
+        referenceRule: "base64 inline image references",
+        supportsReferenceImage: true,
+    };
+    const normal = {
+        id: "m5-local-native",
+        name: "M5 controlled native fixture",
+        baseUrl: fixture.upstreamEndpoint,
+        apiKey: "m5-local-native-test-token",
+        apiFormat: "openai",
+        models: [MODEL],
+        enabled: true,
+        advancedConfig: { ...emptyAdvancedConfig(), ...operation, modelCapabilities: { [MODEL]: "image" }, modelConfigs: { [MODEL]: operation }, operationConfigs: { image: operation } },
+    };
+    const response = await request.patch("/api/admin/settings", {
+        data: {
+            ...base,
+            ecommerceGenerationEnabled: ecommerce,
+            systemChannels: [...channels, normal],
+            defaultModels: { ...base.defaultModels, imageModel: ecommerce ? "e2e-ecommerce-image" : MODEL },
+            ...(ecommerce ? {} : { logicalModels: base.logicalModels.filter((model) => model.capability !== "image"), ecommerceModelRoles: { ...base.ecommerceModelRoles, image_generation: [] } }),
+            modelPointCosts: { ...base.modelPointCosts, [MODEL]: 0 },
+        },
+    });
     expect(response.ok()).toBe(true);
 }
 async function createOrdinaryA(page: Page, request: APIRequestContext, fixture: Fixture, info: TestInfo) {
@@ -191,7 +257,16 @@ async function confirmScene(page: Page, request: APIRequestContext, root: string
     const waiting = await persistedRun(root, run.id);
     await evidence(info, `${label}-actual-planning-before-selection`, { publicRun: run, persistedRun: waiting, source });
     expect(run.status).toBe("paused");
-    expect(waiting.ecommerceSnapshot).toMatchObject({ mode: "active", fallback: { reason: "scene_selection_required" }, plan: { operation: "scene_edit", source: { productAnchorId: null, currentSceneBaselineId: source.asset.id }, canvas: { mode: "exact", source: "user_text", size: { width: source.width, height: source.height }, allowReframe: false }, protection: { scope: "local", preserveOutsideMask: true, allowLightingChange: false } } });
+    expect(waiting.ecommerceSnapshot).toMatchObject({
+        mode: "active",
+        fallback: { reason: "scene_selection_required" },
+        plan: {
+            operation: "scene_edit",
+            source: { productAnchorId: null, currentSceneBaselineId: source.asset.id },
+            canvas: { mode: "exact", source: "user_text", size: { width: source.width, height: source.height }, allowReframe: false },
+            protection: { scope: "local", preserveOutsideMask: true, allowLightingChange: false },
+        },
+    });
     expect(run.ecommerceSceneSelection).toEqual({ action: "confirm_scene_selection", baselineAssetId: source.asset.id, url: source.immutableUrl, width: source.width, height: source.height });
     expect(waiting.tasks).toHaveLength(1);
     expect(waiting.tasks[0]).toMatchObject({ status: "needs_review", attempts: 0 });
@@ -257,7 +332,13 @@ async function confirmScene(page: Page, request: APIRequestContext, root: string
     expect(frozen.run.ecommerceSnapshot!.plan).toEqual(beforeSelection.plan);
     expect(frozen.run.tasks[0].id).toBe(beforeSelection.taskId);
     expect(frozen.run.tasks[0].ecommerceExecution).toEqual(beforeSelection.execution);
-    expect(frozen.run.tasks[0].sceneProtection).toMatchObject({ sourceAssetId: source.asset.id, sourceSize: { width: source.width, height: source.height }, selectionSource: "user_selection", targetRegion: selection.region, confirmation: { actorUserId: frozen.run.userId, confirmedAt: expect.any(Number) } });
+    expect(frozen.run.tasks[0].sceneProtection).toMatchObject({
+        sourceAssetId: source.asset.id,
+        sourceSize: { width: source.width, height: source.height },
+        selectionSource: "user_selection",
+        targetRegion: selection.region,
+        confirmation: { actorUserId: frozen.run.userId, confirmedAt: expect.any(Number) },
+    });
     expect(frozen.run.tasks[0].sceneProtection!.confirmation!.confirmedAt).toBeGreaterThanOrEqual(confirmedAfter);
     expect(frozen.run.tasks[0].sceneProtection!.confirmation!.confirmedAt).toBeLessThanOrEqual(Date.now());
     await evidence(info, `${label}-actual-completed-selection-and-protection`, { beforeSelection, pointer: { bounds, start, end, intended, frames, pointerRegion }, selection, frozen });
@@ -286,19 +367,48 @@ async function assertScene(request: APIRequestContext, scene: Awaited<ReturnType
         mode: "active",
         input: { assetIds: [source.asset.id] },
         continuity,
-        referenceDecision: { state: "resolved", editTargetId: source.asset.id, currentSceneBaselineId: source.asset.id, bindings: expect.arrayContaining([expect.objectContaining({ assetId: source.asset.id, alias: "图片1", purposes: ["edit_target"], source: "explicit" })]) },
-        plan: { operation: "scene_edit", source: { productAnchorId: null, currentSceneBaselineId: source.asset.id, sceneReferenceIds: [] }, canvas: { mode: "exact", source: "user_text", size: { width: source.width, height: source.height }, allowReframe: false }, protection: { scope: "local", preserveOutsideMask: true }, continuity: { parentResultId: source.asset.id, branchId: continuity.branchId } },
+        referenceDecision: {
+            state: "resolved",
+            editTargetId: source.asset.id,
+            currentSceneBaselineId: source.asset.id,
+            bindings: expect.arrayContaining([expect.objectContaining({ assetId: source.asset.id, alias: "图片1", purposes: ["edit_target"], source: "explicit" })]),
+        },
+        plan: {
+            operation: "scene_edit",
+            source: { productAnchorId: null, currentSceneBaselineId: source.asset.id, sceneReferenceIds: [] },
+            canvas: { mode: "exact", source: "user_text", size: { width: source.width, height: source.height }, allowReframe: false },
+            protection: { scope: "local", preserveOutsideMask: true },
+            continuity: { parentResultId: source.asset.id, branchId: continuity.branchId },
+        },
         technicalCheck: { status: "passed" },
     });
     expect(scene.baseline).toEqual(source);
     expect(scene.output.asset.id).not.toBe(source.asset.id);
-    expect(scene.output.asset).toMatchObject({ parentAssetId: rootAssetId, sourceRunId: run.id, metadata: { parentAssetIds: [...new Set([rootAssetId, source.asset.id])], ecommerceContinuity: { ...continuity, productAnchorId: null, sceneBaselineId: source.asset.id }, enhancementSkip: { status: "skipped", reason: "not_requested" } } });
+    expect(scene.output.asset).toMatchObject({
+        parentAssetId: rootAssetId,
+        sourceRunId: run.id,
+        metadata: { parentAssetIds: [...new Set([rootAssetId, source.asset.id])], ecommerceContinuity: { ...continuity, productAnchorId: null, sceneBaselineId: source.asset.id }, enhancementSkip: { status: "skipped", reason: "not_requested" } },
+    });
     expect(scene.output.asset.metadata.provenance).not.toBe("ai_enhanced");
     expect(scene.output.asset.metadata.enhancementId).toBeUndefined();
     expect(scene.output).toMatchObject({ width: source.width, height: source.height });
     const result = scene.persistedResults[0].result!.results![0];
     const sourceSize = { width: source.width, height: source.height };
-    expect(result).toMatchObject({ serverUrl: scene.output.immutableUrl, canvasEvidence: { nativeSize: sourceSize, storedSize: sourceSize, nativeUrl: expect.stringMatching(/^\/api\/generation-log-assets\/permanent\//), normalization: "none" }, sceneProtectionEvidence: { sourceAssetId: source.asset.id, sourceDigest: source.sha256, sourceSize, nativeSize: sourceSize, nativeDigest: source.sha256, compositeDigest: scene.output.sha256, compositeUrl: scene.output.immutableUrl, compositeOutsideChangedPixels: 0, normalization: "none" } });
+    expect(result).toMatchObject({
+        serverUrl: scene.output.immutableUrl,
+        canvasEvidence: { nativeSize: sourceSize, storedSize: sourceSize, nativeUrl: expect.stringMatching(/^\/api\/generation-log-assets\/permanent\//), normalization: "none" },
+        sceneProtectionEvidence: {
+            sourceAssetId: source.asset.id,
+            sourceDigest: source.sha256,
+            sourceSize,
+            nativeSize: sourceSize,
+            nativeDigest: source.sha256,
+            compositeDigest: scene.output.sha256,
+            compositeUrl: scene.output.immutableUrl,
+            compositeOutsideChangedPixels: 0,
+            normalization: "none",
+        },
+    });
     expect(result.canvasEvidence!.nativeUrl).toBe(result.sceneProtectionEvidence!.nativeUrl);
     expect(result.canvasEvidence!.nativeUrl).not.toBe(scene.output.immutableUrl);
     const nativeResponse = await request.get(result.canvasEvidence!.nativeUrl!);
@@ -306,7 +416,24 @@ async function assertScene(request: APIRequestContext, scene: Awaited<ReturnType
     const native = await decoded(await nativeResponse.body());
     expect(native).toMatchObject({ ...sourceSize, sha256: source.sha256 });
     const task = run.tasks[0];
-    expect(task).toMatchObject({ status: "completed", attempts: 1, referenceAssetId: source.asset.id, referenceUrl: source.immutableUrl, references: [{ assetId: source.asset.id, url: source.immutableUrl, width: source.width, height: source.height }], sceneProtection: { version: "scene-edit-protection.v1", sourceAssetId: source.asset.id, sourceDigest: source.sha256, sourceSize: { width: source.width, height: source.height }, maskSize: { width: source.width, height: source.height }, selectionSource: "user_selection", targetRegion: selection.region, maskSemantics: "alpha_zero_edit", method: "source_pixels_copy" } });
+    expect(task).toMatchObject({
+        status: "completed",
+        attempts: 1,
+        referenceAssetId: source.asset.id,
+        referenceUrl: source.immutableUrl,
+        references: [{ assetId: source.asset.id, url: source.immutableUrl, width: source.width, height: source.height }],
+        sceneProtection: {
+            version: "scene-edit-protection.v1",
+            sourceAssetId: source.asset.id,
+            sourceDigest: source.sha256,
+            sourceSize: { width: source.width, height: source.height },
+            maskSize: { width: source.width, height: source.height },
+            selectionSource: "user_selection",
+            targetRegion: selection.region,
+            maskSemantics: "alpha_zero_edit",
+            method: "source_pixels_copy",
+        },
+    });
     const protection = task.sceneProtection!;
     const mask = Buffer.from(protection.mask.dataUrl!.split(",")[1], "base64");
     expect(sha256(mask)).toBe(protection.maskDigest);
@@ -314,17 +441,44 @@ async function assertScene(request: APIRequestContext, scene: Awaited<ReturnType
     expect(pixels.info).toMatchObject({ width: source.width, height: source.height, channels: 4 });
     let wrongAlpha = 0;
     const region = selection.region;
-    for (let y = 0; y < source.height; y++) for (let x = 0; x < source.width; x++) {
-        const inside = x >= region.x && x < region.x + region.width && y >= region.y && y < region.y + region.height;
-        if (pixels.data[(y * source.width + x) * 4 + 3] !== (inside ? 0 : 255)) wrongAlpha++;
-    }
+    for (let y = 0; y < source.height; y++)
+        for (let x = 0; x < source.width; x++) {
+            const inside = x >= region.x && x < region.x + region.width && y >= region.y && y < region.y + region.height;
+            if (pixels.data[(y * source.width + x) * 4 + 3] !== (inside ? 0 : 255)) wrongAlpha++;
+        }
     expect(wrongAlpha, "The persisted mask must describe the actual user-selected pixels").toBe(0);
     const checkpoint = run.ecommerceSnapshot!.referenceCheckpoint!.assets.find((item) => item.asset.id === source.asset.id);
     expect(checkpoint).toMatchObject({ asset: source.asset, contentSha256: source.sha256 });
-    return { continuity, sourceDigest: protection.sourceDigest, maskDigest: protection.maskDigest, sourceVariant: source.asset.metadata.provenance === "ai_enhanced" ? "ai_enhanced" : "provider_native", outputKind: "protected_composite", native: { url: result.canvasEvidence!.nativeUrl, ...native } };
+    return {
+        continuity,
+        sourceDigest: protection.sourceDigest,
+        maskDigest: protection.maskDigest,
+        sourceVariant: source.asset.metadata.provenance === "ai_enhanced" ? "ai_enhanced" : "provider_native",
+        outputKind: "protected_composite",
+        native: { url: result.canvasEvidence!.nativeUrl, ...native },
+    };
 }
 async function sourceHashes() {
-    const files = ["e2e/image-enhancement-generation.spec.ts", "e2e/image-enhancement-business-faults.spec.ts", "e2e/image-enhancement-business-faults.fixture.mjs", "e2e/image-enhancement-restart.lifecycle.mjs", "e2e/support.ts", "src/lib/server/agent-run-store.ts", "src/lib/server/agent-run-surface-policy.ts", "src/lib/server/ecommerce-generation-snapshot.ts", "src/lib/server/agent-run-executor.ts", "src/lib/server/ecommerce-generation-service.ts", "src/lib/server/ecommerce-reference-roles.ts", "src/lib/server/ecommerce-product-regions.ts", "src/lib/server/creative-runtime-store.ts", "src/lib/server/image-enhancement-publication.ts", "playwright.config.ts", "playwright.image-enhancement.config.ts", "scripts/run-image-enhancement-e2e.mjs", "e2e/image-enhancement.setup.ts"];
+    const files = [
+        "e2e/image-enhancement-generation.spec.ts",
+        "e2e/image-enhancement-business-faults.spec.ts",
+        "e2e/image-enhancement-business-faults.fixture.mjs",
+        "e2e/image-enhancement-restart.lifecycle.mjs",
+        "e2e/support.ts",
+        "src/lib/server/agent-run-store.ts",
+        "src/lib/server/agent-run-surface-policy.ts",
+        "src/lib/server/ecommerce-generation-snapshot.ts",
+        "src/lib/server/agent-run-executor.ts",
+        "src/lib/server/ecommerce-generation-service.ts",
+        "src/lib/server/ecommerce-reference-roles.ts",
+        "src/lib/server/ecommerce-product-regions.ts",
+        "src/lib/server/creative-runtime-store.ts",
+        "src/lib/server/image-enhancement-publication.ts",
+        "playwright.config.ts",
+        "playwright.image-enhancement.config.ts",
+        "scripts/run-image-enhancement-e2e.mjs",
+        "e2e/image-enhancement.setup.ts",
+    ];
     return Promise.all(files.map(async (file) => ({ path: file, sha256: sha256(await readFile(path.resolve(file))) })));
 }
 
@@ -333,7 +487,9 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
     const root = ownedDataDirectory();
     const fixture = await createBusinessFaultFixture({ root, caseId: `f13-${randomUUID()}`, imagePath: process.env.VOZEB_PRO_M5_BUSINESS_NATIVE_SOURCE!, sceneOutputs: true });
     const browserWorkerRequests: string[] = [];
-    page.context().on("request", (entry) => { if (new URL(entry.url()).origin === fixture.endpoint) browserWorkerRequests.push(entry.url()); });
+    page.context().on("request", (entry) => {
+        if (new URL(entry.url()).origin === fixture.endpoint) browserWorkerRequests.push(entry.url());
+    });
     const stages: Array<{ stage: string; at: number; counts: Counts; facts: unknown }> = [];
     let phase = "setup";
     let firstFailure: { phase: string; message: string; stack?: string } | undefined;
@@ -370,7 +526,20 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
         expect(aBefore.jobs).toHaveLength(1);
         expect(aBefore.jobs[0]).toMatchObject({ status: "running", executionCount: 1, retained: true });
         expect(aBefore.acceptedReceipts).toEqual([]);
-        await record("A actual native saved; synthetic enhancement remains pending", { initialSources, preload, run: a.run, nativeRun: a.nativeRun, source: a.source, nativeTask, nativeLog: initialLog, publicEnhancement: a.pending, ownedEnhancement: await readOwnedJob(root, a.id), nativeMedia: a.nativeMedia, generationDelta: delta(beforeA, afterA), remote: aBefore });
+        await record("A actual native saved; synthetic enhancement remains pending", {
+            initialSources,
+            preload,
+            run: a.run,
+            nativeRun: a.nativeRun,
+            source: a.source,
+            nativeTask,
+            nativeLog: initialLog,
+            publicEnhancement: a.pending,
+            ownedEnhancement: await readOwnedJob(root, a.id),
+            nativeMedia: a.nativeMedia,
+            generationDelta: delta(beforeA, afterA),
+            remote: aBefore,
+        });
 
         phase = "B actual explicit original reference and scene planning";
         await configureGeneration(request, fixture, true);
@@ -414,7 +583,12 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
             await expect(bRound.getByLabel("本轮创作操作", { exact: true })).toHaveAttribute("data-active-asset-id", b.frozen.output.asset.id);
             await expect(input).toHaveValue(draft);
             await expect(page.getByRole("button", { name: `移除${b.frozen.output.asset.title}`, exact: true })).toBeVisible();
-            return { aActiveAssetId: await aRound.getByLabel("本轮创作操作", { exact: true }).getAttribute("data-active-asset-id"), bActiveAssetId: await bRound.getByLabel("本轮创作操作", { exact: true }).getAttribute("data-active-asset-id"), selectedReference: b.frozen.output.asset.id, draft: await input.inputValue() };
+            return {
+                aActiveAssetId: await aRound.getByLabel("本轮创作操作", { exact: true }).getAttribute("data-active-asset-id"),
+                bActiveAssetId: await bRound.getByLabel("本轮创作操作", { exact: true }).getAttribute("data-active-asset-id"),
+                selectedReference: b.frozen.output.asset.id,
+                draft: await input.inputValue(),
+            };
         };
         const frozenEditor = await editor();
         await screenshot(page, info, "f13-B-frozen-before-A-publication");
@@ -431,7 +605,11 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
                 const children = listed.filter((asset) => asset.metadata.enhancementId === a.id && asset.metadata.provenance === "ai_enhanced");
                 expect(boundary.acceptedReceipts).toEqual([]);
                 expect(boundary.job).toMatchObject({ jobId: aBefore.jobs[0].jobId, retained: true });
-                expect(publishing).toMatchObject({ status: "succeeded", phase: "receipt", publication: { publishedAt: expect.any(Number), assetId: expect.any(String), ai: { width: 5016, height: 5016, sha256: fixture.expected.sha256 }, delivered: { width: 4096, height: 4096 } } });
+                expect(publishing).toMatchObject({
+                    status: "succeeded",
+                    phase: "receipt",
+                    publication: { publishedAt: expect.any(Number), assetId: expect.any(String), ai: { width: 5016, height: 5016, sha256: fixture.expected.sha256 }, delivered: { width: 4096, height: 4096 } },
+                });
                 expect(children).toHaveLength(1);
                 const media = await mediaSnapshot(root, a.id);
                 expect(media).toHaveLength(2);
@@ -440,7 +618,10 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
                 expect(sha256(await retained.body())).toBe(fixture.expected.sha256);
                 receiptBoundary = { boundary, publishing, media, child: await immutableImage(request, children[0]), retainedRemoteSha256: fixture.expected.sha256 };
                 await record("A actual independent child and permanent bytes exist before receipt acceptance", receiptBoundary);
-            } catch (error) { receiptFailure = error; throw error; }
+            } catch (error) {
+                receiptFailure = error;
+                throw error;
+            }
         });
         await fixture.setFault("ok");
         const delivered = await waitEnhancement(request, a.id, (job) => Boolean(receiptFailure) || job.status === "failed" || (job.status === "succeeded" && job.phase === "completed"), info);
@@ -457,7 +638,12 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
         expect(await mediaSnapshot(root, a.pending.imageTaskId)).toEqual(a.nativeMedia);
         const allAfterPublication = await listedAssets(request, a.run.conversationId);
         const enhancedAsset = allAfterPublication.find((asset) => asset.id === delivered.enhanced!.assetId)!;
-        expect(enhancedAsset).toMatchObject({ sourceRunId: a.run.id, sourceTaskId: a.id, parentAssetId: a.source.asset.id, metadata: { provenance: "ai_enhanced", parentResultId: a.pending.resultId, parentAssetIds: [a.source.asset.id], enhancementId: a.id, nativeSha256: a.source.sha256, sha256: delivered.enhanced!.sha256 } });
+        expect(enhancedAsset).toMatchObject({
+            sourceRunId: a.run.id,
+            sourceTaskId: a.id,
+            parentAssetId: a.source.asset.id,
+            metadata: { provenance: "ai_enhanced", parentResultId: a.pending.resultId, parentAssetIds: [a.source.asset.id], enhancementId: a.id, nativeSha256: a.source.sha256, sha256: delivered.enhanced!.sha256 },
+        });
         expect(enhancedAsset.id).not.toBe(a.source.asset.id);
         const enhanced = await immutableImage(request, enhancedAsset);
         expect(enhanced).toMatchObject({ width: 4096, height: 4096, sha256: delivered.enhanced!.sha256, byteLength: delivered.enhanced!.byteLength });
@@ -487,7 +673,12 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
         await expect(roundFor(refreshPage, b.frozen.output.asset.id)).toHaveCount(1);
         await unchangedB("B-after-A-and-B-refresh");
         expect(await editor()).toEqual(frozenEditor);
-        expect(await immutableImage(request, (await listedAssets(request, a.run.conversationId)).find((asset) => asset.id === a.source.asset.id)!)).toEqual(a.source);
+        expect(
+            await immutableImage(
+                request,
+                (await listedAssets(request, a.run.conversationId)).find((asset) => asset.id === a.source.asset.id)!,
+            ),
+        ).toEqual(a.source);
         const afterNativeTask = await request.get(`/api/image-tasks/${encodeURIComponent(a.pending.imageTaskId)}`);
         expect(afterNativeTask.ok()).toBe(true);
         expect((await afterNativeTask.json()).task).toEqual(nativeTask);
@@ -511,7 +702,12 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
         for (let repeat = 0; repeat < 2; repeat++) {
             await referenceCurrent(page, roundFor(page, enhanced.asset.id).getByLabel("本轮创作操作", { exact: true }));
             await expect(page.getByRole("button", { name: `移除${enhanced.asset.title}`, exact: true })).toBeVisible();
-            expect(await immutableImage(request, (await listedAssets(request, a.run.conversationId)).find((asset) => asset.id === enhanced.asset.id)!)).toEqual(enhanced);
+            expect(
+                await immutableImage(
+                    request,
+                    (await listedAssets(request, a.run.conversationId)).find((asset) => asset.id === enhanced.asset.id)!,
+                ),
+            ).toEqual(enhanced);
             expect(await readOwnedJob(root, a.id)).toEqual(stableJob);
             expect(await mediaSnapshot(root, a.id)).toEqual(stableMedia);
             expect((await fixture.snapshot()).jobs).toEqual(stableWorker.jobs);
@@ -519,7 +715,13 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
             if (repeat === 0) await page.getByRole("button", { name: `移除${enhanced.asset.title}`, exact: true }).click();
         }
         noCalls(beforeReferences, fixture.counts());
-        await record("Existing enhancement keeps its identity/provenance through repeated actual reads/references", { enhanced, ownedEnhancement: stableJob, media: stableMedia, upstreamDelta: delta(beforeReferences, fixture.counts()), saveBoundary: "UI selectAsset only selects an existing asset; existing provider tests separately cover real register/get upserts" });
+        await record("Existing enhancement keeps its identity/provenance through repeated actual reads/references", {
+            enhanced,
+            ownedEnhancement: stableJob,
+            media: stableMedia,
+            upstreamDelta: delta(beforeReferences, fixture.counts()),
+            saveBoundary: "UI selectAsset only selects an existing asset; existing provider tests separately cover real register/get upserts",
+        });
 
         phase = "C actual explicit enhanced reference and new native scene branch";
         await fixture.setSceneOutput("c-native", fixture.delivery, { width: 4096, height: 4096 });
@@ -532,7 +734,10 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
         const cGraph = await assertScene(request, c.frozen, enhanced, a.source.asset.id, c.selection);
         expect(cGraph.continuity.branchId).not.toBe(bGraph.continuity.branchId);
         expect([a.source.asset.id, enhanced.asset.id, b.frozen.output.asset.id]).not.toContain(c.frozen.output.asset.id);
-        expect(c.frozen.run.ecommerceSnapshot!.referenceCheckpoint!.assets.find((item) => item.asset.id === enhanced.asset.id)).toMatchObject({ asset: { width: 4096, height: 4096, metadata: { provenance: "ai_enhanced", sha256: enhanced.sha256 } }, contentSha256: enhanced.sha256 });
+        expect(c.frozen.run.ecommerceSnapshot!.referenceCheckpoint!.assets.find((item) => item.asset.id === enhanced.asset.id)).toMatchObject({
+            asset: { width: 4096, height: 4096, metadata: { provenance: "ai_enhanced", sha256: enhanced.sha256 } },
+            contentSha256: enhanced.sha256,
+        });
         const cDelta = delta(beforeC, fixture.counts());
         expect(cDelta.generation).toBe(1);
         expect(cDelta.analysis).toBeGreaterThan(0);
@@ -548,7 +753,15 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
         expect(finalWorker.calls.filter((call: { path: string; method: string }) => call.method === "POST" && call.path === "/v1/enhancement-jobs")).toHaveLength(1);
         expect(browserWorkerRequests).toEqual([]);
         await screenshot(page, info, "f13-explicit-C-new-native-branch");
-        await record("Explicit enhanced C has a new persisted native result and branch; B remains frozen", { c: c.frozen, selection: c.selection, graph: cGraph, b: await freezeScene(request, root, bRun.id), generationDelta: cDelta, enhancementIds: enhancementRows.map((row) => row.id), remote: finalWorker });
+        await record("Explicit enhanced C has a new persisted native result and branch; B remains frozen", {
+            c: c.frozen,
+            selection: c.selection,
+            graph: cGraph,
+            b: await freezeScene(request, root, bRun.id),
+            generationDelta: cDelta,
+            enhancementIds: enhancementRows.map((row) => row.id),
+            remote: finalWorker,
+        });
 
         phase = "final passive refresh and source preservation";
         const beforeFinal = fixture.counts();
@@ -557,7 +770,12 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
         await expect(roundFor(refreshPage, c.frozen.output.asset.id)).toHaveCount(1);
         expect(JSON.stringify(await freezeScene(request, root, cRun.id))).toBe(frozenC);
         await unchangedB("B-after-final-passive-refresh");
-        expect(await immutableImage(request, (await listedAssets(request, a.run.conversationId)).find((asset) => asset.id === enhanced.asset.id)!)).toEqual(enhanced);
+        expect(
+            await immutableImage(
+                request,
+                (await listedAssets(request, a.run.conversationId)).find((asset) => asset.id === enhanced.asset.id)!,
+            ),
+        ).toEqual(enhanced);
         await advance(request);
         expect(await readOwnedJob(root, a.id)).toEqual(stableJob);
         expect((await fixture.snapshot()).jobs).toEqual(stableWorker.jobs);
@@ -569,19 +787,48 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
     } catch (error) {
         primaryError = error;
         firstFailure = { phase, message: error instanceof Error ? error.message : String(error), ...(error instanceof Error ? { stack: error.stack } : {}) };
-        try { await screenshot(page, info, "f13-first-failure"); } catch (failure) { cleanupErrors.push({ action: "first-failure screenshot", message: String(failure) }); }
+        try {
+            await screenshot(page, info, "f13-first-failure");
+        } catch (failure) {
+            cleanupErrors.push({ action: "first-failure screenshot", message: String(failure) });
+        }
     } finally {
         for (const [action, cleanup] of [
             ["preserve final worker ledger", async () => evidence(info, "f13-final-worker-ledger", await fixture.snapshot())],
-            ["disable owned application enhancement", async () => { const settings = await getData<ImageEnhancementSettings>(request, "/api/admin/image-enhancement"); const reply = await request.patch("/api/admin/image-enhancement", { data: { revision: settings.revision, enabled: false } }); expect(reply.ok()).toBe(true); }],
+            [
+                "disable owned application enhancement",
+                async () => {
+                    const settings = await getData<ImageEnhancementSettings>(request, "/api/admin/image-enhancement");
+                    const reply = await request.patch("/api/admin/image-enhancement", { data: { revision: settings.revision, enabled: false } });
+                    expect(reply.ok()).toBe(true);
+                },
+            ],
             ["close refresh page", async () => refreshPage?.close()],
             ["close owned protocol fixture", async () => fixture.close()],
         ] as const) {
-            try { await cleanup(); } catch (error) { cleanupErrors.push({ action, message: error instanceof Error ? error.message : String(error) }); }
+            try {
+                await cleanup();
+            } catch (error) {
+                cleanupErrors.push({ action, message: error instanceof Error ? error.message : String(error) });
+            }
         }
-        try { await evidence(info, "f13-outcome", { firstFailure: firstFailure || null, completed: !firstFailure && cleanupErrors.length === 0, phase, cleanupErrors, stages: stages.map((stage) => ({ stage: stage.stage, at: stage.at, counts: stage.counts })), browserWorkerRequests }); }
-        catch (error) { cleanupErrors.push({ action: "preserve final outcome", message: error instanceof Error ? error.message : String(error) }); }
+        try {
+            await evidence(info, "f13-outcome", {
+                firstFailure: firstFailure || null,
+                completed: !firstFailure && cleanupErrors.length === 0,
+                phase,
+                cleanupErrors,
+                stages: stages.map((stage) => ({ stage: stage.stage, at: stage.at, counts: stage.counts })),
+                browserWorkerRequests,
+            });
+        } catch (error) {
+            cleanupErrors.push({ action: "preserve final outcome", message: error instanceof Error ? error.message : String(error) });
+        }
     }
     if (firstFailure) throw primaryError;
-    if (cleanupErrors.length) throw new AggregateError(cleanupErrors.map((item) => new Error(`${item.action}: ${item.message}`)), "F13 cleanup failed after assertions");
+    if (cleanupErrors.length)
+        throw new AggregateError(
+            cleanupErrors.map((item) => new Error(`${item.action}: ${item.message}`)),
+            "F13 cleanup failed after assertions",
+        );
 });

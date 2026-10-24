@@ -22,13 +22,7 @@ export function creativeRunPresentation(run: CreativeAgentRun | undefined, model
 
     if (mode === "image") {
         const deliveredIds = new Set(run.assetIds);
-        const hasEnhancement = outputAssets.some(
-            (asset) =>
-                deliveredIds.has(asset.id) &&
-                asset.type === "image" &&
-                typeof asset.metadata.enhancementId === "string" &&
-                Boolean(asset.metadata.enhancementId.trim()),
-        );
+        const hasEnhancement = outputAssets.some((asset) => deliveredIds.has(asset.id) && asset.type === "image" && typeof asset.metadata.enhancementId === "string" && Boolean(asset.metadata.enhancementId.trim()));
         const actualSizes = Array.from(
             new Set(
                 outputAssets

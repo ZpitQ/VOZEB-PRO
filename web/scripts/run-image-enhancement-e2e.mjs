@@ -13,10 +13,13 @@ import sharp from "sharp";
 
 async function freePort() {
     const server = createServer().listen(0, "127.0.0.1");
-    await new Promise((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); });
+    await new Promise((resolve, reject) => {
+        server.once("listening", resolve);
+        server.once("error", reject);
+    });
     const address = server.address();
     assert.ok(address && typeof address === "object");
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     return String(address.port);
 }
 
@@ -25,7 +28,13 @@ const runId = randomUUID();
 const source = join(data, "native-source.png");
 const storageState = join(data, "admin-state.json");
 const output = join(process.cwd(), ".e2e-artifacts", `image-enhancement-${runId}`);
-await writeFile(source, await sharp({ create: { width: 1254, height: 1254, channels: 3, background: "#4a778b" } }).png().toBuffer(), { flag: "wx" });
+await writeFile(
+    source,
+    await sharp({ create: { width: 1254, height: 1254, channels: 3, background: "#4a778b" } })
+        .png()
+        .toBuffer(),
+    { flag: "wx" },
+);
 const native = await readFile(source);
 const image = sharp(native, { failOn: "warning" });
 const metadata = await image.metadata();
@@ -62,7 +71,10 @@ const child = spawn(process.execPath, [fileURLToPath(import.meta.resolve("@playw
         VOZEB_PRO_M5_BUSINESS_NATIVE_SHA256: sourceSha256,
     },
 });
-child.on("error", (error) => { console.error(error); process.exitCode = 1; });
+child.on("error", (error) => {
+    console.error(error);
+    process.exitCode = 1;
+});
 child.on("exit", (code, signal) => {
     if (signal) console.error(`Playwright terminated by ${signal}`);
     process.exitCode = code ?? 1;

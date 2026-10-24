@@ -100,11 +100,7 @@ describe("creativeRunPresentation", () => {
     });
 
     it("keeps every distinct original size when one delivered image has an enhancement identity", () => {
-        const originals = [
-            { ...imageAsset("square-one", 1254, 1254), metadata: { enhancementId: " enhancement-one " } },
-            imageAsset("portrait", 1024, 1536),
-            imageAsset("square-two", 1254, 1254),
-        ];
+        const originals = [{ ...imageAsset("square-one", 1254, 1254), metadata: { enhancementId: " enhancement-one " } }, imageAsset("portrait", 1024, 1536), imageAsset("square-two", 1254, 1254)];
         const enhanced = { ...imageAsset("enhanced-square", 4096, 4096), parentAssetId: originals[0].id, metadata: { enhancementId: "enhancement-one", provenance: "ai_enhanced" } };
 
         const items = creativeRunPresentation(imageRun(originals.map((asset) => asset.id)), new Map(), [...originals, enhanced]);

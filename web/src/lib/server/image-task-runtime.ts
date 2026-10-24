@@ -404,7 +404,9 @@ async function completeImageResult(task: ImageTask, safeResults: StoredImageTask
         loggedAssets.length && !completed.ecommerceExecution?.canvas && !completed.sceneProtection
             ? safeResults.map((media, index) => {
                   const asset = loggedAssets[index];
-                  return media.nativeSource || !asset ? media : { ...media, dataUrl: asset.serverUrl || asset.url, remoteUrl: asset.remoteUrl, serverUrl: asset.serverUrl, width: asset.width, height: asset.height, bytes: asset.bytes, mimeType: asset.mimeType };
+                  return media.nativeSource || !asset
+                      ? media
+                      : { ...media, dataUrl: asset.serverUrl || asset.url, remoteUrl: asset.remoteUrl, serverUrl: asset.serverUrl, width: asset.width, height: asset.height, bytes: asset.bytes, mimeType: asset.mimeType };
               })
             : safeResults;
     const finalResult = finalResults[0];

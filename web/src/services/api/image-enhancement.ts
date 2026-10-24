@@ -11,7 +11,12 @@ async function taskRequest(id: string, action?: "retry" | "cancel"): Promise<Pub
     let response: Response;
     let payload: { code: number; data: PublicImageEnhancement; msg?: unknown } | null;
     try {
-        response = await fetch(`/api/image-enhancements/${encodeURIComponent(id)}`, { method: action ? "POST" : "GET", cache: "no-store", credentials: "same-origin", ...(action ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }) } : {}) });
+        response = await fetch(`/api/image-enhancements/${encodeURIComponent(id)}`, {
+            method: action ? "POST" : "GET",
+            cache: "no-store",
+            credentials: "same-origin",
+            ...(action ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }) } : {}),
+        });
         payload = await response.json();
     } catch {
         throw new Error("增强任务操作失败");

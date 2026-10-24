@@ -20,7 +20,15 @@ function workerTransport(connection: TaskConnection) {
     const agent = new Agent({ connect: connection.trust === "custom_ca" ? { ca: connection.caPem, rejectUnauthorized: true } : { rejectUnauthorized: true } });
     async function call(path: string, method: "GET" | "POST" | "DELETE" = "GET", maxBytes = 4 * 1024 * 1024, body?: string | FormData, headers?: Record<string, string>) {
         // JSON responses use the same 4 MiB boundary as the existing admin request parser.
-        const response = await request(connection.endpoint + path, { method, dispatcher: agent, headers: { ...headers, authorization: `Bearer ${connection.token}` }, body, signal: AbortSignal.timeout(timeoutMs), headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
+        const response = await request(connection.endpoint + path, {
+            method,
+            dispatcher: agent,
+            headers: { ...headers, authorization: `Bearer ${connection.token}` },
+            body,
+            signal: AbortSignal.timeout(timeoutMs),
+            headersTimeout: timeoutMs,
+            bodyTimeout: timeoutMs,
+        });
         if (response.statusCode === 401 || response.statusCode === 403) {
             response.body.on("error", () => undefined);
             response.body.destroy();
@@ -188,7 +196,11 @@ const fingerprint = (value: unknown) => createHash("sha256").update(JSON.stringi
 export function createEnhancementTaskClient(connection: TaskConnection) {
     const transport = workerTransport(connection);
     async function safe<T>(operation: () => Promise<T>): Promise<T> {
-        try { return await operation(); } catch (error) { throw error instanceof WorkerCheckError ? error : new WorkerCheckError(transportReason(error)); }
+        try {
+            return await operation();
+        } catch (error) {
+            throw error instanceof WorkerCheckError ? error : new WorkerCheckError(transportReason(error));
+        }
     }
     async function identity() {
         const capabilities = await transport.json("/v1/capabilities");
@@ -206,7 +218,16 @@ export function createEnhancementTaskClient(connection: TaskConnection) {
         const id = uuid(data.jobId);
         const remotePlan = object(data.plan);
         const engineInput = size(data.engineInput);
-        if (data.serviceId !== connection.serviceId || (expectedId && id !== expectedId) || remotePlan.planFingerprint !== plan.planFingerprint || remotePlan.strategyFingerprint !== plan.strategyFingerprint || object(data.source).sha256 !== plan.sourceSha256 || engineInput.width !== plan.source.width || engineInput.height !== plan.source.height) fail("invalid_response");
+        if (
+            data.serviceId !== connection.serviceId ||
+            (expectedId && id !== expectedId) ||
+            remotePlan.planFingerprint !== plan.planFingerprint ||
+            remotePlan.strategyFingerprint !== plan.strategyFingerprint ||
+            object(data.source).sha256 !== plan.sourceSha256 ||
+            engineInput.width !== plan.source.width ||
+            engineInput.height !== plan.source.height
+        )
+            fail("invalid_response");
         if (typeof data.status !== "string" || !["queued", "running", "succeeded", "failed", "cancelled"].includes(data.status)) fail("invalid_response");
         const output = data.result ? artifact(data.result) : null;
         if (data.status === "succeeded" && (!output || output.width !== engineInput.width * plan.engine.nativeScale || output.height !== engineInput.height * plan.engine.nativeScale)) fail("output_invalid");
@@ -222,62 +243,120 @@ export function createEnhancementTaskClient(connection: TaskConnection) {
                 timings[key] = value;
             }
         }
-        return Object.freeze({ jobId: id, status: data.status as RemoteEnhancementJob["status"], reason, result: output, createdAt: positive(data.createdAt), completedAt: data.completedAt === null ? null : positive(data.completedAt), ...(Object.keys(timings).length ? { timings: Object.freeze(timings) } : {}) });
+        return Object.freeze({
+            jobId: id,
+            status: data.status as RemoteEnhancementJob["status"],
+            reason,
+            result: output,
+            createdAt: positive(data.createdAt),
+            completedAt: data.completedAt === null ? null : positive(data.completedAt),
+            ...(Object.keys(timings).length ? { timings: Object.freeze(timings) } : {}),
+        });
     }
     return {
-        prepare: (decision: Extract<EnhancementDecision, { status: "queued" }>) => safe(async (): Promise<FrozenWorkerEnhancementPlan> => {
-            if (decision.connection.serviceId !== connection.serviceId) fail("service_identity_changed");
-            const capabilities = await identity();
-            if (object(capabilities.features).expectedStrategyFingerprint !== true) fail("strategy_binding_unavailable");
-            if (capabilities.ready !== true) fail("engine_unavailable");
-            if (!Array.isArray(capabilities.models)) fail("invalid_response");
-            const selected = capabilities.models.map(parseModel).find((model) => model.id === decision.connection.model.id);
-            if (!selected || !isDeepStrictEqual(selected, decision.connection.model)) fail("model_unavailable");
-            const raw = object(capabilities.budgets);
-            const budget = (key: string) => Object.freeze({ maxBytes: positive(object(raw[key]).maxBytes), maxPixels: positive(object(raw[key]).maxPixels) });
-            const budgets = Object.freeze({ input: budget("input"), ai: budget("ai"), delivery: budget("delivery") });
-            const inferencePixels = BigInt(decision.inference.width) * BigInt(decision.inference.height);
-            if (decision.source.byteLength > budgets.input.maxBytes || BigInt(decision.source.width) * BigInt(decision.source.height) > BigInt(budgets.input.maxPixels) || inferencePixels > BigInt(budgets.ai.maxPixels) || inferencePixels > BigInt(budgets.delivery.maxPixels) || BigInt(decision.target.width) * BigInt(decision.target.height) > BigInt(budgets.delivery.maxPixels)) fail("budget_exceeded");
-            // The Worker produces native 4x; ZEB owns the separate requested delivery boundary.
-            const target = Object.freeze({ width: decision.inference.width, height: decision.inference.height, format: "png" as const });
-            const engine = Object.freeze({ modelId: selected.id, binaryVersion: selected.binaryVersion, binarySha256: selected.binarySha256, modelVersion: selected.modelVersion, modelSha256: selected.modelSha256, nativeScale: selected.nativeScale, tile: selected.defaultTile, tta: selected.tta, gpuId: selected.gpuId });
-            const strategy = { protocolVersion: "image-enhancement.v1" as const, scope: "full_image" as const, target, normalizationProfile: "srgb-upright-v1" as const, engine, budgets };
-            return Object.freeze({ ...strategy, sourceSha256: decision.source.sha256, strategyFingerprint: fingerprint(strategy), planFingerprint: fingerprint({ sourceSha256: decision.source.sha256, ...strategy }), source: Object.freeze({ ...decision.source }) });
-        }),
-        submit: (plan: FrozenWorkerEnhancementPlan, bytes: Buffer, key: string) => safe(async () => {
-            if (bytes.length !== plan.source.byteLength || createHash("sha256").update(bytes).digest("hex") !== plan.sourceSha256) fail("input_digest_mismatch");
-            await identity();
-            const body = new FormData();
-            body.append("plan", JSON.stringify({ protocolVersion: plan.protocolVersion, scope: plan.scope, sourceSha256: plan.sourceSha256, target: plan.target, modelId: plan.engine.modelId, normalizationProfile: plan.normalizationProfile, tile: plan.engine.tile, expectedStrategyFingerprint: plan.strategyFingerprint }));
-            body.append("image", new Blob([new Uint8Array(bytes)], { type: plan.source.format === "jpeg" ? "image/jpeg" : "image/png" }), `source.${plan.source.format}`);
-            const result = await transport.json("/v1/enhancement-jobs", "POST", body, { "idempotency-key": key });
-            if (typeof result.replayed !== "boolean") fail("invalid_response");
-            return { job: job(result.job, plan), replayed: result.replayed };
-        }),
-        query: (plan: FrozenWorkerEnhancementPlan, jobId: string) => safe(async () => {
-            await identity();
-            return job((await transport.json(`/v1/enhancement-jobs/${uuid(jobId)}`)).job, plan, jobId);
-        }),
-        download: (plan: FrozenWorkerEnhancementPlan, jobId: string, expected: EnhancementArtifact) => safe(async () => {
-            await identity();
-            const bytes = await transport.call(`/v1/enhancement-jobs/${uuid(jobId)}/result`, "GET", plan.budgets.ai.maxBytes);
-            if (bytes.length !== expected.byteLength || createHash("sha256").update(bytes).digest("hex") !== expected.sha256 || expected.width !== plan.source.width * plan.engine.nativeScale || expected.height !== plan.source.height * plan.engine.nativeScale) fail("output_invalid");
-            try {
-                const image = sharp(bytes, { failOn: "warning", limitInputPixels: plan.budgets.ai.maxPixels });
-                const metadata = await image.metadata();
-                const stats = await image.stats();
-                if (metadata.format !== "png" || (metadata.pages && metadata.pages !== 1) || (metadata.orientation && metadata.orientation !== 1) || metadata.width !== expected.width || metadata.height !== expected.height || !stats.isOpaque) fail("output_invalid");
-            } catch { fail("output_invalid"); }
-            return bytes;
-        }),
-        acknowledge: (plan: FrozenWorkerEnhancementPlan, jobId: string, receiptId: string, output: EnhancementArtifact) => safe(async () => {
-            await identity();
-            await transport.json(`/v1/enhancement-jobs/${uuid(jobId)}/receipt`, "POST", JSON.stringify({ serviceId: connection.serviceId, receiptId: uuid(receiptId), result: output }), { "content-type": "application/json" });
-        }),
-        cancel: (plan: FrozenWorkerEnhancementPlan, jobId: string) => safe(async () => {
-            await identity();
-            return job((await transport.json(`/v1/enhancement-jobs/${uuid(jobId)}`, "DELETE")).job, plan, jobId);
-        }),
+        prepare: (decision: Extract<EnhancementDecision, { status: "queued" }>) =>
+            safe(async (): Promise<FrozenWorkerEnhancementPlan> => {
+                if (decision.connection.serviceId !== connection.serviceId) fail("service_identity_changed");
+                const capabilities = await identity();
+                if (object(capabilities.features).expectedStrategyFingerprint !== true) fail("strategy_binding_unavailable");
+                if (capabilities.ready !== true) fail("engine_unavailable");
+                if (!Array.isArray(capabilities.models)) fail("invalid_response");
+                const selected = capabilities.models.map(parseModel).find((model) => model.id === decision.connection.model.id);
+                if (!selected || !isDeepStrictEqual(selected, decision.connection.model)) fail("model_unavailable");
+                const raw = object(capabilities.budgets);
+                const budget = (key: string) => Object.freeze({ maxBytes: positive(object(raw[key]).maxBytes), maxPixels: positive(object(raw[key]).maxPixels) });
+                const budgets = Object.freeze({ input: budget("input"), ai: budget("ai"), delivery: budget("delivery") });
+                const inferencePixels = BigInt(decision.inference.width) * BigInt(decision.inference.height);
+                if (
+                    decision.source.byteLength > budgets.input.maxBytes ||
+                    BigInt(decision.source.width) * BigInt(decision.source.height) > BigInt(budgets.input.maxPixels) ||
+                    inferencePixels > BigInt(budgets.ai.maxPixels) ||
+                    inferencePixels > BigInt(budgets.delivery.maxPixels) ||
+                    BigInt(decision.target.width) * BigInt(decision.target.height) > BigInt(budgets.delivery.maxPixels)
+                )
+                    fail("budget_exceeded");
+                // The Worker produces native 4x; ZEB owns the separate requested delivery boundary.
+                const target = Object.freeze({ width: decision.inference.width, height: decision.inference.height, format: "png" as const });
+                const engine = Object.freeze({
+                    modelId: selected.id,
+                    binaryVersion: selected.binaryVersion,
+                    binarySha256: selected.binarySha256,
+                    modelVersion: selected.modelVersion,
+                    modelSha256: selected.modelSha256,
+                    nativeScale: selected.nativeScale,
+                    tile: selected.defaultTile,
+                    tta: selected.tta,
+                    gpuId: selected.gpuId,
+                });
+                const strategy = { protocolVersion: "image-enhancement.v1" as const, scope: "full_image" as const, target, normalizationProfile: "srgb-upright-v1" as const, engine, budgets };
+                return Object.freeze({
+                    ...strategy,
+                    sourceSha256: decision.source.sha256,
+                    strategyFingerprint: fingerprint(strategy),
+                    planFingerprint: fingerprint({ sourceSha256: decision.source.sha256, ...strategy }),
+                    source: Object.freeze({ ...decision.source }),
+                });
+            }),
+        submit: (plan: FrozenWorkerEnhancementPlan, bytes: Buffer, key: string) =>
+            safe(async () => {
+                if (bytes.length !== plan.source.byteLength || createHash("sha256").update(bytes).digest("hex") !== plan.sourceSha256) fail("input_digest_mismatch");
+                await identity();
+                const body = new FormData();
+                body.append(
+                    "plan",
+                    JSON.stringify({
+                        protocolVersion: plan.protocolVersion,
+                        scope: plan.scope,
+                        sourceSha256: plan.sourceSha256,
+                        target: plan.target,
+                        modelId: plan.engine.modelId,
+                        normalizationProfile: plan.normalizationProfile,
+                        tile: plan.engine.tile,
+                        expectedStrategyFingerprint: plan.strategyFingerprint,
+                    }),
+                );
+                body.append("image", new Blob([new Uint8Array(bytes)], { type: plan.source.format === "jpeg" ? "image/jpeg" : "image/png" }), `source.${plan.source.format}`);
+                const result = await transport.json("/v1/enhancement-jobs", "POST", body, { "idempotency-key": key });
+                if (typeof result.replayed !== "boolean") fail("invalid_response");
+                return { job: job(result.job, plan), replayed: result.replayed };
+            }),
+        query: (plan: FrozenWorkerEnhancementPlan, jobId: string) =>
+            safe(async () => {
+                await identity();
+                return job((await transport.json(`/v1/enhancement-jobs/${uuid(jobId)}`)).job, plan, jobId);
+            }),
+        download: (plan: FrozenWorkerEnhancementPlan, jobId: string, expected: EnhancementArtifact) =>
+            safe(async () => {
+                await identity();
+                const bytes = await transport.call(`/v1/enhancement-jobs/${uuid(jobId)}/result`, "GET", plan.budgets.ai.maxBytes);
+                if (
+                    bytes.length !== expected.byteLength ||
+                    createHash("sha256").update(bytes).digest("hex") !== expected.sha256 ||
+                    expected.width !== plan.source.width * plan.engine.nativeScale ||
+                    expected.height !== plan.source.height * plan.engine.nativeScale
+                )
+                    fail("output_invalid");
+                try {
+                    const image = sharp(bytes, { failOn: "warning", limitInputPixels: plan.budgets.ai.maxPixels });
+                    const metadata = await image.metadata();
+                    const stats = await image.stats();
+                    if (metadata.format !== "png" || (metadata.pages && metadata.pages !== 1) || (metadata.orientation && metadata.orientation !== 1) || metadata.width !== expected.width || metadata.height !== expected.height || !stats.isOpaque)
+                        fail("output_invalid");
+                } catch {
+                    fail("output_invalid");
+                }
+                return bytes;
+            }),
+        acknowledge: (plan: FrozenWorkerEnhancementPlan, jobId: string, receiptId: string, output: EnhancementArtifact) =>
+            safe(async () => {
+                await identity();
+                await transport.json(`/v1/enhancement-jobs/${uuid(jobId)}/receipt`, "POST", JSON.stringify({ serviceId: connection.serviceId, receiptId: uuid(receiptId), result: output }), { "content-type": "application/json" });
+            }),
+        cancel: (plan: FrozenWorkerEnhancementPlan, jobId: string) =>
+            safe(async () => {
+                await identity();
+                return job((await transport.json(`/v1/enhancement-jobs/${uuid(jobId)}`, "DELETE")).job, plan, jobId);
+            }),
         close: transport.close,
     };
 }

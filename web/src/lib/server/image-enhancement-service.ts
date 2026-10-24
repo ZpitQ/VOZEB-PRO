@@ -27,7 +27,7 @@ export async function runImageEnhancementBatch(input: { origin: string; workerId
     try {
         const persistence = leases.filter((job) => ["download", "publish", "receipt"].includes(job.phase));
         const queries = leases.filter((job) => !persistence.includes(job));
-        const results = [...await runWithConcurrency(queries, 20, (job) => processEnhancement(job, input.origin)), ...await runWithConcurrency(persistence, 4, (job) => processEnhancement(job, input.origin))];
+        const results = [...(await runWithConcurrency(queries, 20, (job) => processEnhancement(job, input.origin))), ...(await runWithConcurrency(persistence, 4, (job) => processEnhancement(job, input.origin)))];
         return { claimed: leases.length, completed: results.filter((job) => job?.status === "succeeded" || job?.status === "cancelled").length, failed: results.filter((job) => job?.status === "failed").length };
     } finally {
         clearInterval(heartbeat);
@@ -40,23 +40,32 @@ async function processEnhancement(lease: ImageEnhancementJob, origin: string) {
         if (!result) throw new EnhancementLeaseLost();
         return result;
     };
-    const finish = (status: "cancelled" | "failed", reason: string) => update((job) => ({ ...job, status, reason, phase: status === "cancelled" ? "completed" : job.phase, nextPollAt: null, events: [...job.events, { stage: status, at: Date.now(), attempt: job.attempt, reason }] }));
+    const finish = (status: "cancelled" | "failed", reason: string) =>
+        update((job) => ({ ...job, status, reason, phase: status === "cancelled" ? "completed" : job.phase, nextPollAt: null, events: [...job.events, { stage: status, at: Date.now(), attempt: job.attempt, reason }] }));
     let client: ReturnType<typeof createEnhancementTaskClient> | undefined;
     try {
         const current = await getEnhancementJob(lease.id, lease.userId);
         if (!current || current.leaseToken !== lease.leaseToken) throw new EnhancementLeaseLost();
         if (current.cancelRequested && !current.submittedAt && !current.remoteJobId) return await finish("cancelled", "cancelled_before_submission");
-        const task = await (getDatabaseProvider() === "file"
-            ? withJsonDataFileLock(GENERATION_TASK_FILE, () => getImageTask(current.imageTaskId))
-            : getImageTask(current.imageTaskId));
+        const task = await (getDatabaseProvider() === "file" ? withJsonDataFileLock(GENERATION_TASK_FILE, () => getImageTask(current.imageTaskId)) : getImageTask(current.imageTaskId));
         const native = (task?.result?.results?.length ? task.result.results : task?.result ? [task.result] : []).find((result) => result.resultId === current.resultId);
-        if (!current.publication && (!task || task.status !== "success" || task.userId !== current.userId || !native || !isDeepStrictEqual(native.nativeSource, current.decision.source) || (native.serverUrl || native.dataUrl) !== current.decision.source.url)) throw new EnhancementExecutionError("native_identity_changed");
+        if (
+            !current.publication &&
+            (!task || task.status !== "success" || task.userId !== current.userId || !native || !isDeepStrictEqual(native.nativeSource, current.decision.source) || (native.serverUrl || native.dataUrl) !== current.decision.source.url)
+        )
+            throw new EnhancementExecutionError("native_identity_changed");
         if (!current.publication && !(current.cancelRequested && current.remoteJobId)) {
             const output = task?.ecommerceTrace?.stages.find((stage) => stage.key === "image_generation")?.output;
             const technical = output && typeof output === "object" && !Array.isArray(output) ? output.technicalCheck : null;
-            if (technical && typeof technical === "object" && !Array.isArray(technical) && technical.version === "ecommerce-technical.v1" && Array.isArray(technical.hardFailures) && technical.hardFailures.some((check) =>
-                check && typeof check === "object" && !Array.isArray(check) && check.status === "failed" && (check.resultId === current.resultId || check.resultId === "batch"),
-            )) throw new EnhancementExecutionError("native_invalid");
+            if (
+                technical &&
+                typeof technical === "object" &&
+                !Array.isArray(technical) &&
+                technical.version === "ecommerce-technical.v1" &&
+                Array.isArray(technical.hardFailures) &&
+                technical.hardFailures.some((check) => check && typeof check === "object" && !Array.isArray(check) && check.status === "failed" && (check.resultId === current.resultId || check.resultId === "batch"))
+            )
+                throw new EnhancementExecutionError("native_invalid");
         }
         if (current.decision.status !== "queued") throw new EnhancementExecutionError("invalid_enhancement_plan");
         client = createEnhancementTaskClient(await resolveImageEnhancementConnection(current.decision.connection));
@@ -66,17 +75,29 @@ async function processEnhancement(lease: ImageEnhancementJob, origin: string) {
         }
         const plan = current.remotePlan;
         if (!plan) throw new EnhancementExecutionError("invalid_enhancement_plan");
-        const recordRemote = (remote: RemoteEnhancementJob) => update((job) => {
-            const cancelled = job.cancelRequested || remote.status === "cancelled";
-            const terminal = remote.status === "failed" || remote.status === "cancelled" || (cancelled && remote.status === "succeeded");
-            const timings = { ...remote.timings, ...(job.timings?.deliveryEncodingMs === undefined ? {} : { deliveryEncodingMs: job.timings.deliveryEncodingMs }) };
-            return { ...job, remoteJobId: remote.jobId, remoteStatus: remote.status, remoteResult: remote.result || undefined, timings: Object.keys(timings).length ? timings : undefined, status: terminal ? cancelled ? "cancelled" : "failed" : "running", phase: terminal ? cancelled ? "completed" : job.phase : remote.status === "succeeded" ? "download" : "poll", reason: terminal ? remote.reason || (cancelled ? "cancelled" : "engine_failed") : null, nextPollAt: terminal ? null : generationTaskNextPollAt({ submittedAt: job.submittedAt || job.createdAt }), events: [...job.events, { stage: `worker_${remote.status}`, at: Date.now(), attempt: job.attempt }] };
-        });
+        const recordRemote = (remote: RemoteEnhancementJob) =>
+            update((job) => {
+                const cancelled = job.cancelRequested || remote.status === "cancelled";
+                const terminal = remote.status === "failed" || remote.status === "cancelled" || (cancelled && remote.status === "succeeded");
+                const timings = { ...remote.timings, ...(job.timings?.deliveryEncodingMs === undefined ? {} : { deliveryEncodingMs: job.timings.deliveryEncodingMs }) };
+                return {
+                    ...job,
+                    remoteJobId: remote.jobId,
+                    remoteStatus: remote.status,
+                    remoteResult: remote.result || undefined,
+                    timings: Object.keys(timings).length ? timings : undefined,
+                    status: terminal ? (cancelled ? "cancelled" : "failed") : "running",
+                    phase: terminal ? (cancelled ? "completed" : job.phase) : remote.status === "succeeded" ? "download" : "poll",
+                    reason: terminal ? remote.reason || (cancelled ? "cancelled" : "engine_failed") : null,
+                    nextPollAt: terminal ? null : generationTaskNextPollAt({ submittedAt: job.submittedAt || job.createdAt }),
+                    events: [...job.events, { stage: `worker_${remote.status}`, at: Date.now(), attempt: job.attempt }],
+                };
+            });
         if (current.phase === "submit") {
             const dataUrl = await imageReferenceToDataUrl({ dataUrl: current.decision.source.url }, "enhancement-native.png", origin, maintenanceWorkerContext(current.userId));
             const bytes = Buffer.from(dataUrl.split(",")[1] || "", "base64");
             if (bytes.length !== plan.source.byteLength || createHash("sha256").update(bytes).digest("hex") !== plan.sourceSha256) throw new EnhancementExecutionError("input_digest_mismatch");
-            const marked = await update((job) => job.cancelRequested && !job.submittedAt ? job : { ...job, submittedAt: job.submittedAt || Date.now() });
+            const marked = await update((job) => (job.cancelRequested && !job.submittedAt ? job : { ...job, submittedAt: job.submittedAt || Date.now() }));
             if (marked.cancelRequested && !marked.submittedAt) return await finish("cancelled", "cancelled_before_submission");
             const accepted = await client.submit(plan, bytes, current.remoteKey);
             return await recordRemote(accepted.job);
@@ -95,12 +116,32 @@ async function processEnhancement(lease: ImageEnhancementJob, origin: string) {
         throw new EnhancementExecutionError("invalid_enhancement_plan");
     } catch (error) {
         if (error instanceof EnhancementLeaseLost) return null;
-        const reason = error instanceof EnhancementExecutionError || error instanceof ImageEnhancementPublicationError ? error.message : error instanceof WorkerCheckError ? error.reason : error instanceof ImageEnhancementConfigError ? error.code : "enhancement_unavailable";
+        const reason =
+            error instanceof EnhancementExecutionError || error instanceof ImageEnhancementPublicationError
+                ? error.message
+                : error instanceof WorkerCheckError
+                  ? error.reason
+                  : error instanceof ImageEnhancementConfigError
+                    ? error.code
+                    : "enhancement_unavailable";
         if (reason === "lease_lost") return null;
         if (reason === "cancel_requested") return await finish("cancelled", "cancelled");
         const published = await getEnhancementJob(lease.id, lease.userId);
-        if (published?.publication) return await update((job) => ({ ...job, status: "succeeded", phase: "receipt", reason, nextPollAt: generationTaskNextPollAt({ submittedAt: job.submittedAt || job.createdAt }), events: [...job.events, { stage: "receipt_deferred", at: Date.now(), attempt: job.attempt, reason }] }));
-        try { return await finish("failed", reason); } catch (failure) { if (failure instanceof EnhancementLeaseLost) return null; throw failure; }
+        if (published?.publication)
+            return await update((job) => ({
+                ...job,
+                status: "succeeded",
+                phase: "receipt",
+                reason,
+                nextPollAt: generationTaskNextPollAt({ submittedAt: job.submittedAt || job.createdAt }),
+                events: [...job.events, { stage: "receipt_deferred", at: Date.now(), attempt: job.attempt, reason }],
+            }));
+        try {
+            return await finish("failed", reason);
+        } catch (failure) {
+            if (failure instanceof EnhancementLeaseLost) return null;
+            throw failure;
+        }
     } finally {
         await client?.close().catch(() => undefined);
         await mutateEnhancementJob(lease.id, lease.userId, (job) => ({ ...job, workerId: null, leaseToken: null, leaseUntil: null }), { token: lease.leaseToken!, now: Date.now() });
@@ -128,7 +169,14 @@ export async function retryImageEnhancement(id: string, userId: string) {
         accepted = true;
         const newInference = job.remoteStatus === "failed" || job.remoteStatus === "cancelled";
         const attempt = job.attempt + (newInference ? 1 : 0);
-        return { ...job, status: "queued", reason: null, nextPollAt: Date.now(), ...(newInference ? { attempt, phase: "submit" as const, remoteJobId: undefined, remoteStatus: undefined, remoteResult: undefined, timings: undefined, submittedAt: undefined, remoteKey: `${job.id}:${attempt}`, receiptId: randomUUID() } : {}), events: [...job.events, { stage: "retry_requested", at: Date.now(), attempt }] };
+        return {
+            ...job,
+            status: "queued",
+            reason: null,
+            nextPollAt: Date.now(),
+            ...(newInference ? { attempt, phase: "submit" as const, remoteJobId: undefined, remoteStatus: undefined, remoteResult: undefined, timings: undefined, submittedAt: undefined, remoteKey: `${job.id}:${attempt}`, receiptId: randomUUID() } : {}),
+            events: [...job.events, { stage: "retry_requested", at: Date.now(), attempt }],
+        };
     });
     return accepted ? changed : null;
 }

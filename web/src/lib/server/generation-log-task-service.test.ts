@@ -156,7 +156,26 @@ describe("generation log task service", () => {
             { type: "image" as const, url: assetUrl("native"), resultId: "task-a:result-one", enhancementId: "enhancement-one", nativeSource: { ...nativeSource, evidencePath: "private-native-path" }, enhancement: { token: "private-stale-summary" } },
             { type: "image" as const, url: assetUrl("second"), resultId: "task-a:result-two", enhancementSkip: { status: "skipped" as const, reason: "protected_contract" as const, raw: "private-skip" } },
         ];
-        await service.recordGenerationTaskLogResult({ logId: "log-enhancement", slotId: "slot-a", clientRequestId: "request-slot-a", taskId: "task-a", userId: "user-one", username: "user", displayName: "User", kind: "image", source: "image-workbench", status: "success", title: "增强记录", prompt: "公开需求", model: "image-model", summary: "完成", durationMs: 100, assets: assets as unknown as Parameters<typeof service.recordGenerationTaskLogResult>[0]["assets"], taskKind: "generation", createdAt: Date.now() });
+        await service.recordGenerationTaskLogResult({
+            logId: "log-enhancement",
+            slotId: "slot-a",
+            clientRequestId: "request-slot-a",
+            taskId: "task-a",
+            userId: "user-one",
+            username: "user",
+            displayName: "User",
+            kind: "image",
+            source: "image-workbench",
+            status: "success",
+            title: "增强记录",
+            prompt: "公开需求",
+            model: "image-model",
+            summary: "完成",
+            durationMs: 100,
+            assets: assets as unknown as Parameters<typeof service.recordGenerationTaskLogResult>[0]["assets"],
+            taskKind: "generation",
+            createdAt: Date.now(),
+        });
 
         const raw = await readFile(resolve(dataDir, "generation-logs.json"), "utf8");
         expect(raw).not.toContain("private-");
@@ -177,10 +196,32 @@ describe("generation log task service", () => {
             { type: "image" as const, url: assetUrl("shared-native"), resultId: "task-a:result-one", enhancementId: "enhancement-one" },
             { type: "image" as const, url: assetUrl("shared-native"), resultId: "task-a:result-two", enhancementId: "enhancement-two" },
         ];
-        await service.recordGenerationTaskLogResult({ logId: "log-shared-url", slotId: "slot-a", clientRequestId: "request-slot-a", taskId: "task-a", userId: "user-one", username: "user", displayName: "User", kind: "image", source: "image-workbench", status: "success", title: "独立原结果", prompt: "公开需求", model: "image-model", summary: "完成", durationMs: 100, assets, taskKind: "generation", createdAt: Date.now() });
+        await service.recordGenerationTaskLogResult({
+            logId: "log-shared-url",
+            slotId: "slot-a",
+            clientRequestId: "request-slot-a",
+            taskId: "task-a",
+            userId: "user-one",
+            username: "user",
+            displayName: "User",
+            kind: "image",
+            source: "image-workbench",
+            status: "success",
+            title: "独立原结果",
+            prompt: "公开需求",
+            model: "image-model",
+            summary: "完成",
+            durationMs: 100,
+            assets,
+            taskKind: "generation",
+            createdAt: Date.now(),
+        });
 
         const log = await getLog("log-shared-url");
-        expect(log?.assets).toMatchObject([{ resultId: "task-a:result-one", enhancementId: "enhancement-one" }, { resultId: "task-a:result-two", enhancementId: "enhancement-two" }]);
+        expect(log?.assets).toMatchObject([
+            { resultId: "task-a:result-one", enhancementId: "enhancement-one" },
+            { resultId: "task-a:result-two", enhancementId: "enhancement-two" },
+        ]);
         expect(log?.requestSnapshot?.slots.map((slot) => slot.assetIndex)).toEqual([0, 1]);
     });
 

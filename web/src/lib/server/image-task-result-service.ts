@@ -197,7 +197,10 @@ async function persistPreparedResults(task: ImageTask, results: ImageTaskMediaRe
             if (requested4k && !item.dataUrl.startsWith("data:image/")) throw new Error("上游原图无法读取并冻结");
             const bytes = requested4k ? Buffer.from(item.dataUrl.split(",")[1], "base64") : undefined;
             const metadata = bytes ? await sharp(bytes).metadata() : undefined;
-            const native = bytes && metadata ? { sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.length, format: metadata.format!, hasAlpha: metadata.hasAlpha ? !(await sharp(bytes).stats()).isOpaque : false, provenance: "provider_native" as const } : undefined;
+            const native =
+                bytes && metadata
+                    ? { sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.length, format: metadata.format!, hasAlpha: metadata.hasAlpha ? !(await sharp(bytes).stats()).isOpaque : false, provenance: "provider_native" as const }
+                    : undefined;
             const assets = await normalizeAssets([{ type: "image", url: item.dataUrl, remoteUrl: item.remoteUrl, targetSize }], {
                 ownerUserId: task.userId,
                 source: task.source,

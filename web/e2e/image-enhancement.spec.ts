@@ -109,13 +109,11 @@ test("administrator configures enhancement while disabled and controls readiness
         expect(settings).toMatchObject({ hasToken: false, ready: false, enabled: false });
         expect(JSON.stringify(settings)).not.toContain(access);
         expect(calls.every((call) => call.startsWith("GET"))).toBe(true);
-        const bounds = await page
-            .locator('[data-testid="enhancement-connection-grid"]')
-            .evaluate((element) => ({
-                display: getComputedStyle(element).display,
-                width: element.getBoundingClientRect().width,
-                childBounds: [...element.children].map((child) => ({ left: child.getBoundingClientRect().left, width: child.getBoundingClientRect().width })),
-            }));
+        const bounds = await page.locator('[data-testid="enhancement-connection-grid"]').evaluate((element) => ({
+            display: getComputedStyle(element).display,
+            width: element.getBoundingClientRect().width,
+            childBounds: [...element.children].map((child) => ({ left: child.getBoundingClientRect().left, width: child.getBoundingClientRect().width })),
+        }));
         expect(bounds.display).toBe("grid");
         expect(bounds.childBounds[1]!.left).toBeGreaterThan(bounds.childBounds[0]!.left);
         await page.screenshot({ path: info.outputPath("enhancement-light.png"), fullPage: true });
