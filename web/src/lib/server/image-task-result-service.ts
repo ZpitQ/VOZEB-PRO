@@ -1,4 +1,6 @@
 import type { ImageTaskMediaResult, ImageTaskResult } from "@/app/api/image-tasks/image-task-types";
+import { createHash } from "node:crypto";
+import sharp from "sharp";
 import { directRemoteImageResult, imageReferenceToDataUrl, inlineRemoteImageResult, resolveProxiedMediaSource } from "@/app/api/image-tasks/image-task-support";
 import { canvasProviderDimensions, parseImageDimensions, resolveResultSize } from "@/app/api/image-tasks/image-task-size";
 import { dedupeImageResults } from "@/lib/image-result-dedupe";
@@ -12,6 +14,7 @@ import { assertTransparentImageOutput } from "@/lib/server/image-transparent-out
 import { decodeEcommerceCanvasSize } from "@/lib/server/ecommerce-generation-service";
 import { compositeSceneEdit } from "./ecommerce-product-regions";
 import { ecommerceSceneProtectionReferencesMatch } from "./ecommerce-image-task-orchestration";
+import { imageEnhancementExclusion } from "./image-enhancement-plan";
 
 export type PreparedImageTaskResults = { results: StoredImageTaskMediaResult[]; batchEvidence?: ImageTaskResultEvidence[] };
 
@@ -93,6 +96,7 @@ async function persistCanvasBatch(task: ImageTask, normalized: PromiseSettledRes
                 if (asset.width && asset.height) evidence.storedSize = { width: asset.width, height: asset.height };
                 return {
                     resultId: evidence.resultId,
+                    enhancementSkip: taskEnhancementExclusion(task),
                     dataUrl: asset.serverUrl,
                     remoteUrl: asset.remoteUrl,
                     serverUrl: asset.serverUrl,
@@ -152,6 +156,8 @@ async function persistSceneProtectionResults(task: ImageTask, results: ImageTask
             const composite = await save("data:image/png;base64," + composites[index].bytes.toString("base64"), `scene-edit-composite-${index + 1}.png`);
             const canvas = task.ecommerceExecution?.canvas;
             stored.push({
+                resultId: `${task.id}:${index + 1}`,
+                enhancementSkip: taskEnhancementExclusion(task),
                 dataUrl: composite.serverUrl!,
                 serverUrl: composite.serverUrl,
                 width: composite.width,
@@ -183,22 +189,29 @@ async function persistSceneProtectionResults(task: ImageTask, results: ImageTask
 async function persistPreparedResults(task: ImageTask, results: ImageTaskMediaResult[], requireAll: boolean) {
     const canvas = task.ecommerceExecution?.canvas;
     const nativeSizes = canvas ? await Promise.all(results.map((item) => decodeEcommerceCanvasSize(Buffer.from(item.dataUrl.split(",")[1], "base64")))) : [];
-    const preserveNativeSize = task.config.advancedConfig?.protocol === "custom" && isCustomGeminiImageModel(task.config.model) && !parseImageDimensions(task.config.size || "");
+    const requested4k = requests4k(task) && !canvas && !requireAll;
+    const preserveNativeSize = requested4k || (task.config.advancedConfig?.protocol === "custom" && isCustomGeminiImageModel(task.config.model) && !parseImageDimensions(task.config.size || ""));
     const targetSize = canvas || task.config.outputMode === "layers" || preserveNativeSize ? undefined : resolveResultSize(task.config.quality, task.config.size || "auto");
     const settled = await Promise.allSettled(
-        results.map((item, index) =>
-            normalizeAssets([{ type: "image", url: item.dataUrl, remoteUrl: item.remoteUrl, targetSize }], {
+        results.map(async (item, index) => {
+            if (requested4k && !item.dataUrl.startsWith("data:image/")) throw new Error("上游原图无法读取并冻结");
+            const bytes = requested4k ? Buffer.from(item.dataUrl.split(",")[1], "base64") : undefined;
+            const metadata = bytes ? await sharp(bytes).metadata() : undefined;
+            const native = bytes && metadata ? { sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.length, format: metadata.format!, hasAlpha: metadata.hasAlpha ? !(await sharp(bytes).stats()).isOpaque : false, provenance: "provider_native" as const } : undefined;
+            const assets = await normalizeAssets([{ type: "image", url: item.dataUrl, remoteUrl: item.remoteUrl, targetSize }], {
                 ownerUserId: task.userId,
                 source: task.source,
                 conversationId: task.conversationId,
                 taskId: task.id,
                 originalName: `${task.title || task.prompt.slice(0, 80) || "图片生成"}-${index + 1}`,
-            }),
-        ),
+            });
+            return { assets, native };
+        }),
     );
     const stored = settled
-        .flatMap((item, index) => (item.status === "fulfilled" ? item.value.map((asset) => ({ asset, nativeSize: nativeSizes[index] })) : []))
-        .map(({ asset, nativeSize }) => ({
+        .flatMap((item, index) => (item.status === "fulfilled" ? item.value.assets.map((asset) => ({ asset, nativeSize: nativeSizes[index], native: item.value.native, resultId: `${task.id}:${index + 1}` })) : []))
+        .map(({ asset, nativeSize, native, resultId }) => ({
+            resultId,
             dataUrl: asset.serverUrl || asset.url,
             remoteUrl: asset.remoteUrl,
             serverUrl: asset.serverUrl,
@@ -206,6 +219,7 @@ async function persistPreparedResults(task: ImageTask, results: ImageTaskMediaRe
             height: asset.height,
             bytes: asset.bytes,
             mimeType: asset.mimeType,
+            ...(native ? { enhancementId: `enhancement:${resultId}`, nativeSource: { ...native, url: asset.serverUrl || asset.url, width: asset.width!, height: asset.height! } } : { enhancementSkip: taskEnhancementExclusion(task) }),
             ...(canvas
                 ? {
                       canvasEvidence: {
@@ -240,12 +254,25 @@ async function normalizeSafeImageResult(task: ImageTask, result: ImageTaskMediaR
     const mediaHeaders = proxiedRemoteUrl && channelId ? generationMediaProxyHeaders({ userId: task.userId, taskType: "image", taskId: task.id, channelId, upstreamModel: generationModelId(task.config), url: proxiedRemoteUrl }) : undefined;
     const inlineResult = proxiedMedia.proxyUrl ? await inlineRemoteImageResult(result.dataUrl, origin, authContext, remoteUrl, mediaHeaders) : null;
     if (proxiedMedia.proxyUrl && !inlineResult?.dataUrl?.startsWith("data:image/")) throw new Error("上游图片无法通过授权媒体路径读取");
-    if (task.config.outputMode === "layers" || task.ecommerceExecution?.canvas || task.sceneProtection) {
+    if (task.config.outputMode === "layers" || task.ecommerceExecution?.canvas || task.sceneProtection || requests4k(task)) {
         const readable = inlineResult || (await inlineRemoteImageResult(result.dataUrl || remoteUrl || "", origin, authContext, remoteUrl, mediaHeaders));
         if (!readable?.dataUrl?.startsWith("data:image/")) throw new Error("上游原生图片无法读取并验收");
         return readable;
     }
     return inlineResult || directRemoteImageResult(remoteUrl) || (await inlineRemoteImageResult(result.dataUrl, origin, authContext, remoteUrl, mediaHeaders));
+}
+
+function requests4k(task: ImageTask) {
+    return resolveResultSize(task.config.quality, "1:1") === resolveResultSize("4k", "1:1");
+}
+
+function taskEnhancementExclusion(task: ImageTask) {
+    return imageEnhancementExclusion({
+        enabled: task.enhancementPolicy?.enabled ?? false,
+        requested4k: requests4k(task),
+        protectedContract: Boolean(task.ecommerceExecution?.canvas || task.sceneProtection || task.productProtection || task.mask),
+        layered: task.config.outputMode === "layers",
+    });
 }
 
 function isStableServerResult(result: StoredImageTaskMediaResult) {

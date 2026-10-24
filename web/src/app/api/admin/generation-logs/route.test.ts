@@ -1,43 +1,38 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({
-    getCurrentUser: vi.fn(),
-    getPublicUsersByIds: vi.fn(),
-    listGenerationLogs: vi.fn(),
-}));
-
+const mocks = vi.hoisted(() => ({ getCurrentUser: vi.fn(), getPublicUsersByIds: vi.fn(), hasAdminPermission: vi.fn(), listGenerationLogs: vi.fn() }));
 vi.mock("@/lib/auth/session", () => ({ getCurrentUser: mocks.getCurrentUser }));
 vi.mock("@/lib/auth/store", () => ({ getPublicUsersByIds: mocks.getPublicUsersByIds }));
-vi.mock("@/lib/server/generation-log-store", () => ({ deleteGenerationLogs: vi.fn(), listGenerationLogs: mocks.listGenerationLogs }));
+vi.mock("@/lib/admin-permissions", () => ({ hasAdminPermission: mocks.hasAdminPermission }));
+vi.mock("@/lib/server/generation-log-store", () => ({ listGenerationLogs: mocks.listGenerationLogs, deleteGenerationLogs: vi.fn() }));
 
-import { GET } from "./route";
+import { GET, dynamic } from "./route";
 
-describe("GET /api/admin/generation-logs", () => {
+describe("administrator generation log GET", () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        mocks.getCurrentUser.mockResolvedValue({ id: "admin", role: "admin", status: "active", adminPermissions: ["generation.read"] });
-        mocks.listGenerationLogs.mockResolvedValue({ items: [{ id: "log-one", userId: "user-one", username: "creator", displayName: "创作者" }], total: 1, page: 1, pageSize: 20 });
-        mocks.getPublicUsersByIds.mockResolvedValue([{ id: "user-one", accountId: "0001", username: "creator", displayName: "创作者" }]);
+        mocks.getCurrentUser.mockResolvedValue({ id: "admin-one", role: "admin" });
+        mocks.hasAdminPermission.mockReturnValue(true);
+        mocks.listGenerationLogs.mockResolvedValue({ items: [{ id: "log-one", userId: "owner-one", assets: [] }], total: 1, page: 1, pageSize: 20 });
+        mocks.getPublicUsersByIds.mockResolvedValue([{ id: "owner-one", accountId: "0001" }]);
     });
 
-    it("requires an administrator", async () => {
-        mocks.getCurrentUser.mockResolvedValueOnce(null);
+    it("requests current enhancement observations only for the authorized paginated administrator read and disables response caching", async () => {
+        const response = await GET(new NextRequest("http://localhost/api/admin/generation-logs?page=1&pageSize=20"));
+        expect(mocks.hasAdminPermission).toHaveBeenCalledWith(expect.anything(), "generation.read");
+        expect(mocks.listGenerationLogs).toHaveBeenCalledWith(expect.objectContaining({ page: 1, pageSize: 20, includeEcommerceTrace: true, includeImageEnhancement: true }));
+        expect(dynamic).toBe("force-dynamic");
+        expect(response.headers.get("cache-control")).toBe("private, no-store");
+        expect(await response.json()).toMatchObject({ logs: [{ id: "log-one", accountId: "0001" }], total: 1 });
+    });
 
-        expect((await GET(request())).status).toBe(401);
+    it.each([false, true])("does not read jobs or logs without a valid administrator read permission (signedIn=%s)", async (signedIn) => {
+        mocks.getCurrentUser.mockResolvedValue(signedIn ? { id: "admin-one", role: "admin" } : null);
+        mocks.hasAdminPermission.mockReturnValue(false);
+        const response = await GET(new NextRequest("http://localhost/api/admin/generation-logs"));
+        expect(response.status).toBe(signedIn ? 403 : 401);
         expect(mocks.listGenerationLogs).not.toHaveBeenCalled();
-    });
-
-    it("adds public account ids and preserves the user filter", async () => {
-        const response = await GET(request("?userId=user-one&keyword=poster"));
-        const payload = await response.json();
-
-        expect(response.status).toBe(200);
-        expect(mocks.listGenerationLogs).toHaveBeenCalledWith(expect.objectContaining({ userId: "user-one", keyword: "poster", includeEcommerceTrace: true }));
-        expect(payload.logs[0]).toMatchObject({ userId: "user-one", accountId: "0001" });
+        expect(mocks.getPublicUsersByIds).not.toHaveBeenCalled();
     });
 });
-
-function request(search = "") {
-    return new NextRequest(`http://localhost/api/admin/generation-logs${search}`);
-}

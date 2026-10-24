@@ -4,7 +4,7 @@ import { imagePreviewUrl, originalImageDownloadUrl, originalImageExtension, orig
 
 describe("media image urls", () => {
     it("builds bounded WebP previews while preserving signed query values", () => {
-        expect(imagePreviewUrl("/api/reference-assets/permanent/file.png?purpose=provider-read&expires=1&signature=test", 4096)).toBe("/api/reference-assets/permanent/file.png?expires=1&format=webp&purpose=provider-read&signature=test&width=2048");
+        expect(imagePreviewUrl("/api/reference-assets/permanent/file.png?purpose=provider-read&expires=1&signature=test", 4096)).toBe("/api/reference-assets/permanent/file.png?expires=1&format=webp&purpose=provider-read&signature=test&width=4096");
         expect(imagePreviewUrl("/api/reference-assets/permanent/file.png", 257)).toBe("/api/reference-assets/permanent/file.png?format=webp&width=320");
         expect(imagePreviewUrl("/api/public/works/publicwork123/media/asset-one", 640)).toBe("/api/public/works/publicwork123/media/asset-one?format=webp&width=640");
         expect(imagePreviewUrl("/api/public/prompt-images?path=images%2Fportrait_case1%2Foutput.jpg", 480)).toBe("/api/public/prompt-images?format=webp&path=images%2Fportrait_case1%2Foutput.jpg&width=480");
@@ -16,6 +16,15 @@ describe("media image urls", () => {
 
         expect(imagePreviewUrl(source, 257)).toBe(imagePreviewUrl("/api/reference-assets/permanent/file.png?expires=1&purpose=provider-read&signature=test&width=320&format=webp", 320));
         expect(imagePreviewUrl(imagePreviewUrl(source, 257), 320)).toBe(imagePreviewUrl(source, 257));
+    });
+
+    it("keeps thumbnails and defaults small while bounding explicit detail previews at 4K", () => {
+        const source = "/api/generation-log-assets/permanent/enhanced.png";
+        expect(imagePreviewUrl(source)).toContain("width=1600");
+        expect(imagePreviewUrl(source, 960)).toContain("width=960");
+        expect(imagePreviewUrl(source, 1920)).toContain("width=1920");
+        expect(imagePreviewUrl(source, 3838)).toContain("width=4096");
+        expect(imagePreviewUrl(source, 99999)).toContain("width=4096");
     });
 
     it("builds original-file downloads from a preview url", () => {

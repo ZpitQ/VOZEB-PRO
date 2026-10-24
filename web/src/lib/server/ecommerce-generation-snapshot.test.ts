@@ -239,6 +239,21 @@ describe("ecommerce generation shadow snapshot", () => {
         expect(JSON.stringify(input)).not.toContain("data:image/png;base64,secret");
     });
 
+    it("prefers the saved original while retaining remote-only references", () => {
+        const assets = [
+            { ...imageAsset("saved", "saved", "/api/generation-log-assets/permanent/native.png"), remoteUrl: "https://expired.example.test/native.png" },
+            { ...imageAsset("remote", "remote", "/api/assets/unused"), serverUrl: undefined, remoteUrl: "https://cdn.example.test/reference.png" },
+        ];
+        const before = structuredClone(assets);
+        const input = buildEcommercePlanningInput(
+            { conversationId: "conversation", surface: "chat", prompt: "edit the selected image", referencedAssetIds: ["saved", "remote"] },
+            assets,
+            { summary: "", recentMessages: [] } as never,
+        );
+        expect(input.assetCandidates.map((asset) => asset.url)).toEqual(["/api/generation-log-assets/permanent/native.png", "https://cdn.example.test/reference.png"]);
+        expect(assets).toEqual(before);
+    });
+
     it("appends a recovered product anchor after the explicitly referenced history result", () => {
         const input = buildEcommercePlanningInput(
             {

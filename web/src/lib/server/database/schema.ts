@@ -517,6 +517,29 @@ ALTER TABLE object_storage_settings ADD COLUMN IF NOT EXISTS cdn_base_url text N
 
 INSERT INTO object_storage_settings (id) VALUES ('default') ON CONFLICT (id) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS image_enhancement_settings (
+    id text PRIMARY KEY DEFAULT 'default' CHECK (id = 'default'),
+    value jsonb NOT NULL CHECK (jsonb_typeof(value) = 'object')
+);
+
+CREATE TABLE IF NOT EXISTS image_enhancement_jobs (
+    id text PRIMARY KEY,
+    user_id text NOT NULL,
+    image_task_id text NOT NULL,
+    result_id text NOT NULL,
+    status text NOT NULL CHECK (status IN ('queued','running','succeeded','failed','skipped','cancelled')),
+    phase text NOT NULL CHECK (phase IN ('prepare','submit','poll','download','publish','receipt','completed')),
+    next_poll_at timestamptz,
+    lease_token text,
+    lease_until timestamptz,
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+    UNIQUE (user_id,image_task_id,result_id)
+);
+CREATE INDEX IF NOT EXISTS image_enhancement_jobs_due_idx ON image_enhancement_jobs (next_poll_at,lease_until,created_at,id) WHERE next_poll_at IS NOT NULL AND (status IN ('queued','running') OR (status = 'succeeded' AND phase = 'receipt'));
+CREATE INDEX IF NOT EXISTS image_enhancement_jobs_user_task_idx ON image_enhancement_jobs (user_id,image_task_id,created_at,id);
+
 DO $$
 DECLARE
     legacy_name text := 'local_' || 'media_assets';
@@ -973,8 +996,11 @@ CREATE TABLE IF NOT EXISTS generation_log_assets (
     height integer,
     bytes bigint,
     sort_order integer NOT NULL DEFAULT 0,
+    enhancement_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
     CONSTRAINT generation_log_assets_type CHECK (type IN ('image', 'video'))
 );
+
+ALTER TABLE generation_log_assets ADD COLUMN IF NOT EXISTS enhancement_metadata jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS generation_log_assets_log_idx ON generation_log_assets (generation_log_id, sort_order);
 

@@ -1,7 +1,7 @@
 import { nanoid } from "nanoid";
 
 import { creativeConversationSourceForSurface, type CreativeAsset, type CreativeConversation, type CreativeConversationContext, type CreativeConversationSource, type CreativeMessage, type CreativeSurface } from "@/lib/creative-runtime-contract";
-import { ensurePostgresSchema, getDatabaseProvider, postgresQuery, withPostgresTransaction } from "@/lib/server/database";
+import { ensurePostgresSchema, getDatabaseProvider, postgresQuery, withPostgresTransaction, type QueryExecutor } from "@/lib/server/database";
 import { withGenerationTaskFileMutation } from "@/lib/server/generation-task-store";
 import {
     applyRuntimeMutation,
@@ -279,13 +279,13 @@ export async function getCreativeConversationContext(conversationId: string, use
     });
 }
 
-export async function listCreativeAssets(conversationId: string, userId: string) {
-    if (getDatabaseProvider() === "postgres") {
-        await ensurePostgresSchema();
-        const result = await postgresQuery("SELECT * FROM creative_assets WHERE conversation_id = $1 AND user_id = $2 AND status <> 'deleted' ORDER BY created_at ASC, ordinal ASC", [conversationId, userId]);
+export async function listCreativeAssets(conversationId: string, userId: string, executor?: QueryExecutor, fileDb?: RuntimeFileDatabase) {
+    if (executor || getDatabaseProvider() === "postgres") {
+        if (!executor) await ensurePostgresSchema();
+        const result = await (executor || { query: postgresQuery }).query("SELECT * FROM creative_assets WHERE conversation_id = $1 AND user_id = $2 AND status <> 'deleted' ORDER BY created_at ASC, ordinal ASC", [conversationId, userId]);
         return result.rows.map(mapAsset);
     }
-    return (await readRuntimeFile()).assets.filter((item) => item.conversationId === conversationId && item.userId === userId && item.status !== "deleted").sort((a, b) => a.createdAt - b.createdAt || a.ordinal - b.ordinal);
+    return (fileDb || await readRuntimeFile()).assets.filter((item) => item.conversationId === conversationId && item.userId === userId && item.status !== "deleted").sort((a, b) => a.createdAt - b.createdAt || a.ordinal - b.ordinal);
 }
 
 export async function listRecentCreativeMediaAssets(conversationId: string, userId: string, limit = 20) {
@@ -466,8 +466,13 @@ export async function getLatestCreativeRunEventId(runId: string, type: string) {
     return (await readRuntimeFile()).events.filter((item) => item.runId === runId && item.type === type).reduce((latest, item) => (Number(item.id) > Number(latest || 0) ? item.id : latest), "");
 }
 
-export async function registerCreativeAssets(inputs: NewAsset[]) {
+export async function registerCreativeAssets(inputs: NewAsset[], executor?: QueryExecutor, fileDb?: RuntimeFileDatabase) {
     if (!inputs.length) return [];
+    if (executor) {
+        const assets: CreativeAsset[] = [];
+        for (const input of inputs) assets.push(await upsertPostgresAsset(executor, input));
+        return assets;
+    }
     if (getDatabaseProvider() === "postgres") {
         await ensurePostgresSchema();
         return withPostgresTransaction(async (client) => {
@@ -477,7 +482,7 @@ export async function registerCreativeAssets(inputs: NewAsset[]) {
         });
     }
     let registered: CreativeAsset[] = [];
-    await mutateRuntimeFile((db) => {
+    const mutate = (db: RuntimeFileDatabase) => {
         const now = Date.now();
         const assets = [...db.assets];
         registered = inputs.map((input) => {
@@ -489,6 +494,8 @@ export async function registerCreativeAssets(inputs: NewAsset[]) {
             return asset;
         });
         return { ...db, assets };
-    });
+    };
+    if (fileDb) Object.assign(fileDb, mutate(fileDb));
+    else await mutateRuntimeFile(mutate);
     return registered;
 }

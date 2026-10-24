@@ -2,6 +2,7 @@ import { registerCreativeAssets } from "@/lib/server/creative-runtime-store";
 import { agentTaskResultItems } from "@/lib/server/agent-run-result-items";
 import type { AgentRun, AgentRunTask } from "@/lib/server/agent-run-store";
 import { ecommerceProductAnchorIdFromRun } from "./ecommerce-reference-roles";
+import { publicImageResultEnhancement } from "@/lib/image-enhancement-contract";
 
 export async function registerAgentTaskAssets(run: AgentRun, task: AgentRunTask, result: unknown, sourceTaskIds: string[]) {
     const records: Array<{ record: Record<string, unknown>; textContent?: string; location?: NonNullable<ReturnType<typeof persistentMediaLocation>> }> = [];
@@ -30,8 +31,13 @@ export async function registerAgentTaskAssets(run: AgentRun, task: AgentRunTask,
               }
             : undefined;
     const parentAssetIds = Array.from(new Set([productAnchorId, sceneRootAssetId, task.referenceAssetId, ...(task.references || []).map((item) => item.assetId)].filter((item): item is string => Boolean(item))));
-    records.forEach(({ record, textContent, location }, ordinal) => {
-        const sourceTaskId = sourceTaskIds[Math.min(ordinal, Math.max(0, sourceTaskIds.length - 1))] || `direct-${run.id}-${task.id}`;
+    const sourceOrdinals = new Map<string, number>();
+    records.forEach(({ record, textContent, location }, index) => {
+        const resultTaskId = task.type === "image" && typeof record.resultId === "string" ? record.resultId.match(/^(.*):[1-9]\d*$/)?.[1] : undefined;
+        const stableTaskId = resultTaskId && sourceTaskIds.includes(resultTaskId) ? resultTaskId : undefined;
+        const sourceTaskId = stableTaskId || sourceTaskIds[Math.min(index, Math.max(0, sourceTaskIds.length - 1))] || `direct-${run.id}-${task.id}`;
+        const ordinal = stableTaskId ? sourceOrdinals.get(stableTaskId) || 0 : index;
+        if (stableTaskId) sourceOrdinals.set(stableTaskId, ordinal + 1);
         const base = {
             userId: run.userId,
             conversationId: run.conversationId,
@@ -41,8 +47,8 @@ export async function registerAgentTaskAssets(run: AgentRun, task: AgentRunTask,
             parentAssetId: parentAssetIds[0],
             ordinal,
             type: task.type,
-            title: records.length > 1 ? `${task.title} ${ordinal + 1}` : task.title,
-            metadata: { agentTaskId: task.id, model: task.model, surface: run.surface, projectId: run.projectId, parentAssetIds, ...(ecommerceContinuity ? { ecommerceContinuity } : {}), ...publicResultMetadata(record) },
+            title: records.length > 1 ? `${task.title} ${index + 1}` : task.title,
+            metadata: { agentTaskId: task.id, model: task.model, surface: run.surface, projectId: run.projectId, parentAssetIds, ...(ecommerceContinuity ? { ecommerceContinuity } : {}), ...publicResultMetadata(record), ...(task.type === "image" ? publicImageResultEnhancement(record) : {}) },
         };
         if (task.type === "text") {
             if (textContent) inputs.push({ ...base, textContent });

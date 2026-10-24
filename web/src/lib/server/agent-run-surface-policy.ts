@@ -231,7 +231,7 @@ export function resolveTaskReferences(requestedIds: string[] | undefined, assets
 
 export function assetAccessUrl(asset?: CreativeAsset) {
     if (!asset) return undefined;
-    return [asset.remoteUrl, asset.serverUrl].find((value) => typeof value === "string" && value.trim() && !value.startsWith("data:"))?.trim();
+    return [asset.serverUrl, asset.remoteUrl].find((value) => typeof value === "string" && value.trim() && !value.startsWith("data:"))?.trim();
 }
 
 export function creativeAssetContext(asset: CreativeAsset, alias?: string) {

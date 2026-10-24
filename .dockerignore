@@ -2,6 +2,7 @@
 .idea
 .agents
 .codex
+.codegraph
 .tmp
 .trellis
 data
@@ -10,12 +11,16 @@ docs/.source
 docs/node_modules
 docs/out
 web/.next
+web/.next-*
 web/.data
+web/.e2e-data
 web/.e2e-artifacts
 web/.tmp
 web/node_modules
 web/out
 web/playwright-report
+workers/**/node_modules
+workers/**/dist
 *.log
 .env*
 !.env.example

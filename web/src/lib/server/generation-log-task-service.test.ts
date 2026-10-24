@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -147,6 +147,41 @@ describe("generation log task service", () => {
         expect(log?.prompt).toBe(executionPrompt);
         expect(log?.requestSnapshot?.userPrompt).toBe(publicPrompt);
         expect(log?.requestSnapshot?.slots[0]?.prompt).toBe(executionPrompt);
+    });
+
+    it("round-trips independent enhancement identities and safe native facts through the actual task log file", async () => {
+        await createDraft("log-enhancement", ["slot-a"]);
+        const nativeSource = { url: assetUrl("native"), width: 1254, height: 1254, byteLength: 1200, sha256: "a".repeat(64), format: "png", hasAlpha: false, provenance: "provider_native" as const };
+        const assets = [
+            { type: "image" as const, url: assetUrl("native"), resultId: "task-a:result-one", enhancementId: "enhancement-one", nativeSource: { ...nativeSource, evidencePath: "private-native-path" }, enhancement: { token: "private-stale-summary" } },
+            { type: "image" as const, url: assetUrl("second"), resultId: "task-a:result-two", enhancementSkip: { status: "skipped" as const, reason: "protected_contract" as const, raw: "private-skip" } },
+        ];
+        await service.recordGenerationTaskLogResult({ logId: "log-enhancement", slotId: "slot-a", clientRequestId: "request-slot-a", taskId: "task-a", userId: "user-one", username: "user", displayName: "User", kind: "image", source: "image-workbench", status: "success", title: "增强记录", prompt: "公开需求", model: "image-model", summary: "完成", durationMs: 100, assets: assets as unknown as Parameters<typeof service.recordGenerationTaskLogResult>[0]["assets"], taskKind: "generation", createdAt: Date.now() });
+
+        const raw = await readFile(resolve(dataDir, "generation-logs.json"), "utf8");
+        expect(raw).not.toContain("private-");
+        expect(raw).not.toContain('"enhancement":');
+        vi.resetModules();
+        const reloadedStore = await import("./generation-log-store");
+        const log = (await reloadedStore.listGenerationLogs({ userId: "user-one" })).items[0];
+        expect(log).toMatchObject({ status: "success", successCount: 2, failCount: 0 });
+        expect(log?.assets).toMatchObject([
+            { resultId: "task-a:result-one", enhancementId: "enhancement-one", nativeSource },
+            { resultId: "task-a:result-two", enhancementSkip: { status: "skipped", reason: "protected_contract" } },
+        ]);
+    });
+
+    it("keeps distinct original result identities when a provider reuses a permanent media URL", async () => {
+        await createDraft("log-shared-url", ["slot-a"]);
+        const assets = [
+            { type: "image" as const, url: assetUrl("shared-native"), resultId: "task-a:result-one", enhancementId: "enhancement-one" },
+            { type: "image" as const, url: assetUrl("shared-native"), resultId: "task-a:result-two", enhancementId: "enhancement-two" },
+        ];
+        await service.recordGenerationTaskLogResult({ logId: "log-shared-url", slotId: "slot-a", clientRequestId: "request-slot-a", taskId: "task-a", userId: "user-one", username: "user", displayName: "User", kind: "image", source: "image-workbench", status: "success", title: "独立原结果", prompt: "公开需求", model: "image-model", summary: "完成", durationMs: 100, assets, taskKind: "generation", createdAt: Date.now() });
+
+        const log = await getLog("log-shared-url");
+        expect(log?.assets).toMatchObject([{ resultId: "task-a:result-one", enhancementId: "enhancement-one" }, { resultId: "task-a:result-two", enhancementId: "enhancement-two" }]);
+        expect(log?.requestSnapshot?.slots.map((slot) => slot.assetIndex)).toEqual([0, 1]);
     });
 
     it("rejects mutations when the record belongs to another user", async () => {

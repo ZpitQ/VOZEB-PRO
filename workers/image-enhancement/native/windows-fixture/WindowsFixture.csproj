@@ -1,0 +1,26 @@
+<Project>
+  <PropertyGroup>
+    <ZebNativeTestBuild>true</ZebNativeTestBuild>
+    <BaseIntermediateOutputPath>obj-test/</BaseIntermediateOutputPath>
+    <BaseOutputPath>bin-test/</BaseOutputPath>
+  </PropertyGroup>
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeFrameworkVersion>10.0.12</RuntimeFrameworkVersion>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <UseAppHost>true</UseAppHost>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin/**;obj/**;bin-test/**;obj-test/**</DefaultItemExcludes>
+    <DefineConstants>$(DefineConstants);ZEB_NATIVE_TESTS</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../windows-supervisor/WindowsSupervisor.csproj" AdditionalProperties="ZebNativeTestBuild=true" />
+  </ItemGroup>
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+</Project>

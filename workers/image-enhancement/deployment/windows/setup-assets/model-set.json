@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "modelName": "upscayl-standard-4x",
+  "files": [
+    {
+      "path": "upscayl-standard-4x.bin",
+      "length": "33424520",
+      "sha256": "713ee713b0353afaa27976f0563a64a5043bd70b9bd8936c2e26e25ebcdbcddf"
+    },
+    {
+      "path": "upscayl-standard-4x.param",
+      "length": "116029",
+      "sha256": "35330ececcea33b6c397a72548e788d5d53becee4734c50b7fada36e89f10a86"
+    }
+  ]
+}

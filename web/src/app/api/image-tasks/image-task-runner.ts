@@ -2,8 +2,11 @@ import { generationModelId } from "@/lib/server/generation-channel";
 import { isCustomGeminiImageModel } from "@/lib/server/custom-gemini-image-model";
 import { recordGenerationTaskLogResult } from "@/lib/server/generation-log-task-service";
 import type { ImageTask } from "@/lib/server/image-task-store";
+import { publicImageResultEnhancement, type ImageResultEnhancementInput } from "@/lib/image-enhancement-contract";
 
 import { parseImageDimensions, resolveResultSize } from "./image-task-size";
+
+type ImageLogMedia = ImageResultEnhancementInput & { dataUrl?: string; remoteUrl?: string; serverUrl?: string; width?: number; height?: number; bytes?: number; mimeType?: string };
 
 export function stableMediaUrl(value?: string) {
     return value && !value.startsWith("data:") && !value.startsWith("blob:") ? value : "";
@@ -12,7 +15,7 @@ export function stableMediaUrl(value?: string) {
 export async function writeImageGenerationLog(
     task: ImageTask,
     status: "success" | "failed",
-    result: Array<{ dataUrl?: string; remoteUrl?: string; width?: number; height?: number; bytes?: number; mimeType?: string }> | { dataUrl?: string; remoteUrl?: string; width?: number; height?: number; bytes?: number; mimeType?: string } | string,
+    result: ImageLogMedia[] | ImageLogMedia | string,
     durationMs: number,
     error?: string,
 ) {
@@ -27,6 +30,7 @@ export async function writeImageGenerationLog(
                       type: "image" as const,
                       url: resultUrl,
                       remoteUrl: typeof item === "string" ? undefined : item.remoteUrl,
+                      serverUrl: typeof item === "string" ? undefined : item.serverUrl,
                       ...(typeof item === "string"
                           ? {}
                           : {
@@ -34,6 +38,7 @@ export async function writeImageGenerationLog(
                                 height: item.height,
                                 bytes: item.bytes,
                                 mimeType: item.mimeType,
+                                ...publicImageResultEnhancement(item),
                             }),
                       ...(targetSize ? { targetSize } : {}),
                   },

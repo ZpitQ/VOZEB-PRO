@@ -9,15 +9,21 @@ import { imagePreviewUrl } from "@/lib/media-image-url";
 import { cn } from "@/lib/utils";
 
 import { creativeAssetLayout } from "./creative-asset-layout";
+import { CreativeImageEnhancement } from "./creative-image-enhancement";
 import { CreativeResultSwitcher, useSelectedCreativeResult } from "./creative-result-switcher";
 
 const ACTIONS_MIN_WIDTH = 352;
 
-export function CreativeMediaResult({ assets, fallbackRatio, renderActions }: { assets: CreativeAsset[]; fallbackRatio?: string; renderActions?: (activeAsset: CreativeAsset) => ReactNode }) {
-    const results = useMemo(() => assets.filter((asset) => asset.status === "ready" && asset.type !== "text" && assetUrl(asset)), [assets]);
-    const { selectedResult: activeAsset, selectedIndex, selectResult } = useSelectedCreativeResult(results);
+export function CreativeMediaResult({ assets, fallbackRatio, renderActions, onEnhancementComplete }: { assets: CreativeAsset[]; fallbackRatio?: string; renderActions?: (activeAsset: CreativeAsset) => ReactNode; onEnhancementComplete?: (conversationId: string) => Promise<void> }) {
+    const groups = useMemo(() => creativeMediaResultGroups(assets), [assets]);
+    const results = useMemo(() => groups.map((group) => group.original), [groups]);
+    const { selectedResult: original, selectedIndex, selectResult } = useSelectedCreativeResult(results);
+    const enhanced = groups[selectedIndex]?.enhanced;
+    const [selectedVariants, setSelectedVariants] = useState<Record<string, string>>({});
+    const chosenId = original && selectedVariants[original.id];
+    const activeAsset = chosenId ? (enhanced?.id === chosenId ? enhanced : original) : enhanced || original;
     const [loadedDimensions, setLoadedDimensions] = useState<Record<string, { width: number; height: number }>>({});
-    if (!activeAsset) return null;
+    if (!activeAsset || !original) return null;
 
     const sourceDimensions = validDimensions(activeAsset) || loadedDimensions[activeAsset.id] || {};
     const variant = activeAsset.type === "video" ? "video-result" : "image-result";
@@ -51,6 +57,7 @@ export function CreativeMediaResult({ assets, fallbackRatio, renderActions }: { 
                         title={activeAsset.title || (activeAsset.type === "video" ? "生成视频" : "生成图片")}
                         className="size-full"
                         fit="contain"
+                        previewWidth={isEnhancedImageAsset(activeAsset) ? activeAsset.width : undefined}
                         onDimensions={(width, height) => {
                             if (width <= 0 || height <= 0 || validDimensions(activeAsset)) return;
                             setLoadedDimensions((current) => (current[activeAsset.id]?.width === width && current[activeAsset.id]?.height === height ? current : { ...current, [activeAsset.id]: { width, height } }));
@@ -59,7 +66,10 @@ export function CreativeMediaResult({ assets, fallbackRatio, renderActions }: { 
                 </figure>
             )}
 
-            {renderActions ? <div className="col-start-1 row-start-2">{renderActions(activeAsset)}</div> : null}
+            <div className="col-start-1 row-start-2" style={{ width: mediaWidth, maxWidth: "100%" }}>
+                {original.type === "image" ? <CreativeImageEnhancement key={`${original.id}:${String(original.metadata.enhancementId || "")}`} original={original} enhanced={enhanced} activeAssetId={activeAsset.id} onSelect={(id) => setSelectedVariants((current) => ({ ...current, [original.id]: id }))} onEnhancementComplete={onEnhancementComplete} /> : null}
+                {renderActions?.(activeAsset)}
+            </div>
 
             <CreativeResultSwitcher
                 results={results}
@@ -96,4 +106,20 @@ function validDimensions(asset: Pick<CreativeAsset, "width" | "height">) {
 
 function assetUrl(asset: CreativeAsset) {
     return asset.serverUrl || asset.remoteUrl || "";
+}
+
+export function creativeMediaResultGroups(assets: readonly CreativeAsset[]) {
+    const available = assets.filter((asset) => asset.status === "ready" && asset.type !== "text" && assetUrl(asset));
+    return available.filter((asset) => !isEnhancedImageAsset(asset)).map((original) => ({
+        original,
+        enhanced: original.type === "image" ? available.filter((asset) => isEnhancedImageAsset(asset) && asset.conversationId === original.conversationId && (
+            asset.parentAssetId ? asset.parentAssetId === original.id :
+            typeof asset.metadata.parentResultId === "string" ? asset.metadata.parentResultId === original.metadata.resultId :
+            typeof asset.metadata.enhancementId === "string" && asset.metadata.enhancementId === original.metadata.enhancementId
+        )).at(-1) : undefined,
+    }));
+}
+
+function isEnhancedImageAsset(asset: CreativeAsset) {
+    return asset.type === "image" && asset.metadata.provenance === "ai_enhanced";
 }

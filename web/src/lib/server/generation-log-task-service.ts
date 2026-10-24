@@ -244,7 +244,7 @@ function applyGenerationTaskLogResult(current: StoredGenerationLog | undefined, 
     const resultAssetIndexes: number[] = [];
     if (input.status === "success") {
         for (const [resultIndex, asset] of resultAssets.entries()) {
-            const existingAssetIndex = assets.findIndex((candidate) => stableAssetUrl(candidate) === stableAssetUrl(asset));
+            const existingAssetIndex = assets.findIndex((candidate) => asset.resultId ? candidate.resultId === asset.resultId : stableAssetUrl(candidate) === stableAssetUrl(asset));
             let nextIndex = existingAssetIndex;
             if (nextIndex < 0 && resultIndex === 0 && assetIndex !== undefined && assets[assetIndex]) {
                 assets[assetIndex] = asset;

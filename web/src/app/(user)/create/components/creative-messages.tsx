@@ -26,7 +26,7 @@ import { usePublicSessionStore } from "@/stores/use-public-session-store";
 import { creativeAssetLayout } from "./creative-asset-layout";
 import { creativeConversationEntries, isMediaCreativeRound, type CreativeConversationEntry } from "./creative-conversation-rounds";
 import { CreativeGenerationWaiting } from "./creative-generation-waiting";
-import { CreativeMediaResult } from "./creative-media-result";
+import { creativeMediaResultGroups, CreativeMediaResult } from "./creative-media-result";
 import { formatCreativeMessageTime } from "./creative-result-presentation";
 import { creativeRunDuration, creativeRunMode, creativeRunPresentation } from "./creative-run-presentation";
 import { CreativeVideoResult } from "./creative-video-result";
@@ -45,6 +45,7 @@ export function CreativeMessages({
     onConfirmSceneSelection,
     onRecoverReference,
     onCheckStatus,
+    onEnhancementComplete,
     selectedAssetIds,
     onToggleAsset,
     hasOlder,
@@ -65,6 +66,7 @@ export function CreativeMessages({
     onConfirmSceneSelection?: (runId: string, selection: CreativeSceneSelection) => Promise<void>;
     onRecoverReference?: (runId: string, recovery: CreativeReferenceRecovery) => Promise<void>;
     onCheckStatus?: (runId: string) => Promise<void>;
+    onEnhancementComplete?: (conversationId: string) => Promise<void>;
     selectedAssetIds: string[];
     onToggleAsset: (id: string) => void;
     hasOlder?: boolean;
@@ -150,6 +152,7 @@ export function CreativeMessages({
                             onConfirmSceneSelection={onConfirmSceneSelection}
                             onRecoverReference={onRecoverReference}
                             onCheckStatus={onCheckStatus}
+                            onEnhancementComplete={onEnhancementComplete}
                             selectedAssetIds={selectedAssetIds}
                             onToggleAsset={onToggleAsset}
                         />
@@ -227,6 +230,7 @@ function CreativeMediaRound({
     onConfirmSceneSelection,
     onRecoverReference,
     onCheckStatus,
+    onEnhancementComplete,
     selectedAssetIds,
     onToggleAsset,
 }: {
@@ -245,6 +249,7 @@ function CreativeMediaRound({
     onConfirmSceneSelection?: (runId: string, selection: CreativeSceneSelection) => Promise<void>;
     onRecoverReference?: (runId: string, recovery: CreativeReferenceRecovery) => Promise<void>;
     onCheckStatus?: (runId: string) => Promise<void>;
+    onEnhancementComplete?: (conversationId: string) => Promise<void>;
     selectedAssetIds: string[];
     onToggleAsset: (id: string) => void;
 }) {
@@ -311,7 +316,7 @@ function CreativeMediaRound({
                                     <h2 className="truncate text-[17px] font-semibold leading-7 text-[#1f2937] dark:text-[#f3f5f7]">{resultTitle}</h2>
                                     <CreativeRunTiming run={run} time={assistantMessage.createdAt} />
                                 </div>
-                                <CreativeRunSummary run={run} modelNames={modelNames} />
+                                <CreativeRunSummary run={run} modelNames={modelNames} outputAssets={outputAssets} />
                             </>
                         ) : null}
                         <div data-testid="creative-result-group" className="mt-3 flex w-fit max-w-full flex-col items-start">
@@ -344,12 +349,12 @@ function CreativeMediaRound({
                                     />
                                     {otherMediaOutputs.length ? (
                                         <div className="mt-3">
-                                            <CreativeMediaResult assets={otherMediaOutputs} fallbackRatio={run?.tasks.find((task) => task.type === "image")?.ratio || run?.generationPreferences?.image?.size} />
+                                            <CreativeMediaResult assets={otherMediaOutputs} fallbackRatio={run?.tasks.find((task) => task.type === "image")?.ratio || run?.generationPreferences?.image?.size} onEnhancementComplete={onEnhancementComplete} />
                                         </div>
                                     ) : null}
                                 </>
                             ) : mediaOutputs.length ? (
-                                <CreativeMediaResult assets={mediaOutputs} fallbackRatio={run?.tasks.find((task) => task.type === "image")?.ratio || run?.generationPreferences?.image?.size} renderActions={renderRoundActions} />
+                                <CreativeMediaResult assets={mediaOutputs} fallbackRatio={run?.tasks.find((task) => task.type === "image")?.ratio || run?.generationPreferences?.image?.size} renderActions={renderRoundActions} onEnhancementComplete={onEnhancementComplete} />
                             ) : assistantMessage.status === "completed" && textOutputs.length ? (
                                 <CreativeRoundActions outputAssets={outputAssets} run={run} selectedAssetIds={selectedAssetIds} onToggleAsset={onToggleAsset} />
                             ) : null}
@@ -505,10 +510,11 @@ function CreativeAssistantAvatar({ logoUrl, className }: { logoUrl?: string; cla
     );
 }
 
-function CreativeRunSummary({ run, modelNames }: { run?: CreativeAgentRun; modelNames: ReadonlyMap<string, string> }) {
-    const items = creativeRunPresentation(run, modelNames);
+function CreativeRunSummary({ run, modelNames, outputAssets }: { run?: CreativeAgentRun; modelNames: ReadonlyMap<string, string>; outputAssets: CreativeAsset[] }) {
+    const items = creativeRunPresentation(run, modelNames, outputAssets);
     if (!items.length) return null;
     const summaryItems = items.filter((item) => item.key !== "mode" && item.key !== "status");
+    const imageMode = creativeRunMode(run) === "image";
     const duration = creativeRunDuration(run);
     return (
         <div className="w-fit max-w-full text-[#667085] dark:text-[#a0a9b4]" aria-label="本轮创作参数">
@@ -519,7 +525,7 @@ function CreativeRunSummary({ run, modelNames }: { run?: CreativeAgentRun; model
                         title={`${item.label}：${item.value}`}
                         className="inline-flex h-6 max-w-[180px] items-center truncate rounded-md border border-[#e9ecf0] bg-white px-2 text-[11px] leading-none dark:border-[#343a43] dark:bg-[#1b1f24]"
                     >
-                        {item.value}
+                        {imageMode && ["size", "quality", "actual-size"].includes(item.key) ? `${item.label}：${item.value}` : item.value}
                     </span>
                 ))}
                 <Popover
@@ -584,7 +590,7 @@ function CreativeRoundActions({ outputAssets, activeAsset, run, selectedAssetIds
     const copyText = useCopyText();
     const [copyingPrompt, setCopyingPrompt] = useState(false);
     const downloads = agentAssetDownloads(activeAsset ? [activeAsset] : outputAssets);
-    const allDownloads = agentAssetDownloads(outputAssets.filter((asset) => asset.status === "ready"));
+    const allDownloads = agentAssetDownloads(creativeMediaResultGroups(outputAssets).map((group) => activeAsset && (activeAsset.id === group.original.id || activeAsset.id === group.enhanced?.id) ? activeAsset : group.enhanced || group.original));
     const referenceAction = creativeReferenceAction(activeAsset, selectedAssetIds);
     const primaryDownload = downloads[0];
     const mode = creativeRunMode(run);
@@ -657,7 +663,8 @@ function CreativeRoundActions({ outputAssets, activeAsset, run, selectedAssetIds
 }
 
 export function creativeResultPrompt(activeAsset: CreativeAsset | undefined, outputAssets: CreativeAsset[], run?: CreativeAgentRun) {
-    const asset = activeAsset || outputAssets.find((item) => item.status === "ready");
+    const selected = activeAsset || outputAssets.find((item) => item.status === "ready");
+    const asset = selected?.metadata.provenance === "ai_enhanced" ? outputAssets.find((item) => item.id === selected.parentAssetId) || selected : selected;
     const taskId = typeof asset?.metadata.agentTaskId === "string" ? asset.metadata.agentTaskId.trim() : asset?.sourceTaskId?.trim();
     const task = taskId ? run?.tasks.find((item) => item.id === taskId) : run?.tasks.length === 1 ? run.tasks[0] : undefined;
     return task?.optimizedPrompt?.trim() || "";

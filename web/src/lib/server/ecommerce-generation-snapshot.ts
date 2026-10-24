@@ -127,7 +127,7 @@ export function buildEcommercePlanningInput(
             id: asset.id,
             type: asset.type,
             title: asset.title,
-            ...(asset.remoteUrl || asset.serverUrl ? { url: asset.remoteUrl || asset.serverUrl } : {}),
+            ...(asset.serverUrl || asset.remoteUrl ? { url: asset.serverUrl || asset.remoteUrl } : {}),
             ...(Number.isFinite(asset.width) ? { width: asset.width } : {}),
             ...(Number.isFinite(asset.height) ? { height: asset.height } : {}),
         })),

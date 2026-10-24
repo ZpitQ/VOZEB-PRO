@@ -314,6 +314,43 @@ describe("image task runtime submission safety", () => {
         expect(state.result?.results?.[0]).toEqual(media);
     });
 
+    it("keeps immutable ordinary native variants and their enhancement identities after log normalization and repeat persistence", async () => {
+        const media = [1, 2].map((index) => ({
+            resultId: `${state.id}:${index}`,
+            enhancementId: `enhancement:${state.id}:${index}`,
+            dataUrl: `/api/generation-log-assets/native-${index}.png`,
+            serverUrl: `/api/generation-log-assets/native-${index}.png`,
+            width: 1254,
+            height: 1254,
+            bytes: 128,
+            mimeType: "image/png",
+            nativeSource: { url: `/api/generation-log-assets/native-${index}.png`, sha256: String(index).repeat(64), width: 1254, height: 1254, byteLength: 128, format: "png", hasAlpha: false, provenance: "provider_native" as const },
+        }));
+        state = { ...state, status: "running", result: { ...media[0], results: media } };
+        mocks.writeLog.mockResolvedValueOnce({ assets: [{ url: "/api/generation-log-assets/log-preview.png", width: 4096, height: 4096 }] });
+
+        await persistImageTaskResult(state, "http://internal", media[0].serverUrl);
+        expect(state.result).toEqual({ ...media[0], results: media });
+        expect(mocks.register).toHaveBeenCalledWith(state.userId, expect.objectContaining({ assets: media.map((item) => ({ type: "image", url: item.serverUrl, width: 1254, height: 1254, bytes: 128, mimeType: "image/png", resultId: item.resultId, enhancementId: item.enhancementId, nativeSource: item.nativeSource })) }));
+        await persistImageTaskResult(state, "http://internal", media[0].serverUrl);
+        expect(state.result).toEqual({ ...media[0], results: media });
+        expect(mocks.writeLog).toHaveBeenCalledOnce();
+        expect(mocks.normalizeAssets).not.toHaveBeenCalled();
+    });
+
+    it("retains skipped identity through log replacement and passes it to actual asset registration", async () => {
+        const media = { resultId: `${state.id}:1`, dataUrl: "/api/generation-log-assets/skipped.png", serverUrl: "/api/generation-log-assets/skipped.png", width: 8, height: 8, enhancementSkip: { status: "skipped" as const, reason: "not_requested" as const } };
+        state = { ...state, status: "running", result: { ...media, results: [media] } };
+        mocks.writeLog.mockResolvedValueOnce({ assets: [{ url: "/api/generation-log-assets/logged.png", serverUrl: "/api/generation-log-assets/logged.png", width: 8, height: 8 }] });
+        await persistImageTaskResult(state, "http://internal", media.serverUrl);
+        expect(state.result).toMatchObject({ resultId: media.resultId, enhancementSkip: media.enhancementSkip, results: [{ resultId: media.resultId, enhancementSkip: media.enhancementSkip, serverUrl: "/api/generation-log-assets/logged.png" }] });
+        expect(mocks.writeLog).toHaveBeenCalledWith(expect.anything(), "success", [media], expect.any(Number));
+        expect(mocks.register).toHaveBeenCalledWith(state.userId, expect.objectContaining({ assets: [expect.objectContaining({ resultId: media.resultId, enhancementSkip: media.enhancementSkip })] }));
+        expect(mocks.runOpenAi).not.toHaveBeenCalled();
+        expect(mocks.runCustom).not.toHaveBeenCalled();
+        expect(mocks.runGemini).not.toHaveBeenCalled();
+    });
+
     it.each(["unreadable", "save_failed", "wrong_native", "all_unreadable"] as const)("durably recovers the same upstream canvas batch after %s without recreating or refunding", async (condition) => {
         state.config = { ...state.config, advancedConfig: { ...emptyAdvancedConfig(), protocol: "openai" } };
         state.ecommerceExecution = {
@@ -711,8 +748,8 @@ describe("image task runtime submission safety", () => {
             "user-one",
             expect.objectContaining({
                 assets: [
-                    { type: "image", url: "/api/generation-log-assets/first.png" },
-                    { type: "image", url: "/api/generation-log-assets/second.png" },
+                    expect.objectContaining({ type: "image", url: "/api/generation-log-assets/first.png", resultId: `${state.id}:1`, enhancementSkip: { status: "skipped", reason: "disabled" } }),
+                    expect.objectContaining({ type: "image", url: "/api/generation-log-assets/second.png", resultId: `${state.id}:2`, enhancementSkip: { status: "skipped", reason: "disabled" } }),
                 ],
             }),
         );
@@ -765,8 +802,9 @@ describe("image task runtime submission safety", () => {
             ...imageTask(),
             status: "running",
             kind: "edit",
-            config: { ...imageTask().config, outputMode: "layers" },
+            config: { ...imageTask().config, outputMode: "layers", quality: "4k" },
             references: [{ dataUrl: source }],
+            enhancementPolicy: { revision: "frozen-enabled", enabled: true, connection: null },
             result: { dataUrl: foreground, results: [{ dataUrl: foreground }, { dataUrl: background }] },
         };
         mocks.writeLog.mockResolvedValueOnce({
@@ -778,6 +816,12 @@ describe("image task runtime submission safety", () => {
 
         await expect(persistImageTaskResult(state, "http://internal", "inline://image-task-result")).resolves.toMatchObject({ status: "success", result: { results: expect.any(Array) } });
         expect(state.result?.results).toHaveLength(2);
+        for (const result of state.result!.results!) {
+            expect(result).toHaveProperty("enhancementSkip", { status: "skipped", reason: "unsupported_layers" });
+            expect(result).not.toHaveProperty("nativeSource");
+            expect(result).not.toHaveProperty("enhancementId");
+        }
+        expect(mocks.register).toHaveBeenCalledWith(state.userId, expect.objectContaining({ assets: [1, 2].map((index) => expect.objectContaining({ resultId: `${state.id}:${index}`, enhancementSkip: { status: "skipped", reason: "unsupported_layers" } })) }));
         expect(mocks.writeLog).toHaveBeenCalledOnce();
         expect(mocks.register).toHaveBeenCalledOnce();
     });

@@ -42,6 +42,37 @@ describe("creative result references", () => {
 });
 
 describe("CreativeMessages", () => {
+    it("renders requested image parameters and the current round's native dimensions as visible summary text", () => {
+        const result = { ...mediaAsset("native-square"), width: 1254, height: 1254 };
+        const reference = { ...mediaAsset("summary-reference"), sourceRunId: "upload", width: 3000, height: 3000 };
+        const previous = { ...mediaAsset("previous-result"), sourceRunId: "previous-run", messageId: "previous-assistant", width: 2048, height: 2048 };
+        const failed = { ...mediaAsset("failed-result"), status: "failed" as const, width: 4096, height: 4096 };
+
+        const markup = renderImageSummary([result, failed], [reference, previous]);
+
+        expect(markup).toContain('aria-label="本轮创作参数"');
+        expect(markup).toContain(">请求尺寸：1:1</span>");
+        expect(markup).toContain(">请求画质：4K</span>");
+        expect(markup).toContain(">实际尺寸：1254×1254</span>");
+        expect(markup).not.toContain("实际尺寸：3000×3000");
+        expect(markup).not.toContain("实际尺寸：2048×2048");
+        expect(markup).not.toContain("实际尺寸：4096×4096");
+        expect(markup).toContain('aria-label="更多本轮创作操作"');
+        expect(markup).toContain("下载");
+    });
+
+    it("keeps unknown delivered image dimensions distinct from requested 4K quality", () => {
+        const result = { ...mediaAsset("unknown-size"), metadata: { width: 4096, height: 4096, size: "4096x4096" } };
+
+        const markup = renderImageSummary([result]);
+
+        expect(markup).toContain(">请求尺寸：1:1</span>");
+        expect(markup).toContain(">请求画质：4K</span>");
+        expect(markup).not.toContain("实际尺寸：");
+        expect(markup).not.toContain("1254×1254");
+        expect(markup).not.toContain("4096×4096");
+    });
+
     it.each([
         ["confirm_purposes", "确认用途并继续"],
         ["retry_analysis", "重新分析"],
@@ -944,6 +975,52 @@ function renderMessages(message: CreativeMessage, assets: CreativeAsset[] = [], 
                 projectLinks={{}}
                 projectErrors={{}}
                 runDetails={{}}
+                onMaterializeProject={async () => {
+                    throw new Error("not used");
+                }}
+                onRetryMessage={vi.fn()}
+                selectedAssetIds={[]}
+                onToggleAsset={vi.fn()}
+            />
+        </App>,
+    );
+}
+
+function renderImageSummary(outputAssets: CreativeAsset[], additionalAssets: CreativeAsset[] = []) {
+    const userMessage: CreativeMessage = {
+        id: "summary-user",
+        conversationId: "conversation-one",
+        runId: "summary-run",
+        sequence: 1,
+        role: "user",
+        status: "completed",
+        content: "生成一张 4K 商品图",
+        metadata: { assetIds: additionalAssets.filter((asset) => asset.sourceRunId === "upload").map((asset) => asset.id) },
+        createdAt: 1,
+        updatedAt: 1,
+    };
+    const assistantMessage: CreativeMessage = { ...userMessage, id: "summary-assistant", sequence: 2, role: "assistant", content: "图片已生成。", metadata: {} };
+    const outputs = outputAssets.map((asset) => ({ ...asset, sourceRunId: "summary-run", messageId: assistantMessage.id }));
+    return renderToStaticMarkup(
+        <App>
+            <CreativeMessages
+                messages={[userMessage, assistantMessage]}
+                assets={[...additionalAssets, ...outputs]}
+                loading={false}
+                projectLinks={{}}
+                projectErrors={{}}
+                runDetails={{
+                    "summary-run": {
+                        id: "summary-run",
+                        conversationId: "conversation-one",
+                        inputMessageId: userMessage.id,
+                        assistantMessageId: assistantMessage.id,
+                        status: "completed",
+                        generationPreferences: { mode: "image", image: { size: "1:1", quality: "4K" } },
+                        assetIds: outputs.filter((asset) => asset.status === "ready").map((asset) => asset.id),
+                        tasks: [{ id: "summary-image-task", title: "生成图片", type: "image", ratio: "1:1", quality: "4K", status: "completed" }],
+                    },
+                }}
                 onMaterializeProject={async () => {
                     throw new Error("not used");
                 }}

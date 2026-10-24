@@ -1,0 +1,26 @@
+{
+  "assetId": "zeb-enhancement-calibration-v1",
+  "origin": "project-authored geometric calibration SVG; no external assets or fonts",
+  "sourceSvgSha256": "14002ba8a2d91f19982dcdb25f6e349ac1dbe72ebf05ac39c60fde4b90556784",
+  "source": {
+    "format": "png",
+    "width": 1254,
+    "height": 1254,
+    "byteLength": 87100,
+    "sha256": "ce7faf5322ff9b665ff55896a9acab6fba4963420e88cbb6bb150ec7dc41577f"
+  },
+  "expectedNative": {
+    "format": "png",
+    "width": 5016,
+    "height": 5016,
+    "scale": 4
+  },
+  "renderer": {
+    "node": "22.23.3",
+    "sharp": "0.35.5",
+    "vips": "8.18.7"
+  },
+  "fullSourceDecodeVerified": true,
+  "actualInferenceVerified": false,
+  "gpuVerified": false
+}

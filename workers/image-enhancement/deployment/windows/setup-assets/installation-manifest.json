@@ -1,0 +1,33 @@
+{
+  "v": 1,
+  "platform": "win-x64",
+  "recipeId": "upscayl-4x-png-v1",
+  "binaryVersion": "content-sha256-704fd622984220c8c646a8dff4c7eba1cc62fbb8c47383996f38571f76b73fbf",
+  "entryPoint": "bin/upscayl-bin.exe",
+  "files": [
+    {
+      "path": "bin/upscayl-bin.exe",
+      "length": "6467072",
+      "sha256": "704fd622984220c8c646a8dff4c7eba1cc62fbb8c47383996f38571f76b73fbf"
+    },
+    {
+      "path": "bin/vcomp140.dll",
+      "length": "196688",
+      "sha256": "d49b394de1154176b39611c37c669ebff50aa5a818dbd5ff3d2214a299368ddd"
+    },
+    {
+      "path": "bin/vcomp140d.dll",
+      "length": "223344",
+      "sha256": "879ff638ac1c12a436ad794fb4bbbaf06ac4b43a980ebe5509f56acde2f3e5ab"
+    }
+  ],
+  "models": [
+    {
+      "modelId": "standard-4x",
+      "modelVersion": "content-sha256-713ee713b0353afaa27976f0563a64a5043bd70b9bd8936c2e26e25ebcdbcddf",
+      "modelDirectory": "models/standard-4x",
+      "modelName": "upscayl-standard-4x",
+      "modelSetSha256": "b4c8d1076dffaa221fde34eeddd682302a512e54ad96a81b3e4453cf849774ca"
+    }
+  ]
+}

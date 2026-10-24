@@ -1,5 +1,6 @@
 import type { RegistrationPolicyConsent } from "@/lib/registration-consent";
 import type { AdminPermission } from "@/lib/admin-permissions";
+import type { PublicImageResultEnhancement } from "@/lib/image-enhancement-contract";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -278,7 +279,7 @@ export type PromptRecord = {
     updatedAt: string;
 };
 
-export type GenerationLogAssetRecord = {
+export type GenerationLogAssetRecord = PublicImageResultEnhancement & {
     type: GenerationKind;
     url: string;
     remoteUrl?: string;

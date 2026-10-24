@@ -2,8 +2,28 @@ import { describe, expect, it } from "vitest";
 
 import { DEFAULT_SETTINGS } from "@/lib/auth/store-foundation";
 
-import { agentPlannerInput, agentPlannerSystemPrompt, buildAgentPlannerInput, compactCanvasSnapshot, plannerAgentSkills, selectAgentSkills } from "./agent-run-surface-policy";
+import { agentPlannerInput, agentPlannerSystemPrompt, assetAccessUrl, buildAgentPlannerInput, compactCanvasSnapshot, creativeAssetContext, plannerAgentSkills, selectAgentSkills } from "./agent-run-surface-policy";
 import { filterAgentPlannerModels, resolveAgentPlanningProfile } from "./agent-run-planning-profile";
+
+describe("assetAccessUrl", () => {
+    it("uses the saved original for editing and planning when the upstream URL is temporary", () => {
+        const asset = { id: "native-result", type: "image", title: "Original", serverUrl: "/api/generation-log-assets/permanent/images/original.png", remoteUrl: "http://upstream.example/temporary.png", metadata: {} };
+        const original = structuredClone(asset);
+        expect(assetAccessUrl(asset as never)).toBe(asset.serverUrl);
+        expect(creativeAssetContext(asset as never)).toContain(asset.serverUrl);
+        expect(creativeAssetContext(asset as never)).not.toContain(asset.remoteUrl);
+        expect(asset).toEqual(original);
+    });
+
+    it.each([undefined, "", "  ", "data:image/png;base64,AQ=="])("keeps remote-only references usable when the saved URL is %s", (serverUrl) => {
+        expect(assetAccessUrl({ serverUrl, remoteUrl: " https://cdn.example/original.png " } as never)).toBe("https://cdn.example/original.png");
+    });
+
+    it("does not expose data URLs as accessible references", () => {
+        expect(assetAccessUrl({ serverUrl: "data:image/png;base64,AQ==", remoteUrl: "data:image/png;base64,AQ==" } as never)).toBeUndefined();
+        expect(assetAccessUrl()).toBeUndefined();
+    });
+});
 
 describe("selectAgentSkills", () => {
     it("honors an explicitly selected compatible skill without keyword text", () => {

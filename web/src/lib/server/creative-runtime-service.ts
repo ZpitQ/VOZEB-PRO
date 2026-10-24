@@ -14,6 +14,7 @@ import {
 import { writePersistentMediaDataUrl } from "@/lib/server/reference-asset-store";
 import { deleteCreativeConversationAggregates } from "@/lib/server/creative-entity-deletion-store";
 import { deleteUserMediaAssetsCascade } from "@/lib/server/user-media-deletion-service";
+import { publicImageResultEnhancement, type ImageResultEnhancementInput } from "@/lib/image-enhancement-contract";
 
 export class CreativeRuntimeServiceError extends Error {
     constructor(
@@ -134,7 +135,7 @@ export async function registerGenerationTaskAssetsForUser(
         projectId?: string;
         taskId: string;
         title: string;
-        assets: Array<{ type: "image" | "video" | "audio"; url: string; mimeType?: string; width?: number; height?: number; durationMs?: number; bytes?: number }>;
+        assets: Array<{ type: "image" | "video" | "audio"; url: string; mimeType?: string; width?: number; height?: number; durationMs?: number; bytes?: number } & ImageResultEnhancementInput>;
     },
 ) {
     if (!input.conversationId || !input.assets.length) return [];
@@ -159,7 +160,7 @@ export async function registerGenerationTaskAssetsForUser(
                 height: asset.height,
                 durationMs: asset.durationMs,
                 bytes: asset.bytes,
-                metadata: { surface: input.surface, projectId: input.projectId },
+                metadata: { surface: input.surface, projectId: input.projectId, ...(asset.type === "image" ? publicImageResultEnhancement(asset) : {}) },
             };
         }),
     );
