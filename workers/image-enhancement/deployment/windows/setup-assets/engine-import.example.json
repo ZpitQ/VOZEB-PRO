@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "sourcePath": "REPLACE_WITH_APPROVED_ENGINE_SOURCE/installation-manifest.json",
+      "path": "installation-manifest.json",
+      "bytes": 1051,
+      "sha256": "3d35157925fa34acaef5eeb637febac800d0c57de837515c14391724635fd969"
+    },
+    {
+      "sourcePath": "REPLACE_WITH_APPROVED_ENGINE_SOURCE/bin/upscayl-bin.exe",
+      "path": "bin/upscayl-bin.exe",
+      "bytes": 6467072,
+      "sha256": "704fd622984220c8c646a8dff4c7eba1cc62fbb8c47383996f38571f76b73fbf"
+    },
+    {
+      "sourcePath": "REPLACE_WITH_APPROVED_ENGINE_SOURCE/bin/vcomp140.dll",
+      "path": "bin/vcomp140.dll",
+      "bytes": 196688,
+      "sha256": "d49b394de1154176b39611c37c669ebff50aa5a818dbd5ff3d2214a299368ddd"
+    },
+    {
+      "sourcePath": "REPLACE_WITH_APPROVED_ENGINE_SOURCE/bin/vcomp140d.dll",
+      "path": "bin/vcomp140d.dll",
+      "bytes": 223344,
+      "sha256": "879ff638ac1c12a436ad794fb4bbbaf06ac4b43a980ebe5509f56acde2f3e5ab"
+    },
+    {
+      "sourcePath": "REPLACE_WITH_APPROVED_ENGINE_SOURCE/models/standard-4x/upscayl-standard-4x.bin",
+      "path": "models/standard-4x/upscayl-standard-4x.bin",
+      "bytes": 33424520,
+      "sha256": "713ee713b0353afaa27976f0563a64a5043bd70b9bd8936c2e26e25ebcdbcddf"
+    },
+    {
+      "sourcePath": "REPLACE_WITH_APPROVED_ENGINE_SOURCE/models/standard-4x/upscayl-standard-4x.param",
+      "path": "models/standard-4x/upscayl-standard-4x.param",
+      "bytes": 116029,
+      "sha256": "35330ececcea33b6c397a72548e788d5d53becee4734c50b7fada36e89f10a86"
+    },
+    {
+      "sourcePath": "REPLACE_WITH_APPROVED_ENGINE_SOURCE/models/standard-4x/model-set.json",
+      "path": "models/standard-4x/model-set.json",
+      "bytes": 398,
+      "sha256": "b4c8d1076dffaa221fde34eeddd682302a512e54ad96a81b3e4453cf849774ca"
+    }
+  ]
+}

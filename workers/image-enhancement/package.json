@@ -1,0 +1,27 @@
+{
+  "name": "@vozeb/image-enhancement-worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "test": "pnpm build && vitest run",
+    "typecheck": "tsc --noEmit --pretty false",
+    "build": "tsc --project tsconfig.build.json"
+  },
+  "dependencies": {
+    "@fastify/busboy": "3.2.3",
+    "better-sqlite3": "13.0.3",
+    "jsonc-parser": "3.3.1",
+    "sharp": "0.35.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "^20",
+    "typescript": "5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

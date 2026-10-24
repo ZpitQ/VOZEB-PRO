@@ -1,15 +1,19 @@
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 import sharp from "sharp";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { emptyAdvancedConfig } from "@/lib/channel-protocol-registry";
 import type { ImageTask } from "./image-task-store";
 
 const storage = vi.hoisted(() => ({ rejectedBytes: new Set<string>() }));
 const mediaRegistry = vi.hoisted(() => ({ register: vi.fn(), get: vi.fn<(storageKey: string) => Promise<null>>(async () => null), delete: vi.fn<(storageKeys: string[]) => Promise<void>>(async () => undefined) }));
+const worker = vi.hoisted(() => ({ inspectEnhancementWorker: vi.fn(), createEnhancementTaskClient: vi.fn() }));
+
+vi.mock("@/lib/server/image-enhancement-worker-client", () => worker);
 
 vi.mock("@/app/api/image-tasks/image-task-support", () => ({
     directRemoteImageResult: vi.fn(),
@@ -26,7 +30,7 @@ vi.mock("@/lib/server/object-storage-service", () => ({
     },
 }));
 vi.mock("@/lib/server/local-media-registry", () => ({ registerLocalMediaAsset: mediaRegistry.register, getLocalMediaRegistration: mediaRegistry.get, deleteLocalMediaRegistrations: mediaRegistry.delete }));
-vi.mock("@/lib/server/database", () => ({ getDatabaseProvider: () => "file" }));
+vi.mock("@/lib/server/database", () => ({ getDatabaseProvider: () => "file", isPostgresDatabaseEnabled: () => false }));
 
 describe("image task result persistence", () => {
     let directory: string;
@@ -36,6 +40,7 @@ describe("image task result persistence", () => {
     beforeAll(async () => {
         directory = await mkdtemp(join(tmpdir(), "vozeb-image-result-"));
         vi.stubEnv("VOZEB_PRO_DATA_DIR", directory);
+        vi.stubEnv("VOZEB_PRO_DATABASE_PROVIDER", "file");
         ({ prepareImageTaskResults: prepare } = await import("./image-task-result-service"));
         ({ localAssetUrlToPath: assetPath } = await import("./generation-log-repository"));
     });
@@ -50,6 +55,11 @@ describe("image task result persistence", () => {
         mediaRegistry.register.mockClear();
         mediaRegistry.get.mockClear();
         mediaRegistry.delete.mockClear();
+    });
+
+    afterEach(() => {
+        expect(worker.inspectEnhancementWorker).not.toHaveBeenCalled();
+        expect(worker.createEnhancementTaskClient).not.toHaveBeenCalled();
     });
 
     const savedFiles = async () => {
@@ -70,6 +80,11 @@ describe("image task result persistence", () => {
         expect(prepared.batchEvidence?.[missingIndex - 1]).toMatchObject({ resultIndex: missingIndex, nativeStatus: "unavailable", storageStatus: "unavailable", failureStage: "read", failureReason: "上游原生图片无法读取" });
         expect(prepared.batchEvidence?.[missingIndex - 1]).not.toHaveProperty("nativeSize");
         expect(prepared.results.map((media) => media.resultId)).toEqual([1, 2, 3].filter((index) => index !== missingIndex).map((index) => `${task.id}:${index}`));
+        for (const media of prepared.results) {
+            expect(media).toHaveProperty("enhancementSkip", { status: "skipped", reason: "disabled" });
+            expect(media).not.toHaveProperty("nativeSource");
+            expect(media).not.toHaveProperty("enhancementId");
+        }
         for (const media of prepared.results) expect((await readFile(assetPath(media.serverUrl!))).equals(source)).toBe(true);
         await updateImageTask(task.id, { result: { ...prepared.results[0], ...prepared } });
         expect((await getImageTask(task.id))?.result).toEqual({ ...prepared.results[0], ...prepared });
@@ -133,15 +148,19 @@ describe("image task result persistence", () => {
         expect(await sharp(persisted).metadata()).toMatchObject({ width, height });
     });
 
-    it("continues to enforce exact custom dimensions", async () => {
+    it.each(["2k", "4k"])("keeps the %s original variant contract for smaller custom dimensions", async (quality) => {
         const bytes = await imageBytes(2048, 1152);
+        const task = imageTask({ size: "768x512", quality });
         const {
             results: [result],
-        } = await prepare(imageTask({ size: "768x512", quality: "4k" }), { dataUrl: dataUrl(bytes) }, "http://fixture.local", "fixture");
+        } = await prepare(task, { dataUrl: dataUrl(bytes) }, "http://fixture.local", "fixture");
         const persisted = await readFile(assetPath(result.serverUrl!));
 
-        expect(result).toMatchObject({ width: 768, height: 512 });
-        expect(await sharp(persisted).metadata()).toMatchObject({ width: 768, height: 512 });
+        expect(task.config.size).toBe("768x512");
+        const dimensions = quality === "4k" ? { width: 2048, height: 1152 } : { width: 768, height: 432 };
+        expect(result).toMatchObject(dimensions);
+        expect(await sharp(persisted).metadata()).toMatchObject(dimensions);
+        if (quality === "4k") expect(persisted.equals(bytes)).toBe(true);
     });
 
     it.each([false, true])("stores independent mask, untouched native file and protected composite as separate internal evidence (v4 auxiliary=%s)", async (withStyle) => {
@@ -150,7 +169,8 @@ describe("image task result persistence", () => {
         const native = await sharp({ create: { width: 6, height: 4, channels: 3, background: "red" } })
             .png()
             .toBuffer();
-        const task = imageTask({ size: "300x200" });
+        const task = imageTask({ size: "300x200", quality: "4k" });
+        task.enhancementPolicy = { revision: "frozen-enabled", enabled: true, connection: null };
         task.kind = "edit";
         task.references = [{ id: "scene", dataUrl: dataUrl(source), ecommerceRole: "scene" }, ...(withStyle ? [{ id: "style", dataUrl: dataUrl(source), ecommerceRole: "scene" as const }] : [])];
         if (withStyle)
@@ -176,6 +196,10 @@ describe("image task result persistence", () => {
             results: [result],
         } = await prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture");
         expect(result).toMatchObject({ width: 6, height: 4, sceneProtectionEvidence: { compositeOutsideChangedPixels: 0, nativeOutsideChangedPixels: 20, method: "source_pixels_copy" } });
+        expect(result).toHaveProperty("resultId", `${task.id}:1`);
+        expect(result).toHaveProperty("enhancementSkip", { status: "skipped", reason: "protected_contract" });
+        expect(result).not.toHaveProperty("nativeSource");
+        expect(result).not.toHaveProperty("enhancementId");
         const evidence = result.sceneProtectionEvidence!;
         expect((await readFile(assetPath(evidence.nativeUrl!))).equals(native)).toBe(true);
         expect(await sharp(await readFile(assetPath(evidence.maskUrl!))).metadata()).toMatchObject({ width: 6, height: 4 });
@@ -187,6 +211,7 @@ describe("image task result persistence", () => {
         const restored = await getImageTask(created.id);
         expect(restored?.sceneProtection).toEqual(task.sceneProtection);
         expect(restored?.result?.sceneProtectionEvidence).toEqual(evidence);
+        expect(restored?.result).toHaveProperty("enhancementSkip", { status: "skipped", reason: "protected_contract" });
     });
 
     it("does not turn a partially unreadable local scene batch into success", async () => {
@@ -264,6 +289,8 @@ describe("image task result persistence", () => {
             modelSnapshot: { logicalRole: "image_generation", capability: "image", logicalModelId: "image", channelId: "fixture", upstreamModel: "nano-banana-2", apiFormat: "gemini" },
         };
         task.ecommerceCanvasRequest = { size: "384x216" };
+        task.config.quality = "4k";
+        task.enhancementPolicy = { revision: "frozen-enabled", enabled: true, connection: null };
         const square = await imageBytes(288, 288);
         const landscape = await imageBytes(384, 216);
         const remoteUrl = "https://fixture.invalid/shared-result.png";
@@ -280,6 +307,11 @@ describe("image task result persistence", () => {
             "fixture",
         );
         expect(results).toHaveLength(2);
+        for (const media of results) {
+            expect(media).toHaveProperty("enhancementSkip", { status: "skipped", reason: "protected_contract" });
+            expect(media).not.toHaveProperty("nativeSource");
+            expect(media).not.toHaveProperty("enhancementId");
+        }
         expect(batchEvidence?.map((slot) => ({ resultId: slot.resultId, resultIndex: slot.resultIndex, nativeStatus: slot.nativeStatus, storageStatus: slot.storageStatus }))).toEqual(
             [1, 2].map((resultIndex) => ({ resultId: `${task.id}:${resultIndex}`, resultIndex, nativeStatus: "readable", storageStatus: "stored" })),
         );
@@ -301,13 +333,115 @@ describe("image task result persistence", () => {
     it.each([
         { model: "other-image-model", protocol: "custom" as const },
         { model: "gemini-3.1-flash-image", protocol: "openai" as const },
-    ])("keeps existing result normalization for $protocol $model", async ({ model, protocol }) => {
+    ])("keeps non-4K normalization with a stable result identity for $protocol $model", async ({ model, protocol }) => {
         const task = imageTask({ model, size: "1:1", quality: "1k", advancedConfig: { ...emptyAdvancedConfig(), protocol } });
+        task.enhancementPolicy = { revision: "frozen-enabled", enabled: true, connection: null };
         const prepared = await prepare(task, { dataUrl: dataUrl(await imageBytes(1280, 1280)) }, "http://fixture.local", "fixture");
         const [result] = prepared.results;
         expect(prepared).not.toHaveProperty("batchEvidence");
-        expect(result).not.toHaveProperty("resultId");
+        expect(result.resultId).toBe(`${task.id}:1`);
         expect(result).toMatchObject({ width: 1024, height: 1024 });
+        expect(result).toHaveProperty("enhancementSkip", { status: "skipped", reason: "not_requested" });
+        expect(result).not.toHaveProperty("nativeSource");
+        expect(result).not.toHaveProperty("enhancementId");
+    });
+
+    it("uses the frozen disabled policy for a successful result without creating enhancement work", async () => {
+        const task = imageTask({ model: "other-image-model", size: "1:1", quality: "1k" });
+        task.enhancementPolicy = { revision: "frozen-disabled", enabled: false, connection: null };
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(await imageBytes(8, 8)) }, "http://fixture.local", "fixture");
+        expect(result).toHaveProperty("enhancementSkip", { status: "skipped", reason: "disabled" });
+        expect(result).not.toHaveProperty("nativeSource");
+        expect(result).not.toHaveProperty("enhancementId");
+        const { createImageTask, updateImageTask, getImageTask } = await import("./image-task-store");
+        const created = await createImageTask(task);
+        await updateImageTask(created.id, { result: { ...result, results: [result] } });
+        expect((await getImageTask(created.id))?.result).toHaveProperty("enhancementSkip", { status: "skipped", reason: "disabled" });
+    });
+
+    it.each([
+        { model: "other-image-model", protocol: "custom" as const },
+        { model: "gemini-3.1-flash-image", protocol: "openai" as const },
+    ])("persists actual native bytes, task dimensions and repeat log references for ordinary $protocol $model 4K requests", async ({ model, protocol }) => {
+        const source = await imageBytes(1254, 1254);
+        const { createImageTask, getImageTask, updateImageTask } = await import("./image-task-store");
+        const task = await createImageTask(imageTask({ model, size: "1:1", quality: "4k", advancedConfig: { ...emptyAdvancedConfig(), protocol } }));
+        const prepared = await prepare(task, { dataUrl: dataUrl(source) }, "http://fixture.local", "fixture");
+        const [result] = prepared.results;
+        const persisted = await readFile(assetPath(result.serverUrl!));
+        expect(result).toMatchObject({ mimeType: "image/png", width: 1254, height: 1254, bytes: source.length });
+        expect(persisted).toEqual(source);
+        expect(result.resultId).toBe(`${task.id}:1`);
+        expect(result.nativeSource).toEqual({ url: result.serverUrl, sha256: createHash("sha256").update(source).digest("hex"), width: 1254, height: 1254, byteLength: source.length, format: "png", hasAlpha: false, provenance: "provider_native" });
+        expect(result.enhancementId).toBe(`enhancement:${task.id}:1`);
+        expect(result).not.toHaveProperty("enhancementSkip");
+        await expect(sharp(persisted).metadata()).resolves.toMatchObject({ width: 1254, height: 1254 });
+
+        await updateImageTask(task.id, { result: { ...result, ...prepared } });
+        expect(await getImageTask(task.id)).toMatchObject({
+            config: { size: "1:1", quality: "4k" },
+            result: { width: 1254, height: 1254, results: [{ dataUrl: result.dataUrl, serverUrl: result.serverUrl, mimeType: "image/png", width: 1254, height: 1254, bytes: source.length }] },
+        });
+        const beforeLogFiles = (await savedFiles()).filter((file) => file.endsWith(".png"));
+        const { recordGenerationTaskLogResult } = await import("./generation-log-task-service");
+        const logInput = {
+            taskId: task.id,
+            userId: task.userId,
+            username: task.username,
+            displayName: task.displayName,
+            kind: "image" as const,
+            source: "image-workbench" as const,
+            status: "success" as const,
+            title: "Native image result",
+            prompt: task.prompt,
+            model,
+            summary: "Image ready",
+            durationMs: 100,
+            createdAt: task.createdAt,
+            asset: { type: "image" as const, url: result.serverUrl!, serverUrl: result.serverUrl, width: result.width, height: result.height, mimeType: result.mimeType, bytes: result.bytes, targetSize: "4096x4096" },
+        };
+        const firstLog = await recordGenerationTaskLogResult(logInput);
+        const repeatedLog = await recordGenerationTaskLogResult(logInput);
+        expect(firstLog.asset).toMatchObject({ url: result.serverUrl, width: 1254, height: 1254, bytes: source.length });
+        expect(repeatedLog.asset).toEqual(firstLog.asset);
+        expect(repeatedLog.log?.assets).toHaveLength(1);
+        expect(mediaRegistry.register).toHaveBeenCalledTimes(1);
+        expect((await savedFiles()).filter((file) => file.endsWith(".png"))).toEqual(beforeLogFiles);
+        expect(await readFile(assetPath(repeatedLog.asset!.serverUrl!))).toEqual(source);
+        const storedLogs = JSON.parse(await readFile(join(directory, "generation-logs.json"), "utf8"));
+        expect(storedLogs.logs.find((log: { taskId?: string }) => log.taskId === task.id).assets).toEqual([repeatedLog.asset]);
+    });
+
+    it("preserves a single insufficient native edge for an exact ordinary request", async () => {
+        const source = await imageBytes(6000, 3000);
+        const {
+            results: [result],
+        } = await prepare(imageTask({ model: "other-image-model", size: "4096x4096" }), { dataUrl: dataUrl(source) }, "http://fixture.local", "fixture");
+
+        expect(result).toMatchObject({ width: 6000, height: 3000, bytes: source.length });
+        expect(await readFile(assetPath(result.serverUrl!))).toEqual(source);
+    });
+    it("keeps the original 4K-native variant unchanged even when it already exceeds the delivery target", async () => {
+        const task = imageTask({ model: "other-image-model", size: "1:1", quality: "4k" });
+        const source = await imageBytes(4100, 4100);
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(source) }, "http://fixture.local", "fixture");
+        expect(result).toMatchObject({ width: 4100, height: 4100, bytes: source.length, nativeSource: { width: 4100, height: 4100, byteLength: source.length } });
+        expect(await readFile(assetPath(result.serverUrl!))).toEqual(source);
+    });
+    it.each([0, 1])("records actual transparency rather than the existence of an alpha channel: %s", async (alpha) => {
+        const source = await sharp({ create: { width: 8, height: 8, channels: 4, background: { r: 255, g: 255, b: 255, alpha } } })
+            .png()
+            .toBuffer();
+        const task = imageTask({ model: "other-image-model", size: "1:1", quality: "4k" });
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(source) }, "http://fixture.local", "fixture");
+        expect(result.nativeSource).toMatchObject({ hasAlpha: alpha === 0, width: 8, height: 8 });
+        expect(await readFile(assetPath(result.serverUrl!))).toEqual(source);
     });
 });
 

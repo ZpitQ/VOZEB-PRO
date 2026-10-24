@@ -1,6 +1,7 @@
 import { formatAccountId } from "@/lib/account-id";
 import { normalizeRegistrationPolicyConsent } from "@/lib/registration-consent";
 import { normalizeAdminPermissions } from "@/lib/admin-permissions";
+import { publicImageResultEnhancement } from "@/lib/image-enhancement-contract";
 
 import type {
     AnnouncementRecord,
@@ -262,6 +263,7 @@ export function mapGenerationLog(row: Record<string, unknown>): GenerationLogRec
 }
 
 export function mapGenerationLogAsset(row: Record<string, unknown>): GenerationLogAssetRecord {
+    const metadata = jsonValue(row.enhancement_metadata);
     return {
         type: row.type === "video" ? "video" : "image",
         url: stringValue(row.url),
@@ -271,5 +273,6 @@ export function mapGenerationLogAsset(row: Record<string, unknown>): GenerationL
         width: optionalNumber(row.width),
         height: optionalNumber(row.height),
         bytes: optionalNumber(row.bytes),
+        ...(row.type === "image" && metadata && typeof metadata === "object" && !Array.isArray(metadata) ? publicImageResultEnhancement(metadata) : {}),
     };
 }

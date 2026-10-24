@@ -2,6 +2,96 @@
 
 ## Unreleased
 
+- [增强集成回归] 修复窄长图片的操作区超出结果卡片问题，图片仍按真实比例展示；统一原图与增强版本的尺寸验收，补齐文件 Provider 夹具和后台导航回归。更新 Web／文档依赖安全补丁及许可证清单，保留依赖审计和 CodeQL 检查门槛。
+
+- [增强大图预览] 修复增强结果点开后仍受低分辨率预览限制的问题；大图按交付宽度使用最高4K的WebP预览，保留轻量缩略图和原图切换，不重新生图或执行超分。
+
+- [低分辨率到4K] 普通完整图按原图比例执行 Upscayl 原生四倍超分，再等比缩入请求尺寸；像素取整造成的比例差异不再跳过。交付记录采用真实文件尺寸，保留原图；从未执行的旧比例跳过任务可单独补做增强，不重新生图。单次原生四倍仍不足时明确说明，禁止插值补尺寸。
+
+- [增强模型选择] 配好地址和 Token 即可检查连接并获取模型，空超时使用默认请求预算；安装与模型刷新自动导入 Upscayl 目录中的完整四倍模型。业务模型独立选择，复用当前启动实例的 GPU 校准结果，保留已有 Token 与任务。
+
+- [Windows 安装体验] 新增整合 ZIP 和双击安装入口，自动准备目录、引擎清单、配置与 Token，提供复制密钥和后台接入说明；重复运行保留已有配置，继续复用原安装维护机制。交互提示、提权和剪贴板体验待用户确认。
+
+- [增强配置与尺寸展示] 管理员切换服务／模型后，旧任务独立重试仍用冻结策略，新任务采用新默认；关闭只影响后续任务，显式取消仅影响指定增强。原图与当前所选版本显示各自真实尺寸，不改写原生资产或冻结编辑。配置时间线与原故障同轮 10 项、尺寸单测 64 项及初始化加 2 桌面场景分别通过；各轮不相加，最终整体门禁另列。
+
+- [增强故障恢复与日志] 固定具体原因、写入边界准确归类、原图下载及独立重试保留；损坏／截断／摘要错／永久写失败与持久收据丢响应只恢复同结果／确认，不重发生图或重复发布。真实 Web 进程重启另轮 1/1、实际成功／跳过／失败日志对照已补齐；重启错误字符串内嵌 Authorization／Cookie 值的脱敏回归通过，原业务 JSON 保持，派生另存并绑定摘要，不称新业务或 GPU 运行。
+
+- [普通生图高清增强 M5] 独立持久增强任务、冻结策略、明确跳过、双版本资产及真实计时已实现；必要 Worker 候选已升级且新实例自检合格，F01/F02 的实际后端→GPU→永久媒体／桌面及一次实际图像模型的真实比例跳过分别有证据。原 SR-M5-01～12 保留，固定业务源码已中文服务器本地提交 304f313，独立新 SSH 核 25 文件工作／提交摘要一致；该源码的隔离干净构建、完整 typecheck／build 和独立无网络 Sharp PNG 编解码通过。开发 Web／generation Worker 已发布同一镜像，来源、就绪／心跳、维护入口及桌面回读通过；后续文稿闭环提交不作为该产物的构建来源，本期 M5 开发及同产物开发测试发布完成，待用户验收，不代表生产／商业就绪或 M6～M8 交付。
+
+- [显式编辑基线与永久原件] 普通原件绑定真实成功任务及稳定结果身份，增强 child 绑定成功 publication、交付事实与原件父链；视觉分析入口和共享引用 helper 均优先永久原件。公开 F13 v9 初始化加完整业务 2/2 验证 A 增强晚到不改 B，显式 4096² 增强建立独立 C 的根／父／分支、真实选区、原生及保护合成、下载／刷新与零第二增强；其 LLM／image／Worker 为受控协议，F13 源码及实际证据独审 Spec／Quality PASS，该专项无遗留项；整体 M5 保留既有 unused-config M1。公开复现从 web 运行 `node scripts/run-image-enhancement-e2e.mjs`，不依赖私有照片或部署配置；不替代 F01/F02 真实 GPU。
+
+- [文件增强意图同步] 文件 Provider 的增强意图先可见时，执行器通过既有 generation 文件锁只读取得原任务快照，释放锁后才执行准备、远端调用及发布；不在锁内重写 generation 文件，不新增重试、延时或状态。PG 保持事务内原图成功与入队及执行器直读；原任务成功、归属／结果／原件身份和已持久原生技术失败门禁不弱化。 file outbox 原 I1 已修复并独审闭合；Spec Approved C/I/M=0/0/0，Quality Approved C/I/M=0/0/1，保留既有 unused-config M1，本次新增 0/0/0。F13 专项 0/0/0 不代表整体无遗留。 公开 F13 v9 初始化加完整业务 2/2、stderr 空；正常 hover 后保留原意图精确相等，并通过可信指针各帧的独立像素等式，指针专项 Spec／Quality Approved、C/I/M=0/0/0。v7 具体帧因果仍为 Unknown，v8 保持业务前准备失败，原失败轮不改写。
+
+- [开发测试发布与启用] 本轮开发发布回读时后台保持默认关闭，连接及凭据尚未配置；实际使用验收需管理员保存连接、完成连接／样图检查并开启。发布回读未保存凭据、未新生成或重跑 GPU；限宽预览仅为显示变体，不代替原生像素或新 GPU 质量证据。
+
+- [AI 高清增强管理] 新增管理员独立配置入口、默认关闭开关、加密凭据与 HTTPS 信任、能力模型及样图完整下载解码检查；配置热更新与开关意图均有修订冲突保护，旧连接档案和冻结引用保持。配置／权限、真实数据库、HTTPS、桌面与实际候选API链路已验证，提供开发测试验收；普通生图异步增强、原图回退、资产与日志闭环按 M5 单独交付。
+
+- [Windows 高清增强 M3] 完成 HTTP＋Token、普通服务启动、真实 GPU、任务恢复与维护验收，交付固定运行包、项目源码、第三方与补充构建材料及中文安装说明。保留历史候选和未知来源记录；用户确认与 M4 后台增强开关、业务接线单独推进。
+
+- [成功结果退役与精确清理] 增加 schema7 不可撤销围栏，在认证单 job 的显式保留期、原成功/收据与全部引用重新裁决后，仅首次正常退役 COMMIT 返回者取得一次 work，精确删除原 final PNG/manifest 并同步/关闭候选目录，保留空目录、其他文件与历史元数据。已获 work 后的清理异常/确认丢失留 pending，已有 pending 或重开不补发、不重放；原下载仅真实持久退役返回410（含pending），普通缺文件/坏图/未知失败仍503。实现、所定技术验证及两个固定源码门禁已完成；文稿、隐私、联合审、固定交付、服务器中文本地提交及独立回读各门禁分别按最终实际回执核定，源码批准不代替这些门禁。没有迁移、实际数据库升级、默认时长、扫描、调度或远程清理路由。完整安装/服务/GPU/WorkerAPI/ZEB继续另验，增强关闭/readiness=false保持。详见[切片计划](docs/superpowers/plans/2026-10-19-image-super-resolution-cleanup.md)，下方前置片保留各自历史状态。
+
+- [成功结果保留资格] 增加认证单 job 的只读一致事务快照，显式 retentionMs 从成功 completedAt 起算，同时核原持久收据、期限与全部未释放引用，返回八字段冻结资格说明。新17/17与定点旧回归34/34分轮通过，最终types/build各0；本片实现、所定技术验证与固定源码独审已完成，Spec compliant / Quality Approved，Critical/Important/Minor=0/0/0。公开文稿/隐私门禁与服务器本地交付仍待各自实际回执，不预填这些后续成功。 快照不授删除权，不删除、退役或产生410，不增持久结构、HTTP路由或调度，schema6保持。详见[切片计划](docs/superpowers/plans/2026-10-19-image-super-resolution-retention.md)。
+
+- [增强持久接收确认] 接通严格 JSON 收据与 schema6 持久绑定，只有真实成功候选及顶层 COMMIT 才交付收据；相同 receiptId 可在丢响应后精确重放。补修最后同步回调后的权限顺序及外层事务重入，HTTP receipt 使用独立字节/并发预算和统一期限。Store 22/22、配置 19/19、HTTP 18/18 与受影响旧回归分轮通过；本片实现、所定技术验证与总源码审查已完成，Spec compliant / Quality Approved，Critical/Important/Minor=0/0/0。公开文稿门禁与服务器本地交付按各自实际回执收口；本稿不预填文稿批准或提交。schema6 是代码契约，不表示服务器数据库已升级，下载 finish 也不是远端永久存储证明。详见[切片计划](docs/superpowers/plans/2026-10-19-image-super-resolution-receipt.md)。
+
+- [增强图片下载] 接通受认证的成功 PNG 交付，使用独立下载容量与总期限，断连和迟到 I/O 按原资源收口；复用完整验证字节，不补像素。修复未完成正文的拒绝关闭时序及成功发送前的权限复核顺序。所定技术检查与固定源码独审通过；文稿、本地交付及后续 receipt、安装服务与完整业务验收分别收口。详见[切片计划](docs/superpowers/plans/2026-10-19-image-super-resolution-http-result.md)。
+
+- [增强成功产物读取] 增加已发布结果的库内只读出口，复用既有完整验证链；每次请求取得新的精确引用，取消、撤权或清理证据不明时保守拒绝交付。类型、构建、新行为 17/17 与受影响旧回归 80/80 分轮通过，固定源码独审通过。HTTP 下载、接收确认和完整安装/业务接线继续另验，增强关闭/readiness=false 保持。详见[切片计划](docs/superpowers/plans/2026-10-19-image-super-resolution-published-reader.md)。
+
+- [Windows Worker 入口装配] 接通固定本地配置、真实启动入口与同一套持久任务组件；监听后一次恢复，提交/取消后非等待唤醒，关闭同步封存并明确退出。类型、构建、定点组合/入口及受影响回归与固定源码独审通过；完整安装包、服务身份、GPU 与结果交付接线继续另验，增强关闭/readiness=false 保持。详见[切片计划](docs/superpowers/plans/2026-10-18-image-super-resolution-worker-bootstrap.md)。
+
+- [Windows 薄服务宿主] 官方 ServiceBase 与 console 共用原 Job 收容核心，固定包内 Node/app 和单代清理；原根退出、宿主硬死、重复停止及 sink 故障四场景通过，两负例和原业务嵌套沿各自独立有效轮。完整成员核验源码独审通过，历史 RED、部分失败与诊断保持原判；最终实际证据/联合交付独审及服务器本地提交按各自回执核定。没有完整 Worker 安装包，实际 SCM/GPU 与业务接线继续另验。详见[切片计划](docs/superpowers/plans/2026-10-18-image-super-resolution-windows-service-host.md)。
+
+- [Windows 原根退出观察] 在现有 JobProcess 中独立等待原根进程退出，保持整树、输出 EOF 与业务退出证据分离；单调用方取消不影响共享观察，Dispose 不追认物理清理为成功。最终四个 Windows 原生场景与旧 Job 回归已分轮通过，最终源码/实际证据独审、文稿和本地交付按各自回执核定；服务宿主、安装包、GPU 与完整增强接线仍待。详见[切片计划](docs/superpowers/plans/2026-10-18-image-super-resolution-windows-root-exit.md)。
+
+- [Windows 执行 Adapter] 组合现有控制 Host 与严格日志读取器，连接单次授权、退出观察、停止、取消和只读恢复；修复读取器创建选项引起的调用方输出无法结束，并补齐测试进程登记及调用方退出清理验证。所定单元、接缝和 Windows 原生场景已分轮通过，固定源码与实际证据独审通过；文稿及本地交付按各自回执核定，GPU、服务安装与增强入口继续分阶段验收。详见[切片计划](docs/superpowers/plans/2026-10-18-image-super-resolution-windows-execution-adapter.md)。
+
+- [Windows 停止终态读取] 严格解释同源、完整且已恢复执行的原生 stop/deadline 日志，复用原退出证据且不产生业务 completion；exit0 不会把停止改判成功，缺授权、未恢复、证据冲突及原请求 Unknown 保持原判。类型、构建、reader/launcher 单测和所选 Windows 场景已分轮通过，固定源码与实际证据独审通过；最终文稿及本地交付按各自回执核定，正式 Adapter 与完整增强链路继续另验。详见[切片计划](docs/superpowers/plans/2026-10-18-image-super-resolution-stop-terminal-reader.md)。
+
+- [Windows 原生业务停止] 为后续增强 Worker 对接提供独立 request-stop，沿原 owner/Writer/permit 发送 soft/force，固定原停止期限并复用原唯一 cleanup；补齐 pending inspect 迟计时边界、业务 Unknown 与健康传输收尾及原 loss 终态验证。所定定向技术检查已完成，完整 Adapter/GPU/业务链路继续分阶段验收，详见[切片计划](docs/superpowers/plans/2026-10-18-image-super-resolution-native-stop.md)。
+
+- [Windows 原生执行桥，收口中] 原 helper 的 prepare、单次 AUTH、自然收尾、调用方失联及四项原生交错已完成所定分轮技术验证，临时诊断已移除，最终固定源码与实际证据独审通过；文稿及本地交付仍待。该内部接缝不代表 ExecutionAdapter、GPU 或完整 worker 已接入；详见[切片计划](docs/superpowers/plans/2026-10-17-image-super-resolution-execution-bridge.md)。
+
+- [Windows 普通产物刷盘] 修复完整成功候选恢复时的只读句柄刷盘失败：完整只读预检后，仅仍合格的候选使用可写句柄重验并真实刷盘，保留初次半候选和已发布产物的只读契约；技术验证分轮记录，独立复审与本地交付待收口，详见[主 SOP](docs/superpowers/plans/2026-10-10-image-super-resolution-integration-plan.md)。
+
+- [Windows 增强持久化] 修复目录刷盘句柄访问权限与新建目录父链停止判断，保留真实刷盘和失败关闭；完整超分链路与服务验收继续分阶段推进。
+
+- [执行发送许可] 实现 prepare/AUTH 原 Store/holder 绑定、每阶段单次许可与调用结束封存，通过所定技术验证与固定源码/实际证据独立复审；Windows 耐久 Store、原生接线与完整 GPU/Worker/API/ZEB 继续分别验收。分轮证据及文稿/本地交付边界见[切片计划](docs/superpowers/plans/2026-10-16-image-super-resolution-execution-send-permission.md)。
+
+- [Windows TS 控制 host] 实现内部 `open/inspect/close` 与有界通信，补修关闭时的在途请求期限检查，通过对应独立技术复审。prepare/AUTH、Adapter/GPU与业务接线继续分阶段交付，增强与就绪保持关闭；详见[切片计划](docs/superpowers/plans/2026-10-16-image-super-resolution-ts-control-host.md)。
+
+- [增强产物与恢复] M2-B3-4 增加完整产物校验、不可覆盖持久候选、同源恢复重验、普通成功/失败及取消终态竞争、安全成功摘要和联合证据下的运行后中断恢复。本批实现、技术检查及代码/文稿独立复审已完成。worker 未部署、生产就绪及增强开关保持关闭；成功传输/接收确认/清理、真实执行器和后台/业务接线继续分阶段交付。
+
+- [增强实施顺序] B3-5 G1 独立 OOM 分类保留固定历史证据；B4 已实现可信 OOM 的无重试失败终态、精确清槽和后续队列推进，保留原退出证据与输出，技术检查及固定代码独立 Spec PASS / Quality Approved、C/I/M=0/0/0。schema 仍为 5，自动降 tile 重试及其持久资格/回执未实现并暂缓。继续受控 Windows 执行身份、成功传输及测试环境普通完整图接入；worker 未部署，测试站仍 M1，原件、真实尺寸、认证与归属要求保持。
+
+- [真实 GPU 诊断] 普通原件已通过 Windows SSH CLI 的 1254²→5016² 原生 4×，完整解码与摘要回核通过；仅为 CLI 诊断，不代表后台服务身份、worker API 或 ZEB 已接入。5016² 为 AI 中间产物，仍需按交付预算等比下采样，不能称已交付或原生 4K。
+
+- [Windows 执行原语] 增加创建时挂起归入 Job、成员核验、一次授权与精确整树回收的底层原语，已通过有界 Windows 技术测试；完整 supervisor/controller、实际后台身份及 worker/业务接线继续分阶段交付，就绪与增强开关保持关闭。
+
+- [Windows 本地控制入口] 增加真实 EXE、本地 named pipe、pinned controller 身份与 protected pipe ACL、原 claim 连接唯一 owner 和不可逆内存封存，并通过有界 Windows 技术验证。`ready` 仅监听、`stop` 仅封存 claim；业务因果记录、引擎执行授权、安装和 worker/业务接线继续分阶段交付，详见高清增强 SOP。worker 未部署，就绪与增强开关保持关闭。
+
+- [Windows 可信文件记录] 增加完整身份绑定、唯一原 Owner、不可覆盖发布及原进程退出后严格只读重开的文件原语，不完整历史保留为 Unknown，同一记录不确定重放不再次写入。有界 Windows 技术验证及 native/fixture 独立复审通过，详见[高清增强 SOP](docs/superpowers/plans/2026-10-10-image-super-resolution-integration-plan.md)。引擎授权、业务因果记录、安装和完整 worker 接线仍待，增强与就绪保持关闭，未部署。
+
+- [Windows 引擎安装绑定] 增加外部批准原始清单、固定 CLI 与所选模型对绑定、持有只读文件租约及冻结参数配方，通过有界 Windows 技术验证；安装器、实际执行身份与 worker/业务接线继续分阶段交付，增强与就绪保持关闭。
+
+- [Windows Job 保护与观察] 创建时配置 protected Job ACL，并通过原 process/Job 句柄提供只读身份、权限、成员及生命周期观察；有界 Windows 技术验证和固定源码独立复审通过，详见[高清增强 SOP](docs/superpowers/plans/2026-10-10-image-super-resolution-integration-plan.md)。安装租约、引擎授权与业务接线仍待，worker 未部署，增强与就绪保持关闭。
+
+- [Windows 引擎准备请求] B4-B2-3 增加冻结任务快照到不可变原始请求、严格跨语言解析与只读结果的输入合同，独立正控、完整合同技术验证及固定源码/实际证据独立复审通过，详见[高清增强 SOP](docs/superpowers/plans/2026-10-10-image-super-resolution-integration-plan.md)。本片不启动引擎；原会话、安装租约、授权与 worker/业务接线仍待，增强与就绪保持关闭。
+
+- [Windows 原生执行会话] B4-B2-4 已贯通实际入口、原安装租约/记录/Job/双流、持久授权、单次恢复和真实收尾，完整 Windows 技术验证及固定源码/运行证据独立复审通过，详见[切片计划](docs/superpowers/plans/2026-10-15-image-super-resolution-native-session.md)。独立只读 reader、有界 launcher 与受限原生控制桥进展见后续条目；TS host/Adapter、图片验收、安装/服务身份及 GPU/worker/API/ZEB 继续分片交付；worker 未部署，增强与就绪保持关闭。
+
+- [Windows 只读恢复证据] B4-B2-5 已实现严格只读记录快照入口与纯 TS 解释器，通过分轮技术验证及固定源码/实际证据独立复审，详见[高清增强 SOP](docs/superpowers/plans/2026-10-10-image-super-resolution-integration-plan.md)。完整原记录链才可解释退出或中断，Unknown 不授重试权限；后续独立 launcher 见下条，Adapter 与实际恢复启动仍待，schema5、增强关闭/readiness=false、worker 未部署与自动 OOM 重试暂缓保持。
+
+- [Windows 有界只读启动] B4-B2-6 已实现内部独立 journal launcher，显式限定输入/双流字节与读/清理期限，核验原 child 的完整输入、自然退出、真实双 EOF 和 close；未知清理保留 owner，创建或通道错误保守阻止再次启动。新 unit、受影响 reader 与真实 Windows OS 分轮技术验证及固定源码/实际证据独立复审通过，详见[切片计划](docs/superpowers/plans/2026-10-15-image-super-resolution-native-session.md)。完整部署信任仍为前提，未接 Adapter/恢复消费者，不代表 engine、GPU、安装服务或 Worker/API/ZEB 已验收；增强与就绪保持关闭。
+
+- [Windows 受限原生控制桥] B4-B2-7 核心控制及所选输出闭包的技术验证、对应固定源码/actual独立复审已完成；输出高控、低控、held-close与六项旧回归分四轮通过，不合计历史结果，完整v2/更广矩阵仍有未证边界。严格schema、原创建pins/pipe peer与Gate H→terminal→Gate B保留Unknown，输出暂停不冒充精确kernel IRP或private queue counter证明，详见[切片计划](docs/superpowers/plans/2026-10-16-image-super-resolution-native-control-bridge.md)。最终文稿校验/独立批准与中文本地提交及fresh readback，分别按最终固定回执和实际Git回读核定；下一有界TS stdio host，再真实prepare/AUTH/Adapter，没有引擎/GPU、恢复或部署，增强与就绪保持关闭。
+
+- [增强调度] 保留持久单槽、租约续期、运行取消、执行期限停止、活动槽恢复与独立恢复权限；未知执行状态保槽，未授权启动中断按持久事件去重恢复。B3-2/B3-3 的补修、回归与批准保留各自历史记录，详细技术范围和分轮证据见待测试与高清增强 SOP。
+
+- [图片] 普通生成保留不足请求尺寸的上游原生图片，不再通过插值放大补足目标；仅在原生尺寸足够时等比缩小完整画面，实际格式、方向与宽高从真实文件读取。M1 已获用户确认验收。
+- [创作] `/create` 分开展示请求尺寸、请求画质与本轮可交付图片实际尺寸，未知尺寸不补造，保留既有下载与结果引用入口。
+- [增强基础] 新增独立 worker 的冻结协议、引擎配置、图片输入与原生 4× PNG 产物校验；补充稳定服务身份、本地密钥认证、SQLite 持久幂等排队提交与归属取消，首次初始化覆盖新建目录祖先入口刷盘。M2-B1 本切分回归与独立复审通过；B2 先认证的 HTTP 与有界流式上传已完成实现及技术验证，上传期限由应用接收器统一负责，保留独立请求头保护；补修后受影响回归分轮覆盖、类型检查、声明构建及增量独立复审通过，无遗留项，本切分仅作为本地开发里程碑，未创建 PR 或发布。用户及实际部署验收继续单列；真实执行器、TLS、安装包、后台开关和真实 GPU 增强接入继续分阶段交付。
+
 - [提交质量] 更新主应用与文档站的 Next.js、Sharp 安全补丁和锁文件；规划、生成服务及真实 TCP 夹具使用实际编辑协议，浏览器回归核对完整原生尺寸适配证据与不可信蒙版的前置拒绝。独立蒙版门槛和依赖审计保持，两个独立 CodeQL 分析分别匹配质量与发布工作流的既有基线。
 
 - [电商局部编辑] 同画幅不同原生分辨率可映回原图选区，覆盖精确同比及整数边长共同取整，选区外保留原始像素；独立保存原生与最终结果，技术交付重建核对真实适配模式和内容。不相容画幅继续阻止，安全失败信息包含预期与实际宽高。

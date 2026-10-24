@@ -1,9 +1,9 @@
-import type { CreativeGenerationMode } from "@/lib/creative-runtime-contract";
+import type { CreativeAsset, CreativeGenerationMode } from "@/lib/creative-runtime-contract";
 import type { CreativeAgentRun } from "@/services/api/creative";
 
 export type CreativeRunPresentationItem = { key: string; label: string; value: string };
 
-export function creativeRunPresentation(run: CreativeAgentRun | undefined, modelNames: ReadonlyMap<string, string>) {
+export function creativeRunPresentation(run: CreativeAgentRun | undefined, modelNames: ReadonlyMap<string, string>, outputAssets: readonly CreativeAsset[] = []) {
     if (!run) return [];
     const mode = creativeRunMode(run);
     const tasks = mode ? run.tasks.filter((task) => task.type === mode) : run.tasks;
@@ -15,10 +15,33 @@ export function creativeRunPresentation(run: CreativeAgentRun | undefined, model
     if (modelIds.length) items.push({ key: "model", label: "模型", value: modelIds.map((id) => modelNames.get(id) || id).join(" + ") });
 
     const size = firstText(tasks.map((task) => task.ratio)) || (preferences && "size" in preferences ? preferences.size : undefined);
-    if (size) items.push({ key: "size", label: mode === "video" ? "比例" : "尺寸", value: size });
+    if (size) items.push({ key: "size", label: mode === "image" ? "请求尺寸" : mode === "video" ? "比例" : "尺寸", value: size });
 
     const quality = firstText(tasks.map((task) => task.quality)) || (preferences && "quality" in preferences ? preferences.quality : undefined);
-    if (quality) items.push({ key: "quality", label: mode === "video" ? "清晰度" : "画质", value: qualityLabel(quality) });
+    if (quality) items.push({ key: "quality", label: mode === "image" ? "请求画质" : mode === "video" ? "清晰度" : "画质", value: qualityLabel(quality) });
+
+    if (mode === "image") {
+        const deliveredIds = new Set(run.assetIds);
+        const hasEnhancement = outputAssets.some((asset) => deliveredIds.has(asset.id) && asset.type === "image" && typeof asset.metadata.enhancementId === "string" && Boolean(asset.metadata.enhancementId.trim()));
+        const actualSizes = Array.from(
+            new Set(
+                outputAssets
+                    .filter(
+                        (asset) =>
+                            deliveredIds.has(asset.id) &&
+                            asset.type === "image" &&
+                            asset.status === "ready" &&
+                            Boolean(asset.serverUrl || asset.remoteUrl) &&
+                            Number.isInteger(asset.width) &&
+                            Number(asset.width) > 0 &&
+                            Number.isInteger(asset.height) &&
+                            Number(asset.height) > 0,
+                    )
+                    .map((asset) => `${asset.width}×${asset.height}`),
+            ),
+        );
+        if (actualSizes.length) items.push({ key: "actual-size", label: hasEnhancement ? "原图尺寸" : "实际尺寸", value: actualSizes.join(" / ") });
+    }
 
     const seconds = firstNumber(tasks.map((task) => task.seconds)) || (preferences && "seconds" in preferences ? preferences.seconds : undefined);
     if (seconds) items.push({ key: "seconds", label: "时长", value: `${seconds}秒` });

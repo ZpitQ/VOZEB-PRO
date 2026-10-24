@@ -1,4 +1,5 @@
 import type { QueryExecutor } from "@/lib/server/database/postgres";
+import { publicImageResultEnhancement } from "@/lib/image-enhancement-contract";
 import type { AnnouncementRecord, GenerationKind, GenerationLogAssetRecord, GenerationLogRecord, GenerationStatus, PageInput, PageResult, PromptRecord, PromptScope } from "./repository-shared";
 import { CREATE_OVERVIEW_RECENT_ASSET_LIMIT, type CreateOverviewAsset, type CreateOverviewTask } from "@/lib/create-workbench-overview";
 import { mapAnnouncement, mapGenerationLog, mapGenerationLogAsset, mapPrompt } from "./repository-record-mappers";
@@ -513,8 +514,19 @@ export class GenerationLogsRepository {
             ],
         );
         if (!result.rows[0]) throw new Error("generation log id belongs to another user");
-        await this.replaceAssets(log.id, log.assets);
-        return { ...mapGenerationLog(result.rows[0]), assets: log.assets };
+        const assets = log.assets.map(({ type, url, remoteUrl, serverUrl, mimeType, width, height, bytes, ...facts }) => ({
+            type,
+            url,
+            remoteUrl,
+            serverUrl,
+            mimeType,
+            width,
+            height,
+            bytes,
+            ...(type === "image" ? publicImageResultEnhancement(facts) : {}),
+        }));
+        await this.replaceAssets(log.id, assets);
+        return { ...mapGenerationLog(result.rows[0]), assets };
     }
 
     async delete(ids: string[]) {
@@ -540,10 +552,22 @@ export class GenerationLogsRepository {
         for (const [index, asset] of assets.entries()) {
             await this.db.query(
                 `
-                INSERT INTO generation_log_assets (generation_log_id, type, url, remote_url, server_url, mime_type, width, height, bytes, sort_order)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                INSERT INTO generation_log_assets (generation_log_id, type, url, remote_url, server_url, mime_type, width, height, bytes, sort_order, enhancement_metadata)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
                 `,
-                [logId, asset.type, asset.url, asset.remoteUrl || null, asset.serverUrl || null, asset.mimeType || null, asset.width || null, asset.height || null, asset.bytes || null, index],
+                [
+                    logId,
+                    asset.type,
+                    asset.url,
+                    asset.remoteUrl || null,
+                    asset.serverUrl || null,
+                    asset.mimeType || null,
+                    asset.width || null,
+                    asset.height || null,
+                    asset.bytes || null,
+                    index,
+                    jsonParam(asset.type === "image" ? publicImageResultEnhancement(asset) : {}),
+                ],
             );
         }
     }

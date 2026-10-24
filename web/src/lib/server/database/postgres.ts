@@ -65,6 +65,8 @@ const POSTGRES_TABLES = [
     "creative_assets",
     "local_media_assets",
     "object_storage_settings",
+    "image_enhancement_settings",
+    "image_enhancement_jobs",
     "canvas_projects",
     "library_assets",
     "drama_projects",
@@ -75,6 +77,8 @@ const POSTGRES_TABLES = [
 ] as const;
 
 const POSTGRES_SCHEMA_OBJECTS = [
+    "image_enhancement_jobs_due_idx",
+    "image_enhancement_jobs_user_task_idx",
     "user_account_id_seq",
     "users_account_id_idx",
     "users_username_lower_idx",

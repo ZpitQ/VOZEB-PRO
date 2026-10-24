@@ -1,4 +1,5 @@
 import { nanoid } from "nanoid";
+import { isDeepStrictEqual } from "node:util";
 import type { CreativeFoundation, CreativeReview } from "@/lib/creative-agent-contract";
 import { CreativeRuntimeInputError, MAX_SNAPSHOT_BYTES, type CreativeAsset, type CreativeGenerationPreferences, type CreativeProjectHandoffPlan, type CreativeRunRequest, type CreativeSurface } from "@/lib/creative-runtime-contract";
 import { extractImageSizeFromPrompt } from "@/lib/image-size";
@@ -17,6 +18,8 @@ import { getDramaProject } from "./drama-project-store";
 import { getCanvasProject } from "./canvas-project-store";
 import { ECOMMERCE_GENERATION_SNAPSHOT_VERSION, type EcommerceGenerationSnapshotRecord } from "./ecommerce-generation-snapshot";
 import { toSafeGenerationErrorMessage } from "./generation-errors";
+import { getEnhancementJob } from "./database/image-enhancement-job-repository";
+import type { ImageTask } from "./image-task-store";
 
 export type AgentRunStatus = "planning" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type AgentRunReviewStatus = "review_pending" | "reviewing" | "review_completed" | "review_unavailable";
@@ -256,15 +259,10 @@ export async function selectCurrentSceneBaseline(conversationId: string, explici
         const selected = (await getCreativeAssetsByIds([explicitResultId], userId)).find((asset) => asset.id === explicitResultId);
         if (!selected?.sourceRunId || selected.userId !== userId || selected.conversationId !== conversationId || selected.type !== "image" || selected.status !== "ready") return null;
         const parentRun = await getAgentRun(selected.sourceRunId);
-        return parentRun?.userId === userId &&
-            parentRun.conversationId === conversationId &&
-            parentRun.surface === "chat" &&
-            parentRun.status === "completed" &&
-            parentRun.assetIds.includes(selected.id) &&
-            validBaselineQuality(parentRun, true) &&
-            (await hasEcommerceResultLineage(selected, parentRun))
-            ? baselineWithEvidence(selected, parentRun)
-            : null;
+        if (!parentRun || parentRun.userId !== userId || parentRun.conversationId !== conversationId || parentRun.surface !== "chat" || parentRun.status !== "completed") return null;
+        if (!parentRun.assetIds.includes(selected.id) || selected.metadata.provenance === "ai_enhanced") return publishedEnhancementBaseline(selected, parentRun);
+        if (parentRun.ecommerceSnapshot) return validBaselineQuality(parentRun, true) && (await hasEcommerceResultLineage(selected, parentRun)) ? baselineWithEvidence(selected, parentRun) : null;
+        return (await savedNativeResult(selected, parentRun)) ? baselineWithEvidence(selected, parentRun, selected.id) : null;
     }
 
     const runs = (await listAgentRuns({ userId, conversationId, surface: "chat", statuses: ["completed"], limit: 100 }))
@@ -289,7 +287,7 @@ function validBaselineQuality(run: AgentRun, explicit = false) {
     return Boolean(quality && quality.hardFailures.length === 0 && ((quality.status === "passed" && quality.publicStatus === "passed") || (explicit && quality.status === "needs_adjustment" && quality.publicStatus === "needs_adjustment")));
 }
 
-function baselineWithEvidence(asset: CreativeAsset, run: AgentRun): CreativeAsset {
+function baselineWithEvidence(asset: CreativeAsset, run: AgentRun, ordinarySceneRootAssetId?: string): CreativeAsset {
     return {
         ...asset,
         metadata: {
@@ -297,11 +295,70 @@ function baselineWithEvidence(asset: CreativeAsset, run: AgentRun): CreativeAsse
             ecommerceContinuity: {
                 ...record(asset.metadata.ecommerceContinuity),
                 productAnchorId: run.ecommerceSnapshot?.plan?.source.productAnchorId || null,
-                sceneRootAssetId: run.ecommerceSnapshot?.continuity?.sceneRootAssetId || null,
+                sceneRootAssetId: run.ecommerceSnapshot?.continuity?.sceneRootAssetId || ordinarySceneRootAssetId || null,
                 ...(run.ecommerceSnapshot?.qualityCheck ? { parentQualityCheck: structuredClone(run.ecommerceSnapshot.qualityCheck) } : {}),
             },
         },
     };
+}
+
+async function savedNativeResult(asset: CreativeAsset, run: AgentRun) {
+    if (!asset.sourceTaskId || !run.assetIds.includes(asset.id)) return null;
+    const task = await getStoredGenerationTask<ImageTask>("image", asset.sourceTaskId);
+    if (!task || task.id !== asset.sourceTaskId || task.userId !== run.userId || task.conversationId !== run.conversationId || task.runId !== run.id || task.status !== "success") return null;
+    const result = (task.result?.results?.length ? task.result.results : task.result ? [task.result] : []).find((candidate) => candidate.resultId === asset.metadata.resultId);
+    const source = result?.nativeSource;
+    return result &&
+        source &&
+        result.resultId &&
+        result.resultId === asset.metadata.resultId &&
+        source.provenance === "provider_native" &&
+        /^[a-f0-9]{64}$/.test(source.sha256) &&
+        [source.width, source.height, source.byteLength].every((value) => Number.isSafeInteger(value) && value > 0) &&
+        source.url === (result.serverUrl || result.dataUrl) &&
+        source.url === asset.serverUrl &&
+        source.width === result.width &&
+        source.width === asset.width &&
+        source.height === result.height &&
+        source.height === asset.height &&
+        source.byteLength === result.bytes &&
+        source.byteLength === asset.bytes &&
+        (!asset.metadata.nativeSource || isDeepStrictEqual(asset.metadata.nativeSource, source))
+        ? result
+        : null;
+}
+
+async function publishedEnhancementBaseline(asset: CreativeAsset, run: AgentRun): Promise<CreativeAsset | null> {
+    if (!asset.sourceTaskId || !asset.parentAssetId) return null;
+    const job = await getEnhancementJob(asset.sourceTaskId, run.userId);
+    const delivered = job?.publication?.delivered;
+    if (
+        !job ||
+        job.id !== asset.sourceTaskId ||
+        job.userId !== run.userId ||
+        job.status !== "succeeded" ||
+        job.decision.status !== "queued" ||
+        !delivered ||
+        job.publication?.assetId !== asset.id ||
+        asset.ordinal !== 0 ||
+        asset.serverUrl !== delivered.url ||
+        asset.width !== delivered.width ||
+        asset.height !== delivered.height ||
+        asset.bytes !== delivered.byteLength ||
+        asset.metadata.provenance !== "ai_enhanced" ||
+        asset.metadata.enhancementId !== job.id ||
+        asset.metadata.parentResultId !== job.resultId ||
+        asset.metadata.sha256 !== delivered.sha256 ||
+        !/^[a-f0-9]{64}$/.test(delivered.sha256) ||
+        !isDeepStrictEqual(asset.metadata.parentAssetIds, [asset.parentAssetId])
+    )
+        return null;
+    const parent = (await getCreativeAssetsByIds([asset.parentAssetId], run.userId)).find((candidate) => candidate.id === asset.parentAssetId);
+    if (!parent || parent.userId !== run.userId || parent.conversationId !== run.conversationId || parent.sourceRunId !== run.id || parent.sourceTaskId !== job.imageTaskId || parent.type !== "image" || parent.status !== "ready") return null;
+    const original = await savedNativeResult(parent, run);
+    if (!original || original.resultId !== job.resultId || original.enhancementId !== job.id || !isDeepStrictEqual(original.nativeSource, job.decision.source) || asset.metadata.nativeSha256 !== original.nativeSource?.sha256) return null;
+    if (run.ecommerceSnapshot) return validBaselineQuality(run, true) && (await hasEcommerceResultLineage(parent, run)) ? baselineWithEvidence(asset, run) : null;
+    return baselineWithEvidence(asset, run, parent.id);
 }
 
 async function hasEcommerceResultLineage(asset: CreativeAsset, run: AgentRun): Promise<boolean> {

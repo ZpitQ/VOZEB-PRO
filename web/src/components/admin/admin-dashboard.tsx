@@ -31,6 +31,7 @@ const loadSiteSection = () => import("./admin-configuration-sections").then((mod
 const loadSettingsSection = () => import("./admin-configuration-sections").then((module) => module.AdminSettingsSection);
 const loadMediaStorageSection = () => import("./admin-system-sections").then((module) => module.AdminMediaStorageSection);
 const loadExternalStorageSection = () => import("./admin-system-sections").then((module) => module.AdminExternalStorageSection);
+const loadImageEnhancementSection = () => import("@/app/admin/image-enhancement/components/admin-image-enhancement").then((module) => module.AdminImageEnhancement);
 const loadBackupSection = () => import("./admin-system-sections").then((module) => module.AdminBackupSection);
 const loadUpdatesSection = () => import("./admin-system-sections").then((module) => module.AdminUpdatesSection);
 const loadWalletSection = () => import("./admin-wallet-section").then((module) => module.AdminWalletSection);
@@ -58,6 +59,7 @@ const sectionLoaders: Partial<Record<AdminSectionKey, () => Promise<unknown>>> =
     settings: loadSettingsSection,
     mediaStorage: loadMediaStorageSection,
     externalStorage: loadExternalStorageSection,
+    imageEnhancement: loadImageEnhancementSection,
     backup: loadBackupSection,
     updates: loadUpdatesSection,
     wallet: loadWalletSection,
@@ -85,6 +87,7 @@ const AdminSiteSection = dynamic(loadSiteSection, { loading: AdminSectionLoading
 const AdminSettingsSection = dynamic(loadSettingsSection, { loading: AdminSectionLoading });
 const AdminBackupSection = dynamic(loadBackupSection, { loading: AdminSectionLoading });
 const AdminExternalStorageSection = dynamic(loadExternalStorageSection, { loading: AdminSectionLoading });
+const AdminImageEnhancement = dynamic(loadImageEnhancementSection, { loading: AdminSectionLoading });
 const AdminMediaStorageSection = dynamic(loadMediaStorageSection, { loading: AdminSectionLoading });
 const AdminUpdatesSection = dynamic(loadUpdatesSection, { loading: AdminSectionLoading });
 const AdminWalletSection = dynamic(loadWalletSection, { loading: AdminSectionLoading });
@@ -238,6 +241,7 @@ export function AdminDashboard(props: AdminDashboardProps) {
                     {activeSection === "accountDeletion" ? <AdminAccountDeletionSection active /> : null}
                     {activeSection === "mediaStorage" ? <AdminMediaStorageSection controller={controller} /> : null}
                     {activeSection === "externalStorage" ? <AdminExternalStorageSection controller={controller} /> : null}
+                    {activeSection === "imageEnhancement" ? <AdminImageEnhancement /> : null}
                     {activeSection === "backup" ? <AdminBackupSection controller={controller} /> : null}
                     {activeSection === "wallet" ? <AdminWalletSection controller={controller} /> : null}
                     {activeSection === "points" ? <AdminPointsSection controller={controller} /> : null}

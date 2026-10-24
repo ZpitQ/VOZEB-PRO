@@ -27,11 +27,12 @@ export async function GET(request: NextRequest) {
         start: params.get("start") || "",
         end: params.get("end") || "",
         includeEcommerceTrace: true,
+        includeImageEnhancement: true,
     });
 
     const users = await getPublicUsersByIds(result.items.map((item) => item.userId));
     const accountIdByUserId = new Map(users.map((user) => [user.id, user.accountId]));
-    return NextResponse.json({ logs: result.items.map((item) => ({ ...item, accountId: accountIdByUserId.get(item.userId) })), total: result.total, page: result.page, pageSize: result.pageSize });
+    return NextResponse.json({ logs: result.items.map((item) => ({ ...item, accountId: accountIdByUserId.get(item.userId) })), total: result.total, page: result.page, pageSize: result.pageSize }, { headers: { "Cache-Control": "private, no-store" } });
 }
 
 export async function DELETE(request: Request) {

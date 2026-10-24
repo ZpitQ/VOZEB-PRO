@@ -9,6 +9,7 @@ import { imageToDataUrl } from "@/services/image-storage";
 import { serverMediaUrl } from "@/services/server-media-storage";
 import { resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
+import { publicImageResultEnhancement, type PublicImageResultEnhancement } from "@/lib/image-enhancement-contract";
 
 type GenerationLogSource = "agent" | "image-workbench" | "video-workbench" | "canvas" | "drama" | "unknown";
 type RequestOptions = {
@@ -49,7 +50,7 @@ type ImageTaskPayload = {
     error?: string;
 };
 
-export type ImageGenerationResult = {
+export type ImageGenerationResult = PublicImageResultEnhancement & {
     dataUrl?: string;
     remoteUrl?: string;
     serverUrl?: string;
@@ -59,7 +60,7 @@ export type ImageGenerationResult = {
     mimeType?: string;
 };
 
-const IMAGE_TASK_POLL_INTERVAL_MS = 1800;
+export const IMAGE_TASK_POLL_INTERVAL_MS = 1800;
 const IMAGE_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 
 export class ImageGenerationTaskTerminalError extends Error {
@@ -197,6 +198,7 @@ export async function waitForImageGenerationTask(config: AiConfig, task: ImageGe
                     ? [
                           {
                               id: nanoid(),
+                              ...publicImageResultEnhancement(item),
                               dataUrl: item.dataUrl,
                               remoteUrl: item.remoteUrl,
                               serverUrl: item.serverUrl,

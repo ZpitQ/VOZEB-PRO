@@ -907,7 +907,7 @@ function needsPersistence(lease: GenerationTaskLease) {
     return lease.executionPhase === "result_ready" || lease.executionPhase === "persisting";
 }
 
-async function runWithConcurrency<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>) {
+export async function runWithConcurrency<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>) {
     const results: R[] = [];
     let cursor = 0;
     await Promise.all(

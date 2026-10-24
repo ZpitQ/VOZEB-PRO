@@ -1,8 +1,14 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ record: vi.fn() }));
+const mocks = vi.hoisted(() => ({ record: vi.fn(), fetch: vi.fn(), persist: vi.fn() }));
 
 vi.mock("@/lib/server/generation-log-task-service", () => ({ recordGenerationTaskLogResult: mocks.record }));
+vi.mock("@/lib/server/safe-outbound-fetch", () => ({ fetchSafeOutbound: mocks.fetch }));
+vi.mock("@/lib/server/security", async (original) => ({ ...(await original<typeof import("@/lib/server/security")>()), isSafeOutboundUrl: vi.fn(() => true) }));
+vi.mock("@/lib/server/object-storage-service", async (original) => ({ ...(await original<typeof import("@/lib/server/object-storage-service")>()), persistExternalMediaIfEnabled: mocks.persist }));
 
 import { emptyAdvancedConfig } from "@/lib/channel-protocol-registry";
 import type { ImageTask } from "@/lib/server/image-task-store";
@@ -30,6 +36,20 @@ describe("writeImageGenerationLog", () => {
         const asset = mocks.record.mock.calls[0][0].assets[0];
         expect(asset).not.toHaveProperty("targetSize");
         expect(asset).toMatchObject({ url: "/api/generation-log-assets/native.png", width: 2880, height: 2880 });
+    });
+
+    it("passes an ordinary image's existing permanent server URL alongside its expired upstream URL", async () => {
+        const media = {
+            dataUrl: "/api/generation-log-assets/permanent/native.png",
+            serverUrl: "/api/generation-log-assets/permanent/native.png",
+            remoteUrl: "https://expired.example.com/native.png",
+            width: 1254,
+            height: 1254,
+            resultId: "image-one:1",
+            enhancementId: "enhancement-one",
+        };
+        await writeImageGenerationLog(imageTask(), "success", [media], 10);
+        expect(mocks.record.mock.calls[0][0].assets[0]).toMatchObject({ serverUrl: media.serverUrl, remoteUrl: media.remoteUrl, resultId: media.resultId, enhancementId: media.enhancementId, targetSize: "1024x1024" });
     });
 
     it("does not resample validated layer assets", async () => {
@@ -64,6 +84,62 @@ describe("writeImageGenerationLog", () => {
         await writeImageGenerationLog(imageTask(), "success", [{ dataUrl: "/api/generation-log-assets/result.png", width: 64, height: 64, bytes: 128, mimeType: "image/png" }], 10);
 
         expect(mocks.record.mock.calls[0][0].assets[0]).toMatchObject({ width: 64, height: 64, bytes: 128, mimeType: "image/png" });
+    });
+
+    it.each(["native", "disabled", "not_requested", "protected_contract", "unsupported_layers"] as const)("passes only public %s enhancement facts to the log service", async (kind) => {
+        const nativeSource = { url: "/api/generation-log-assets/native.png", sha256: "a".repeat(64), width: 64, height: 64, byteLength: 128, format: "png", hasAlpha: false, provenance: "provider_native" as const };
+        const facts = kind === "native" ? { resultId: "image-one:1", enhancementId: "enhancement:image-one:1", nativeSource } : { resultId: "image-one:1", enhancementSkip: { status: "skipped" as const, reason: kind } };
+        const media = {
+            ...facts,
+            ...(kind === "native" ? { nativeSource: { ...nativeSource, credentialRef: "private-credential" } } : { enhancementSkip: { ...facts.enhancementSkip, token: "private-token" } }),
+            dataUrl: nativeSource.url,
+            width: 64,
+            height: 64,
+            canvasEvidence: { nativeUrl: "private-evidence" },
+            unknown: "private-future",
+        };
+        await writeImageGenerationLog(imageTask(), "success", [media], 10);
+        expect(mocks.record.mock.calls[0][0].assets[0]).toMatchObject(facts);
+        expect(JSON.stringify(mocks.record.mock.calls[0][0].assets)).not.toContain("private-");
+    });
+
+    it("records an already-saved ordinary result through the real file service without fetching its expired upstream URL or persisting media again", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "vozeb-runner-log-reuse-"));
+        try {
+            vi.stubEnv("VOZEB_PRO_DATA_DIR", directory);
+            vi.stubEnv("VOZEB_PRO_DATABASE_PROVIDER", "file");
+            vi.resetModules();
+            mocks.fetch.mockResolvedValue(new Response("expired", { status: 410 }));
+            const actualService = await vi.importActual<typeof import("@/lib/server/generation-log-task-service")>("@/lib/server/generation-log-task-service");
+            mocks.record.mockImplementation(actualService.recordGenerationTaskLogResult);
+            const caller = await import("./image-task-runner");
+            const nativeSource = { url: "/api/generation-log-assets/permanent/native.png", width: 1254, height: 1254, byteLength: 1200, sha256: "a".repeat(64), format: "png", hasAlpha: false, provenance: "provider_native" as const };
+            const media = {
+                dataUrl: nativeSource.url,
+                serverUrl: nativeSource.url,
+                remoteUrl: "https://expired.example.com/native.png",
+                width: nativeSource.width,
+                height: nativeSource.height,
+                bytes: nativeSource.byteLength,
+                mimeType: "image/png",
+                resultId: "image-one:1",
+                enhancementId: "enhancement-one",
+                nativeSource,
+            };
+            await caller.writeImageGenerationLog(imageTask(), "success", [media], 10);
+
+            const persisted = JSON.parse(await readFile(join(directory, "generation-logs.json"), "utf8"));
+            expect(persisted.logs[0]).toMatchObject({
+                status: "success",
+                assets: [{ url: nativeSource.url, serverUrl: nativeSource.url, remoteUrl: media.remoteUrl, width: 1254, height: 1254, resultId: media.resultId, enhancementId: media.enhancementId, nativeSource }],
+            });
+            expect(mocks.fetch).not.toHaveBeenCalled();
+            expect(mocks.persist).not.toHaveBeenCalled();
+        } finally {
+            vi.unstubAllEnvs();
+            vi.resetModules();
+            await rm(directory, { recursive: true, force: true });
+        }
     });
 });
 

@@ -680,7 +680,7 @@ export async function buildImageEditFormData(task: ImageTask, quality: string | 
     return formData;
 }
 
-export async function imageReferenceToFile(reference: ImageTaskReference, name: string, origin: string, cookie: string) {
+export async function imageReferenceToFile(reference: ImageTaskReference, name: string, origin: string, cookie: string, maxBytes = MAX_INLINE_IMAGE_BYTES) {
     let lastError: unknown;
     for (const value of rawReferenceRequestUrlCandidates(reference)) {
         try {
@@ -696,10 +696,10 @@ export async function imageReferenceToFile(reference: ImageTaskReference, name: 
             });
             if (!response.ok || !response.body) throw new Error("参考图读取失败");
             const contentLength = Number(response.headers.get("content-length") || 0);
-            if (contentLength > MAX_INLINE_IMAGE_BYTES) throw new Error("参考图过大，请压缩后重试");
+            if (contentLength > maxBytes) throw new Error("参考图过大，请压缩后重试");
             const bytes = Buffer.from(await response.arrayBuffer());
             if (!bytes.length) throw new Error("参考图读取失败");
-            if (bytes.length > MAX_INLINE_IMAGE_BYTES) throw new Error("参考图过大，请压缩后重试");
+            if (bytes.length > maxBytes) throw new Error("参考图过大，请压缩后重试");
             const mimeType = await resolveMediaMimeType(bytes, "image", response.headers.get("content-type") || reference.type);
             if (!mimeType) throw new Error("参考图不是有效图片");
             return new File([bytes], name, { type: mimeType });
@@ -710,10 +710,10 @@ export async function imageReferenceToFile(reference: ImageTaskReference, name: 
     throw lastError instanceof Error ? lastError : new Error("参考图读取失败");
 }
 
-export async function imageReferenceToDataUrl(reference: ImageTaskReference, name: string, origin: string, cookie: string) {
+export async function imageReferenceToDataUrl(reference: ImageTaskReference, name: string, origin: string, cookie: string, maxBytes = MAX_INLINE_IMAGE_BYTES) {
     const inline = rawReferenceRequestUrlCandidates(reference).find((value) => /^data:image\//i.test(value));
     if (inline) return inline;
-    const file = await imageReferenceToFile(reference, name, origin, cookie);
+    const file = await imageReferenceToFile(reference, name, origin, cookie, maxBytes);
     return `data:${file.type || reference.type || "image/png"};base64,${Buffer.from(await file.arrayBuffer()).toString("base64")}`;
 }
 

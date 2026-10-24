@@ -15,6 +15,7 @@ import { recoverGenerationTaskFromUpstream } from "@/lib/server/generation-task-
 import { canRecoverUnsubmittedImageMask, canRecoverUnsubmittedImageReference, scheduleGenerationTask } from "@/lib/server/generation-task-scheduler";
 import { assertEcommerceImageExecutionSnapshot } from "@/lib/server/ecommerce-image-task-orchestration";
 import { getAuthSettings } from "@/lib/auth/store";
+import { publicImageResultEnhancement } from "@/lib/image-enhancement-contract";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -180,6 +181,7 @@ export async function PATCH(request: Request, context: RouteContext) {
 function publicImageResult(result: ImageTask["result"]): ImageTask["result"] {
     if (!result) return undefined;
     return {
+        ...publicImageResultEnhancement(result),
         dataUrl: result.dataUrl,
         remoteUrl: result.remoteUrl,
         serverUrl: result.serverUrl,

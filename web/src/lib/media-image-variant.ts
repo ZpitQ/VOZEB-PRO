@@ -1,4 +1,4 @@
-export const IMAGE_PREVIEW_WIDTHS = [64, 96, 128, 256, 320, 480, 640, 960, 1280, 1600, 1920, 2048] as const;
+export const IMAGE_PREVIEW_WIDTHS = [64, 96, 128, 256, 320, 480, 640, 960, 1280, 1600, 1920, 2048, 4096] as const;
 
 export function normalizeImagePreviewWidth(value: unknown, fallback = 1600) {
     const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : Number.NaN;

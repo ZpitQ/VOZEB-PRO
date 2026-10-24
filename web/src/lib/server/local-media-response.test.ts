@@ -87,7 +87,7 @@ describe("local media response", () => {
         expect(requestedImageVariant(new Request("http://localhost/media?format=webp"), "image/png")).toEqual({ format: "webp", width: 1600 });
         expect(requestedImageVariant(new Request("http://localhost/media?format=webp&width=65"), "image/png")).toEqual({ format: "webp", width: 96 });
         expect(requestedImageVariant(new Request("http://localhost/media?format=webp&width=903"), "image/png")).toEqual({ format: "webp", width: 960 });
-        expect(requestedImageVariant(new Request("http://localhost/media?format=webp&width=999999"), "image/png")).toEqual({ format: "webp", width: 2048 });
+        expect(requestedImageVariant(new Request("http://localhost/media?format=webp&width=999999"), "image/png")).toEqual({ format: "webp", width: 4096 });
     });
 
     it("returns the untouched original image as an attachment for download", async () => {

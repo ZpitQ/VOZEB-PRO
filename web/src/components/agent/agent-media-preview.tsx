@@ -26,6 +26,7 @@ export function AgentMediaPreview({
     title,
     className,
     fit = "cover",
+    previewWidth = 1920,
     onDimensions,
 }: {
     type: "text" | "image" | "video" | "audio";
@@ -33,6 +34,7 @@ export function AgentMediaPreview({
     title: string;
     className?: string;
     fit?: "cover" | "contain" | "intrinsic";
+    previewWidth?: number;
     onDimensions?: (width: number, height: number) => void;
 }) {
     const [videoOpen, setVideoOpen] = useState(false);
@@ -57,7 +59,7 @@ export function AgentMediaPreview({
 
     if (type === "image") {
         const thumbnailUrl = imagePreviewUrl(url, 960);
-        const largePreviewUrl = imagePreviewUrl(url, 1920);
+        const largePreviewUrl = imagePreviewUrl(url, previewWidth);
         return (
             <div ref={mediaRootRef} className={cn("group/media relative overflow-hidden", className)}>
                 <Image

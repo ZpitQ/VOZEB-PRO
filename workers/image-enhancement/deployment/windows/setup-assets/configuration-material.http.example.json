@@ -1,0 +1,72 @@
+{
+  "host": "REPLACE_WITH_THIS_WORKER_IP",
+  "port": "REPLACE_WITH_WORKER_PORT",
+  "selfTestModelId": "standard-4x",
+  "workerConfig": {
+    "protocolVersion": "image-enhancement.v1",
+    "normalizationProfile": "srgb-upright-v1",
+    "models": [
+      {
+        "id": "standard-4x",
+        "binaryVersion": "content-sha256-704fd622984220c8c646a8dff4c7eba1cc62fbb8c47383996f38571f76b73fbf",
+        "binarySha256": "704fd622984220c8c646a8dff4c7eba1cc62fbb8c47383996f38571f76b73fbf",
+        "modelVersion": "content-sha256-713ee713b0353afaa27976f0563a64a5043bd70b9bd8936c2e26e25ebcdbcddf",
+        "modelSha256": "b4c8d1076dffaa221fde34eeddd682302a512e54ad96a81b3e4453cf849774ca",
+        "nativeScale": 4,
+        "allowedTiles": [256],
+        "defaultTile": 256,
+        "tta": false,
+        "gpuId": 0
+      }
+    ],
+    "budgets": {
+      "input": { "maxBytes": 20971520, "maxPixels": 40000000 },
+      "ai": { "maxBytes": 167772160, "maxPixels": 40000000 },
+      "delivery": { "maxBytes": 100663296, "maxPixels": 40000000 }
+    }
+  },
+  "submissionLimits": {
+    "maxWaitingJobs": 2,
+    "queueTimeoutMs": 30000,
+    "maxIdempotencyKeyLength": 128
+  },
+  "runnerLimits": {
+    "executionTimeoutMs": 60000,
+    "cancelGraceMs": 5000,
+    "leaseDurationMs": 15000,
+    "heartbeatIntervalMs": 5000
+  },
+  "transportLimits": {
+    "maxPlanBytes": 16384,
+    "maxMultipartOverheadBytes": 65536,
+    "maxConcurrentUploads": 2,
+    "maxConcurrentDownloads": 3,
+    "maxReceiptBytes": 1024,
+    "maxConcurrentReceipts": 1,
+    "headersTimeoutMs": 10000,
+    "requestTimeoutMs": 30000,
+    "maxHeaderBytes": 16384
+  },
+  "execution": {
+    "bridgeLimits": {
+      "maxRequestFrameBytes": 65536,
+      "maxResponseFrameBytes": 65536,
+      "maxHelperStderrBytes": 8192,
+      "maxSessionInputBytes": 262144,
+      "maxSessionOutputBytes": 1048576,
+      "maxQueuedOutputBytes": 262144,
+      "maxJsonDepth": 16,
+      "startupTimeoutMs": 8000,
+      "requestTimeoutMs": 5000,
+      "sessionTimeoutMs": 70000,
+      "cleanupTimeoutMs": 5000
+    },
+    "journalLimits": {
+      "maxRequestBytes": 16384,
+      "maxStdoutBytes": 65536,
+      "maxStderrBytes": 8192,
+      "readTimeoutMs": 5000,
+      "cleanupTimeoutMs": 5000
+    }
+  }
+}

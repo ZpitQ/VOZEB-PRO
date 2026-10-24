@@ -1,4 +1,4 @@
-import { getDatabaseProvider, ensurePostgresSchema, postgresQuery, withPostgresTransaction } from "@/lib/server/database";
+import { getDatabaseProvider, ensurePostgresSchema, postgresQuery, withPostgresTransaction, type QueryExecutor } from "@/lib/server/database";
 import { resolveGenerationReviewReason } from "@/lib/server/generation-task-review-reason";
 import { readJsonDataFile, withJsonDataFileLock, writeJsonDataFile } from "@/lib/server/data-adapter";
 import type { AgentRun } from "./agent-run-store";
@@ -23,6 +23,7 @@ type GenerationTaskSummaryAccumulator = Omit<GenerationTaskRecordSummary, "avera
 };
 
 const TASK_FILE = "generation-tasks.json";
+export { TASK_FILE as GENERATION_TASK_FILE };
 const ACTIVE_CONCURRENCY_PHASES = ["created", "submitting", "submitted", "polling", "result_ready", "persisting"] as const;
 let fileMutationQueue = Promise.resolve();
 const concurrencyQueues = new Map<string, Promise<void>>();
@@ -546,57 +547,63 @@ export async function transitionStoredGenerationTask<T extends { id: string; use
     patch: Partial<T> & { status: string },
     ttlMs: number,
     executionPatch?: import("@/lib/server/generation-task-scheduler").GenerationTaskSchedulePatch,
+    onPersist?: (task: T, executor?: QueryExecutor) => Promise<void>,
 ): Promise<T | null> {
     const updatedAt = Date.now();
     const nextPatch = { ...patch, updatedAt };
     const execution = executionPatch ? normalizeExecutionPatch(executionPatch) : null;
     if (getDatabaseProvider() === "postgres") {
         await ensurePostgresSchema();
-        const result = await postgresQuery<{ payload: T }>(
-            `UPDATE generation_tasks
-             SET status = $5, payload = payload || $6::jsonb, updated_at = $7, expires_at = $8,
-                 execution_phase = CASE WHEN $9::boolean THEN COALESCE($10, execution_phase) ELSE execution_phase END,
-                 upstream_task_id = CASE WHEN $9::boolean THEN COALESCE($11, upstream_task_id) ELSE upstream_task_id END,
-                 channel_id = CASE WHEN $9::boolean THEN COALESCE($12, channel_id) ELSE channel_id END,
-                 provider = CASE WHEN $9::boolean THEN COALESCE($13, provider) ELSE provider END,
-                 query_path = CASE WHEN $9::boolean THEN COALESCE($14, query_path) ELSE query_path END,
-                 submitted_at = CASE WHEN $9::boolean THEN COALESCE($15, submitted_at) ELSE submitted_at END,
-                 next_poll_at = CASE WHEN $9::boolean THEN $16 ELSE next_poll_at END,
-                 last_poll_at = CASE WHEN $9::boolean THEN COALESCE($17, last_poll_at) ELSE last_poll_at END,
-                 last_upstream_status = CASE WHEN $9::boolean THEN COALESCE($18, last_upstream_status) ELSE last_upstream_status END,
-                 result_payload = CASE WHEN $9::boolean THEN COALESCE($19::jsonb, result_payload) ELSE result_payload END,
-                 worker_id = CASE WHEN $9::boolean THEN NULL ELSE worker_id END,
-                 lease_until = CASE WHEN $9::boolean THEN NULL ELSE lease_until END
-             WHERE id = $1 AND task_type = $2 AND user_id = $3 AND status = ANY($4::text[]) AND expires_at > now()
-             RETURNING payload`,
-            [
-                id,
-                type,
-                userId,
-                allowedStatuses.map(normalizeGenerationTaskStatus),
-                normalizeGenerationTaskStatus(patch.status),
-                JSON.stringify(nextPatch),
-                new Date(updatedAt),
-                new Date(updatedAt + ttlMs),
-                Boolean(execution),
-                execution?.executionPhase || null,
-                execution?.upstreamTaskId || null,
-                execution?.channelId || null,
-                execution?.provider || null,
-                execution?.queryPath || null,
-                optionalDate(execution?.submittedAt),
-                optionalDate(execution?.nextPollAt),
-                optionalDate(execution?.lastPollAt),
-                execution?.lastUpstreamStatus || null,
-                execution?.resultPayload ? JSON.stringify(execution.resultPayload) : null,
-            ],
-        );
-        return result.rows[0]?.payload || null;
+        const perform = async (executor: QueryExecutor) => {
+            const result = await executor.query<{ payload: T }>(
+                `UPDATE generation_tasks
+                 SET status = $5, payload = payload || $6::jsonb, updated_at = $7, expires_at = $8,
+                     execution_phase = CASE WHEN $9::boolean THEN COALESCE($10, execution_phase) ELSE execution_phase END,
+                     upstream_task_id = CASE WHEN $9::boolean THEN COALESCE($11, upstream_task_id) ELSE upstream_task_id END,
+                     channel_id = CASE WHEN $9::boolean THEN COALESCE($12, channel_id) ELSE channel_id END,
+                     provider = CASE WHEN $9::boolean THEN COALESCE($13, provider) ELSE provider END,
+                     query_path = CASE WHEN $9::boolean THEN COALESCE($14, query_path) ELSE query_path END,
+                     submitted_at = CASE WHEN $9::boolean THEN COALESCE($15, submitted_at) ELSE submitted_at END,
+                     next_poll_at = CASE WHEN $9::boolean THEN $16 ELSE next_poll_at END,
+                     last_poll_at = CASE WHEN $9::boolean THEN COALESCE($17, last_poll_at) ELSE last_poll_at END,
+                     last_upstream_status = CASE WHEN $9::boolean THEN COALESCE($18, last_upstream_status) ELSE last_upstream_status END,
+                     result_payload = CASE WHEN $9::boolean THEN COALESCE($19::jsonb, result_payload) ELSE result_payload END,
+                     worker_id = CASE WHEN $9::boolean THEN NULL ELSE worker_id END,
+                     lease_until = CASE WHEN $9::boolean THEN NULL ELSE lease_until END
+                 WHERE id = $1 AND task_type = $2 AND user_id = $3 AND status = ANY($4::text[]) AND expires_at > now()
+                 RETURNING payload`,
+                [
+                    id,
+                    type,
+                    userId,
+                    allowedStatuses.map(normalizeGenerationTaskStatus),
+                    normalizeGenerationTaskStatus(patch.status),
+                    JSON.stringify(nextPatch),
+                    new Date(updatedAt),
+                    new Date(updatedAt + ttlMs),
+                    Boolean(execution),
+                    execution?.executionPhase || null,
+                    execution?.upstreamTaskId || null,
+                    execution?.channelId || null,
+                    execution?.provider || null,
+                    execution?.queryPath || null,
+                    optionalDate(execution?.submittedAt),
+                    optionalDate(execution?.nextPollAt),
+                    optionalDate(execution?.lastPollAt),
+                    execution?.lastUpstreamStatus || null,
+                    execution?.resultPayload ? JSON.stringify(execution.resultPayload) : null,
+                ],
+            );
+            const persisted = result.rows[0]?.payload || null;
+            if (persisted && onPersist) await onPersist(persisted, executor);
+            return persisted;
+        };
+        return onPersist ? withPostgresTransaction(perform) : perform({ query: postgresQuery });
     }
     let transitioned: T | null = null;
     const allowed = new Set(allowedStatuses.map(normalizeGenerationTaskStatus));
-    await mutateFileTasks((tasks) =>
-        tasks.map((record) => {
+    return withGenerationTaskFileMutation(async (tasks) => {
+        const nextTasks = tasks.map((record) => {
             if (record.id !== id || record.type !== type || record.userId !== userId || record.expiresAt <= updatedAt || !allowed.has(record.status)) return record;
             transitioned = { ...(record.payload as T), ...nextPatch };
             return {
@@ -608,9 +615,10 @@ export async function transitionStoredGenerationTask<T extends { id: string; use
                 ...(execution ? applyExecutionPatch(execution) : {}),
                 ...(execution ? { workerId: undefined, leaseUntil: undefined } : {}),
             };
-        }),
-    );
-    return transitioned;
+        });
+        if (transitioned && onPersist) await onPersist(transitioned);
+        return { tasks: nextTasks, result: transitioned };
+    });
 }
 
 export async function mutateStoredGenerationTask<T extends { id: string; userId: string; status: string; createdAt: number; updatedAt: number }>(type: GenerationTaskType, id: string, ttlMs: number, mutate: (current: T) => T | null): Promise<T | null> {

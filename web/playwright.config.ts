@@ -28,7 +28,7 @@ export default defineConfig({
         { name: "setup", testMatch: /installation\.spec\.ts/ },
         {
             name: "chromium",
-            testMatch: [/(?:all-pages|canvas(?:-tools)?|commerce|core|creative-video-result|ecommerce-product-generation|home|object-storage|responsive(?:-workspaces)?)\.spec\.ts/],
+            testMatch: [/(?:all-pages|canvas(?:-tools)?|commerce|core|creative-video-result|ecommerce-product-generation|home|image-native-delivery|object-storage|responsive(?:-workspaces)?)\.spec\.ts/],
             dependencies: ["setup"],
             use: { ...devices["Desktop Chrome"], storageState },
         },

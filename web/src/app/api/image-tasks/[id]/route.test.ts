@@ -56,15 +56,51 @@ describe("GET /api/image-tasks/[id]", () => {
         expect(JSON.stringify(body)).not.toContain("private-mask");
     });
 
-    it("whitelists public media fields and never exposes original batch failures or private result identities", async () => {
-        const publicMedia = { dataUrl: "/api/generation-log-assets/ready.png", remoteUrl: "https://fixture.example/result.png", serverUrl: "/api/generation-log-assets/ready.png", width: 6, height: 4, bytes: 123, mimeType: "image/png" };
-        const privateMedia = { ...publicMedia, resultId: "private-child:3", batchEvidence: [{ resultId: "private-child:1", nativeStatus: "unavailable", failureReason: "private-read-failure" }], privateUnknown: "private-future-field" };
+    it("whitelists stable enhancement identities and native facts while hiding batch failures and unknown private fields", async () => {
+        const nativeSource = { url: "/api/generation-log-assets/ready.png", width: 6, height: 4, sha256: "a".repeat(64), byteLength: 123, format: "png", hasAlpha: false, provenance: "provider_native" };
+        const publicMedia = {
+            resultId: "image-one:3",
+            enhancementId: "enhancement:image-one:3",
+            nativeSource,
+            dataUrl: "/api/generation-log-assets/ready.png",
+            remoteUrl: "https://fixture.example/result.png",
+            serverUrl: "/api/generation-log-assets/ready.png",
+            width: 6,
+            height: 4,
+            bytes: 123,
+            mimeType: "image/png",
+        };
+        const privateMedia = {
+            ...publicMedia,
+            nativeSource: { ...nativeSource, credentialRef: "private-frozen-reference", unknownFuture: "private-native-future" },
+            batchEvidence: [{ resultId: "private-child:1", nativeStatus: "unavailable", failureReason: "private-read-failure" }],
+            privateUnknown: "private-future-field",
+            frozenConnection: { token: "private-token" },
+        };
         mocks.getImageTask.mockResolvedValue(imageTask({ status: "success", result: { ...privateMedia, results: [privateMedia] } }));
         const body = await (await GET(new Request("http://localhost/api/image-tasks/image-one"), context)).json();
         expect(body.task.result).toEqual({ ...publicMedia, results: [publicMedia] });
         expect(JSON.stringify(body)).not.toContain("private-");
         expect(JSON.stringify(body)).not.toContain("batchEvidence");
-        expect(JSON.stringify(body)).not.toContain("resultId");
+        expect(body.task.result.resultId).toBe("image-one:3");
+        expect(body.task.result.results[0].enhancementId).toBe("enhancement:image-one:3");
+    });
+
+    it.each(["disabled", "not_requested", "protected_contract", "unsupported_layers"])("publishes only the known skipped status and %s reason", async (reason) => {
+        const media = { resultId: "image-one:2", dataUrl: "/api/generation-log-assets/skipped.png", enhancementSkip: { status: "skipped", reason, frozenConnection: { token: "private-secret" }, unknown: "private-future" } };
+        mocks.getImageTask.mockResolvedValue(imageTask({ status: "success", result: { ...media, results: [media] } }));
+        const body = await (await GET(new Request("http://localhost/api/image-tasks/image-one"), context)).json();
+        const expected = { resultId: media.resultId, dataUrl: media.dataUrl, enhancementSkip: { status: "skipped", reason } };
+        expect(body.task.result).toEqual({ ...expected, results: [expected] });
+        expect(JSON.stringify(body)).not.toContain("private-");
+    });
+
+    it.each([{ status: "queued", reason: "disabled" }, { status: "skipped", reason: "private-reason" }, null])("omits unrecognized no-job enhancement values: %s", async (enhancementSkip) => {
+        const media = { dataUrl: "/api/generation-log-assets/skipped.png", enhancementSkip };
+        mocks.getImageTask.mockResolvedValue(imageTask({ status: "success", result: { ...media, results: [media] } }));
+        const body = await (await GET(new Request("http://localhost/api/image-tasks/image-one"), context)).json();
+        expect(body.task.result).not.toHaveProperty("enhancementSkip");
+        expect(body.task.result.results[0]).not.toHaveProperty("enhancementSkip");
     });
 
     it("returns the current image state without running recovery work", async () => {

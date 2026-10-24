@@ -22,7 +22,7 @@ describe("图片任务轮询", () => {
     });
 
     it("sends the stable request identity in both the body and fast lookup headers", async () => {
-        const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ task: { id: "image-task", kind: "generation", model: "image-model" } }));
+        const fetchMock = vi.fn<typeof fetch>(async () => Response.json({ task: { id: "image-task", kind: "generation", model: "image-model" } }));
         vi.stubGlobal("fetch", fetchMock);
 
         await createImageGenerationTask({ apiSource: "system", model: "image-model", imageModel: "image-model" } as AiConfig, "生成图片", [], undefined, {
@@ -41,7 +41,7 @@ describe("图片任务轮询", () => {
     });
 
     it("reuses a permanent server reference without downloading it before task creation", async () => {
-        const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ task: { id: "image-task", kind: "edit", model: "image-model" } }));
+        const fetchMock = vi.fn<typeof fetch>(async () => Response.json({ task: { id: "image-task", kind: "edit", model: "image-model" } }));
         vi.stubGlobal("fetch", fetchMock);
 
         await createImageGenerationTask({ apiSource: "system", model: "image-model", imageModel: "image-model" } as AiConfig, "基于参考图生成", [
@@ -67,7 +67,7 @@ describe("图片任务轮询", () => {
     });
 
     it("keeps inline base64 references for providers that require inline images", async () => {
-        const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ task: { id: "image-task", kind: "edit", model: "image-model" } }));
+        const fetchMock = vi.fn<typeof fetch>(async () => Response.json({ task: { id: "image-task", kind: "edit", model: "image-model" } }));
         vi.stubGlobal("fetch", fetchMock);
         const inlineImage = "data:image/png;base64,AA==";
 
@@ -79,7 +79,7 @@ describe("图片任务轮询", () => {
     });
 
     it("requests transparent output only for an explicit transparent image task", async () => {
-        const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ task: { id: "image-task", kind: "edit", model: "image-model" } }));
+        const fetchMock = vi.fn<typeof fetch>(async () => Response.json({ task: { id: "image-task", kind: "edit", model: "image-model" } }));
         vi.stubGlobal("fetch", fetchMock);
 
         await createImageGenerationTask({ apiSource: "system", model: "image-model", imageModel: "image-model" } as AiConfig, "提取透明元素", [{ id: "source", name: "source.png", type: "image/png", dataUrl: "data:image/png;base64,AA==" }], undefined, {
@@ -91,7 +91,7 @@ describe("图片任务轮询", () => {
     });
 
     it("marks a single upstream edit request as a layer-output task", async () => {
-        const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ task: { id: "layer-task", kind: "edit", model: "image-model" } }));
+        const fetchMock = vi.fn<typeof fetch>(async () => Response.json({ task: { id: "layer-task", kind: "edit", model: "image-model" } }));
         vi.stubGlobal("fetch", fetchMock);
 
         await createImageGenerationTask({ apiSource: "system", model: "image-model", imageModel: "image-model" } as AiConfig, "分层", [{ id: "source", name: "source.png", type: "image/png", dataUrl: "data:image/png;base64,AA==" }], undefined, {
@@ -131,6 +131,50 @@ describe("图片任务轮询", () => {
 
         await expect(result).resolves.toMatchObject({ dataUrl: "data:image/png;base64,AA==" });
         expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("delivers original media immediately and preserves each stable enhancement identity through polling", async () => {
+        const nativeSource = { url: "/api/generation-log-assets/native.png", width: 1254, height: 1254, sha256: "a".repeat(64), byteLength: 1000, format: "png", hasAlpha: false, provenance: "provider_native" as const };
+        const first = { resultId: "image-task:1", enhancementId: "enhancement:image-task:1", nativeSource, dataUrl: nativeSource.url, width: 1254, height: 1254 };
+        const second = { ...first, resultId: "image-task:2", enhancementId: "enhancement:image-task:2", dataUrl: "/api/generation-log-assets/native-second.png", nativeSource: { ...nativeSource, url: "/api/generation-log-assets/native-second.png" } };
+        const fetchMock = vi.fn(async () => Response.json({ task: { id: "image-task", kind: "generation", model: "image-model", status: "success", result: { ...first, results: [first, second] } } }));
+        vi.stubGlobal("fetch", fetchMock);
+
+        const result = await waitForImageGenerationTask({ apiSource: "system" } as AiConfig, { id: "image-task", kind: "generation", model: "image-model" });
+
+        expect(result).toMatchObject({ ...first, results: [first, second] });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(fetchMock).toHaveBeenCalledWith("/api/image-tasks/image-task", expect.objectContaining({ cache: "no-store" }));
+    });
+
+    it.each(["disabled", "not_requested", "protected_contract", "unsupported_layers"])("delivers a no-job %s result immediately and whitelists its public facts", async (reason) => {
+        const nativeSource = { url: "/api/generation-log-assets/native.png", width: 8, height: 8, sha256: "a".repeat(64), byteLength: 100, format: "png", hasAlpha: false, provenance: "provider_native" };
+        const first = { resultId: "image-task:1", dataUrl: "/api/generation-log-assets/skipped.png", enhancementSkip: { status: "skipped", reason, token: "private-token" }, privateUnknown: "private-future" };
+        const second = { resultId: "image-task:2", enhancementId: "enhancement:image-task:2", dataUrl: nativeSource.url, nativeSource: { ...nativeSource, frozenConnection: "private-connection" } };
+        const fetchMock = vi.fn(async () => Response.json({ task: { id: "image-task", status: "success", result: { ...first, results: [first, second] } } }));
+        vi.stubGlobal("fetch", fetchMock);
+        const result = await waitForImageGenerationTask({ apiSource: "system" } as AiConfig, { id: "image-task", kind: "generation", model: "image-model" });
+        expect(result).toMatchObject({
+            resultId: first.resultId,
+            enhancementSkip: { status: "skipped", reason },
+            results: [
+                { resultId: first.resultId, enhancementSkip: { status: "skipped", reason } },
+                { resultId: second.resultId, enhancementId: second.enhancementId, nativeSource },
+            ],
+        });
+        expect(JSON.stringify(result)).not.toContain("private-");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([{ status: "queued", reason: "disabled" }, { status: "skipped", reason: "private-reason" }, null])("omits an unrecognized no-job contract on the client: %s", async (enhancementSkip) => {
+        const media = { dataUrl: "/api/generation-log-assets/skipped.png", enhancementSkip };
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => Response.json({ task: { id: "image-task", status: "success", result: { ...media, results: [media] } } })),
+        );
+        const result = await waitForImageGenerationTask({ apiSource: "system" } as AiConfig, { id: "image-task", kind: "generation", model: "image-model" });
+        expect(result).not.toHaveProperty("enhancementSkip");
+        expect(result.results[0]).not.toHaveProperty("enhancementSkip");
     });
 
     it("marks only an explicit upstream terminal error as retryable", async () => {

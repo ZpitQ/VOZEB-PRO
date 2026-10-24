@@ -60,6 +60,7 @@ export function useCreateAgent() {
     const submittingRef = useRef(false);
     const failedSubmissionsRef = useRef(new Map<string, PendingCreateSubmission>());
     const refreshRequestRef = useRef(0);
+    const assetRefreshRequestRef = useRef(0);
     const [conversations, setConversations] = useState<CreativeConversation[]>([]);
     const [messages, setMessages] = useState<CreativeMessage[]>([]);
     const [assets, setAssets] = useState<CreativeAsset[]>([]);
@@ -123,13 +124,15 @@ export function useCreateAgent() {
     }, []);
 
     const refreshAssets = useCallback(async (id: string, generation = conversationGenerationRef.current) => {
+        const requestId = ++assetRefreshRequestRef.current;
         const nextAssets = await listCreativeAssets(id);
-        if (generation !== conversationGenerationRef.current || activeConversationRef.current !== id) return;
+        if (requestId !== assetRefreshRequestRef.current || generation !== conversationGenerationRef.current || activeConversationRef.current !== id) return;
         setAssets(nextAssets);
     }, []);
 
     const refreshConversation = useCallback(async (id: string, generation = conversationGenerationRef.current) => {
         const requestId = ++refreshRequestRef.current;
+        const assetRequestId = ++assetRefreshRequestRef.current;
         const [nextMessages, nextAssets] = await Promise.all([listCreativeMessages(id, undefined, MESSAGE_PAGE_SIZE), listCreativeAssets(id)]);
         if (requestId !== refreshRequestRef.current || generation !== conversationGenerationRef.current || activeConversationRef.current !== id) return;
         const runIds = Array.from(new Set(nextMessages.map((item) => item.runId).filter((value): value is string => Boolean(value))));
@@ -137,8 +140,10 @@ export function useCreateAgent() {
         if (requestId !== refreshRequestRef.current || generation !== conversationGenerationRef.current || activeConversationRef.current !== id) return;
         setMessages(uniqueMessages(nextMessages));
         setHasOlderMessages(Boolean(nextMessages[0] && nextMessages[0].sequence > 1));
-        setAssets(nextAssets);
-        setSelectedAssetIds([]);
+        if (assetRequestId === assetRefreshRequestRef.current) {
+            setAssets(nextAssets);
+            setSelectedAssetIds([]);
+        }
         setRunDetails(Object.fromEntries(runs.filter((run): run is CreativeAgentRun => Boolean(run && run.conversationId === id)).map((run) => [run.id, run])));
         const handoffs = nextMessages
             .map((item) => item.metadata.projectHandoff)
@@ -665,6 +670,7 @@ export function useCreateAgent() {
         conversations,
         messages,
         assets,
+        refreshAssets,
         conversationId,
         activeRunId,
         activeRunStatus,

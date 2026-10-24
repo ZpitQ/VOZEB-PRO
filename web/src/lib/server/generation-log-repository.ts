@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { publicImageResultEnhancement } from "@/lib/image-enhancement-contract";
 import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 
@@ -66,7 +67,7 @@ export async function normalizeAssets(assets: Array<Partial<GenerationLogAsset> 
             if (!remoteUrl && !serverUrl) continue;
         } else if (sourceUrl.startsWith("data:")) {
             stored = await writeDataUrlAsset(sourceUrl, type, assetContext);
-        } else if (isRemoteAssetUrl(sourceUrl)) {
+        } else if (isRemoteAssetUrl(sourceUrl) && !existingServerUrl) {
             stored = await writeRemoteAsset(sourceUrl, type, assetContext);
             if (!stored) throw new Error("生成媒体保存到服务器失败");
         }
@@ -84,6 +85,7 @@ export async function normalizeAssets(assets: Array<Partial<GenerationLogAsset> 
             width: toOptionalNumber(stored?.width || asset.width),
             height: toOptionalNumber(stored?.height || asset.height),
             bytes: toOptionalNumber(stored?.bytes || asset.bytes),
+            ...(type === "image" ? publicImageResultEnhancement(asset) : {}),
         });
     }
     return normalized;
@@ -387,10 +389,22 @@ export async function insertPostgresGenerationLogAssets(db: QueryExecutor, logId
     for (const [index, asset] of assets.entries()) {
         await db.query(
             `
-            INSERT INTO generation_log_assets (generation_log_id, type, url, remote_url, server_url, mime_type, width, height, bytes, sort_order)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            INSERT INTO generation_log_assets (generation_log_id, type, url, remote_url, server_url, mime_type, width, height, bytes, sort_order, enhancement_metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
             `,
-            [logId, asset.type, asset.url, asset.remoteUrl || null, asset.serverUrl || null, asset.mimeType || null, asset.width || null, asset.height || null, asset.bytes || null, index],
+            [
+                logId,
+                asset.type,
+                asset.url,
+                asset.remoteUrl || null,
+                asset.serverUrl || null,
+                asset.mimeType || null,
+                asset.width || null,
+                asset.height || null,
+                asset.bytes || null,
+                index,
+                JSON.stringify(asset.type === "image" ? publicImageResultEnhancement(asset) : {}),
+            ],
         );
     }
 }
@@ -434,6 +448,7 @@ export function mapPostgresGenerationLogAsset(row: Record<string, unknown>): Gen
         width: dbOptionalNumber(row.width),
         height: dbOptionalNumber(row.height),
         bytes: dbOptionalNumber(row.bytes),
+        ...(row.type === "image" ? publicImageResultEnhancement(jsonObject(row.enhancement_metadata) || {}) : {}),
     };
 }
 
@@ -618,6 +633,7 @@ export function normalizeStoredAsset(asset: Partial<GenerationLogAsset> | undefi
         width: toOptionalNumber(asset.width),
         height: toOptionalNumber(asset.height),
         bytes: toOptionalNumber(asset.bytes),
+        ...(type === "image" ? publicImageResultEnhancement(asset) : {}),
     };
 }
 

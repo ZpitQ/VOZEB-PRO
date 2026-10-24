@@ -36,6 +36,7 @@ import { buildEcommerceGenerationTrace, normalizeEcommerceGenerationTrace, type 
 import { getImageTask } from "./image-task-store";
 import { getStoredGenerationTask } from "./generation-task-store";
 import type { AgentRun } from "./agent-run-store";
+import { hydrateGenerationLogEnhancements } from "./generation-log-enhancement";
 
 export type { GenerationAssetStats, GenerationLogAsset, GenerationLogInput, GenerationLogSource, StoredGenerationLog } from "./generation-log-types";
 export { isGenerationSource } from "./generation-log-repository";
@@ -56,8 +57,10 @@ export async function listGenerationLogs(options: GenerationLogListOptions = {})
             startAt: dateFilterValue(options.start),
             endAt: dateFilterValue(options.end, true),
         });
-        const items = result.items.map((item) => toStoredGenerationLog(item, options.includeEcommerceTrace));
-        return { ...result, items: options.includeEcommerceTrace ? await hydrateEcommerceTracesFromImageTasks(items) : items };
+        let items = result.items.map((item) => toStoredGenerationLog(item, options.includeEcommerceTrace));
+        if (options.includeEcommerceTrace) items = await hydrateEcommerceTracesFromImageTasks(items);
+        if (options.includeImageEnhancement) items = await hydrateGenerationLogEnhancements(items);
+        return { ...result, items };
     }
     const db = await readGenerationLogDb();
     const page = Math.max(1, Math.floor(Number(options.page) || 1));
@@ -85,8 +88,10 @@ export async function listGenerationLogs(options: GenerationLogListOptions = {})
 
     const total = filtered.length;
     const startIndex = (page - 1) * pageSize;
-    const items = filtered.slice(startIndex, startIndex + pageSize).map((item) => (options.includeEcommerceTrace ? item : withoutEcommerceTrace(item)));
-    return { items: options.includeEcommerceTrace ? await hydrateEcommerceTracesFromImageTasks(items) : items, total, page, pageSize };
+    let items = filtered.slice(startIndex, startIndex + pageSize).map((item) => (options.includeEcommerceTrace ? item : withoutEcommerceTrace(item)));
+    if (options.includeEcommerceTrace) items = await hydrateEcommerceTracesFromImageTasks(items);
+    if (options.includeImageEnhancement) items = await hydrateGenerationLogEnhancements(items);
+    return { items, total, page, pageSize };
 }
 
 function pendingAdvisoryTrace(trace: EcommerceGenerationTrace | undefined) {

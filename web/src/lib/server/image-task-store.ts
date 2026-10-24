@@ -6,10 +6,14 @@ import type { GenerationAttempt } from "@/lib/server/generation-attempt";
 import type { GenerationLogSource } from "@/lib/server/generation-log-store";
 import { countActiveStoredGenerationTasks, createStoredGenerationTask, getStoredGenerationTask, mutateStoredGenerationTask, touchStoredGenerationTask, transitionStoredGenerationTask, type GenerationTaskContext } from "@/lib/server/generation-task-store";
 import { GENERATION_TASK_RETENTION_MS } from "@/lib/server/generation-task-retention";
+import { captureImageEnhancementPolicy, type FrozenImageEnhancementPolicy } from "@/lib/server/image-enhancement-config";
 import type { ProductProtectionSnapshot, SceneEditProtection, SceneEditProtectionEvidence } from "@/lib/server/ecommerce-product-regions";
 import type { EcommerceCompiledImageRequest } from "@/lib/server/ecommerce-image-compiler";
 import type { EcommerceGenerationTrace } from "@/lib/server/ecommerce-generation-trace";
 import type { EcommerceCanvasMediaEvidence, EcommerceCanvasProviderRequest, EcommerceDimensions } from "@/lib/server/ecommerce-edit-plan";
+import type { EnhancementSource } from "@/lib/server/image-enhancement-plan";
+import type { ImageEnhancementSkip } from "@/lib/image-enhancement-contract";
+import { enqueueImageEnhancement } from "@/lib/server/image-enhancement-enqueue";
 
 type ImageTaskKind = "generation" | "edit";
 type ImageTaskStatus = "pending" | "running" | "success" | "error" | "cancelled";
@@ -47,6 +51,9 @@ export type ImageTaskReference = {
 
 export type StoredImageTaskMediaResult = {
     resultId?: string;
+    nativeSource?: Readonly<EnhancementSource>;
+    enhancementId?: string;
+    enhancementSkip?: ImageEnhancementSkip;
     dataUrl: string;
     remoteUrl?: string;
     serverUrl?: string;
@@ -99,13 +106,15 @@ export type ImageTask = GenerationTaskContext & {
     candidateConfigs?: ImageTaskConfig[];
     attempts?: GenerationAttempt[];
     attemptNo?: number;
+    enhancementPolicy?: FrozenImageEnhancementPolicy;
 };
 
 const TASK_STALE_MS = 3 * 60 * 1000;
-export async function createImageTask(input: Omit<ImageTask, "id" | "status" | "createdAt" | "updatedAt">) {
+export async function createImageTask(input: Omit<ImageTask, "id" | "status" | "createdAt" | "updatedAt" | "enhancementPolicy">) {
     const now = Date.now();
     const task: ImageTask = {
         ...input,
+        enhancementPolicy: await captureImageEnhancementPolicy(),
         id: randomUUID(),
         status: "pending",
         createdAt: now,
@@ -128,7 +137,7 @@ export function transitionImageTask(
     patch: Partial<Pick<ImageTask, "result" | "error" | "pointsRemaining" | "retryable" | "config" | "billing">> & { status: ImageTaskStatus },
     executionPatch?: import("@/lib/server/generation-task-scheduler").GenerationTaskSchedulePatch,
 ) {
-    return transitionStoredGenerationTask<ImageTask>("image", task.id, task.userId, allowedStatuses, patch, GENERATION_TASK_RETENTION_MS, executionPatch);
+    return transitionStoredGenerationTask<ImageTask>("image", task.id, task.userId, allowedStatuses, patch, GENERATION_TASK_RETENTION_MS, executionPatch, patch.status === "success" ? enqueueImageEnhancement : undefined);
 }
 
 export function touchImageTask(id: string) {

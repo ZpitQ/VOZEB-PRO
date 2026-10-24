@@ -8,6 +8,7 @@ import type { ImageTaskRunResult } from "@/app/api/image-tasks/image-task-types"
 import { stableMediaUrl, writeImageGenerationLog } from "@/app/api/image-tasks/image-task-runner";
 import { getAuthSettings, refundUserPoints } from "@/lib/auth/store";
 import { registerGenerationTaskAssetsForUser } from "@/lib/server/creative-runtime-service";
+import { publicImageResultEnhancement } from "@/lib/image-enhancement-contract";
 import { finishGenerationAttempt, startGenerationAttempt } from "@/lib/server/generation-attempt";
 import { generationModelId } from "@/lib/server/generation-channel";
 import { refundImageTask } from "@/lib/server/image-task-refund";
@@ -401,7 +402,12 @@ async function completeImageResult(task: ImageTask, safeResults: StoredImageTask
     const loggedAssets = logged?.assets?.length ? logged.assets : logged?.asset ? [logged.asset] : [];
     const finalResults =
         loggedAssets.length && !completed.ecommerceExecution?.canvas && !completed.sceneProtection
-            ? loggedAssets.map((asset) => ({ dataUrl: asset.serverUrl || asset.url, remoteUrl: asset.remoteUrl, serverUrl: asset.serverUrl, width: asset.width, height: asset.height, bytes: asset.bytes, mimeType: asset.mimeType }))
+            ? safeResults.map((media, index) => {
+                  const asset = loggedAssets[index];
+                  return media.nativeSource || !asset
+                      ? media
+                      : { ...media, dataUrl: asset.serverUrl || asset.url, remoteUrl: asset.remoteUrl, serverUrl: asset.serverUrl, width: asset.width, height: asset.height, bytes: asset.bytes, mimeType: asset.mimeType };
+              })
             : safeResults;
     const finalResult = finalResults[0];
     const attempts = finishGenerationAttempt(completed.attempts || [], completed.attemptNo || completed.attempts?.at(-1)?.attemptNo || 1, {
@@ -419,7 +425,7 @@ async function completeImageResult(task: ImageTask, safeResults: StoredImageTask
         })) || completed;
     const assets = (finalized.result?.results?.length ? finalized.result.results : finalized.result ? [finalized.result] : []).flatMap((item) => {
         const url = item.serverUrl || item.remoteUrl || stableMediaUrl(item.dataUrl);
-        return url ? [{ type: "image" as const, url, mimeType: item.mimeType, width: item.width, height: item.height, bytes: item.bytes }] : [];
+        return url ? [{ type: "image" as const, url, mimeType: item.mimeType, width: item.width, height: item.height, bytes: item.bytes, ...publicImageResultEnhancement(item) }] : [];
     });
     if (assets.length)
         await registerGenerationTaskAssetsForUser(finalized.userId, {

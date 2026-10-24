@@ -8,6 +8,7 @@ import { AdminAccountId } from "@/components/admin/admin-user-identity";
 import { imagePreviewUrl } from "@/lib/media-image-url";
 import type { StoredGenerationLog } from "@/lib/server/generation-log-store";
 import type { EcommerceGenerationTrace, EcommerceGenerationTraceStage } from "@/lib/server/ecommerce-generation-trace";
+import { generationLogEnhancementReasonLabels, generationLogEnhancementStageLabels, type GenerationLogAsset } from "@/lib/server/generation-log-types";
 
 export function GenerationLogAssetPreview({ log }: { log: StoredGenerationLog }) {
     const asset = log.assets[0];
@@ -215,9 +216,10 @@ function GenerationLogResultSection({ log }: { log: StoredGenerationLog }) {
                                     )}
                                 </div>
                             </div>
-                            <div className="min-w-0 self-center text-sm text-stone-500 dark:text-stone-400">
+                            <div className="min-w-0 text-sm text-stone-500 dark:text-stone-400">
                                 <div>{asset.type === "video" ? "视频" : "图片"}</div>
                                 <div className="mt-1 text-xs">{asset.bytes ? formatAssetBytes(asset.bytes) : "大小未记录"}</div>
+                                {asset.type === "image" ? <GenerationLogEnhancementSection asset={asset} /> : null}
                             </div>
                         </div>
                     );
@@ -227,10 +229,110 @@ function GenerationLogResultSection({ log }: { log: StoredGenerationLog }) {
     );
 }
 
+function GenerationLogEnhancementSection({ asset }: { asset: GenerationLogAsset }) {
+    const enhancement = asset.enhancement;
+    const skip = asset.enhancementSkip;
+    const status = enhancement?.status || skip?.status;
+    const native = enhancement?.native || asset.nativeSource || asset;
+    const nativeUrl = browserReadableMediaUrl(enhancement?.native.url || asset.nativeSource?.url || generationLogAssetAccessUrl(asset));
+    const reason = enhancement?.reason || skip?.reason;
+    const noEncoding =
+        enhancement?.status === "succeeded" &&
+        enhancement.ai &&
+        enhancement.enhanced &&
+        formatEnhancementSize(enhancement.ai) !== "未取得" &&
+        enhancement.ai.width === enhancement.target.width &&
+        enhancement.ai.height === enhancement.target.height &&
+        enhancement.ai.width === enhancement.enhanced.width &&
+        enhancement.ai.height === enhancement.enhanced.height;
+    return (
+        <section className="mt-3 space-y-3" data-testid="generation-log-enhancement" data-result-id={asset.resultId}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-sm font-semibold text-stone-950 dark:text-stone-100">AI高清增强</span>
+                <Tag className="m-0" color={status === "succeeded" ? "success" : status === "failed" ? "error" : status === "running" || status === "queued" ? "processing" : "default"}>
+                    <span role="status">{enhancementStatusLabel(status)}</span>
+                </Tag>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+                <InfoBox label="原生实际尺寸" value={formatEnhancementSize(native)} />
+                <InfoBox label="完整 AI 实际尺寸" value={formatEnhancementSize(enhancement?.ai)} />
+                <InfoBox label="实际交付尺寸" value={formatEnhancementSize(enhancement?.enhanced)} />
+                {enhancement?.plannedInference ? <InfoBox label="AI 预期尺寸" value={formatEnhancementSize(enhancement.plannedInference)} /> : null}
+                {enhancement?.target ? <InfoBox label="交付目标尺寸" value={formatEnhancementSize(enhancement.target)} /> : null}
+                <InfoBox label="模型 ID" value={enhancement?.model?.id || "未取得"} />
+                <InfoBox label="引擎版本" value={enhancement?.model?.binaryVersion || "未取得"} />
+                <InfoBox label="模型版本" value={enhancement?.model?.modelVersion || "未取得"} />
+                <InfoBox label="尝试" value={formatEnhancementAttempt(enhancement?.attempt)} />
+                <InfoBox label="当前阶段" value={enhancement ? enhancementStageLabel(enhancement.phase) : "未取得"} />
+                <InfoBox label="原因" value={reason ? enhancementReasonLabel(reason) : "未取得"} />
+                <InfoBox label="Worker 排队" value={formatEnhancementTiming(enhancement?.timings?.workerQueueMs)} />
+                <InfoBox label="引擎执行（含启动与写出）" value={formatEnhancementTiming(enhancement?.timings?.workerExecutionMs)} />
+                <InfoBox label="交付缩小与 PNG 编码" value={formatEnhancementTiming(enhancement?.timings?.deliveryEncodingMs, noEncoding ? "无需重新编码" : "未取得")} />
+            </div>
+            <div>
+                <div className="mb-1 text-xs font-medium text-stone-600 dark:text-stone-300">已发生阶段</div>
+                {enhancement?.events.length ? (
+                    <ol className="space-y-1 text-xs leading-5" aria-label="已发生的增强阶段">
+                        {enhancement.events.map((event, index) => (
+                            <li key={`${event.at}-${index}`} className="flex flex-wrap gap-x-2">
+                                <span>{enhancementStageLabel(event.stage)}</span>
+                                <span>{formatEnhancementAttempt(event.attempt)}</span>
+                                <span>{formatTraceTime(event.at)}</span>
+                                {event.reason ? <span>{enhancementReasonLabel(event.reason)}</span> : null}
+                            </li>
+                        ))}
+                    </ol>
+                ) : (
+                    <span className="text-xs">未取得</span>
+                )}
+            </div>
+            {nativeUrl ? (
+                <a
+                    className="inline-flex rounded border border-stone-300 bg-stone-50 px-2 py-1 text-xs font-medium !text-stone-700 hover:bg-stone-100 dark:border-stone-600 dark:bg-stone-900 dark:!text-stone-200 dark:hover:bg-stone-800"
+                    href={`${nativeUrl}${nativeUrl.includes("?") ? "&" : "?"}download=1`}
+                    download
+                >
+                    下载原图
+                </a>
+            ) : null}
+        </section>
+    );
+}
+
+function enhancementStatusLabel(status?: string) {
+    if (status === "queued") return "排队中";
+    if (status === "running") return "增强中";
+    if (status === "succeeded") return "增强成功";
+    if (status === "failed") return "增强失败";
+    if (status === "skipped") return "已跳过";
+    if (status === "cancelled") return "已取消";
+    return "增强记录暂未取得";
+}
+
+function enhancementStageLabel(stage: string) {
+    return Object.hasOwn(generationLogEnhancementStageLabels, stage) ? generationLogEnhancementStageLabels[stage] : "其他阶段";
+}
+
+function enhancementReasonLabel(reason: string) {
+    return Object.hasOwn(generationLogEnhancementReasonLabels, reason) ? generationLogEnhancementReasonLabels[reason] : "未分类原因";
+}
+
+function formatEnhancementSize(size?: { width?: number; height?: number }) {
+    return size && Number.isSafeInteger(size.width) && Number.isSafeInteger(size.height) && size.width! > 0 && size.height! > 0 ? `${size.width} × ${size.height}` : "未取得";
+}
+
+function formatEnhancementAttempt(attempt?: number) {
+    return Number.isSafeInteger(attempt) && attempt! > 0 ? `第 ${attempt} 次尝试` : "未取得";
+}
+
+function formatEnhancementTiming(value?: number, fallback = "未取得") {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? `${value} ms` : fallback;
+}
+
 function generationLogAssetAccessUrl(asset: StoredGenerationLog["assets"][number]) {
     const directUrl = asset.url && !asset.url.startsWith("/api/generation-log-assets/") && asset.url !== asset.serverUrl ? asset.url : "";
     const serverUrl = asset.serverUrl || (asset.url?.startsWith("/api/generation-log-assets/") ? asset.url : "");
-    return browserReadableMediaUrl(asset.remoteUrl || directUrl || serverUrl || asset.serverUrl || (asset.url?.startsWith("/api/generation-log-assets/") ? asset.url : ""));
+    return browserReadableMediaUrl(serverUrl || asset.remoteUrl || directUrl);
 }
 
 function formatAssetBytes(bytes: number) {
