@@ -9,6 +9,7 @@ import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
 
 import { ecommerceCanvasSize, validateEcommerceDimensions, type EcommerceCanvasInput, type EcommerceDimensions, type EcommerceEditPlan } from "./ecommerce-edit-plan";
 import { normalizeGeneratedImageBytes } from "./generated-image-normalizer";
+import { ECOMMERCE_IMAGE_MAX_INPUT_PIXELS } from "./ecommerce-vision-image";
 import type { EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
 import type { EcommerceResolvedLocalEditTarget } from "./ecommerce-edit-planner";
 import { buildProductProtectionRegions, buildSceneProductProtectionRegions, buildSceneEditProtection, type SceneEditProtection, type ProductProtectionRectangle, type ProductProtectionRegions } from "./ecommerce-product-regions";
@@ -129,7 +130,7 @@ export async function loadEcommercePlanningImage(url: string, origin: string, co
 }
 
 export async function decodeEcommerceCanvasSize(bytes: Buffer): Promise<EcommerceDimensions> {
-    const decoded = await normalizeGeneratedImageBytes(bytes, "image/png");
+    const decoded = await normalizeGeneratedImageBytes(bytes, "image/png", undefined, ECOMMERCE_IMAGE_MAX_INPUT_PIXELS);
     const size = { width: decoded.width!, height: decoded.height! };
     validateEcommerceDimensions(size);
     return size;

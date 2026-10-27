@@ -1073,6 +1073,36 @@ test("white-product-style-reference:可选场景参考仍以商品为锚点并�
     expect(run.assetIds?.length).toBeGreaterThan(0);
 });
 
+test("large-reference:四千八百万像素参考图完成真实创作并刷新恢复", async ({ page, request }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "大像素参考图回归只在桌面 Chromium 执行");
+    const goldenCase = cases[5];
+    const product = uploadFixture(goldenCase.fixturePath, goldenCase.productFileName, goldenCase.fixtureSha256);
+    const scene = {
+        name: "large-style-reference.jpg",
+        mimeType: "image/jpeg",
+        buffer: await sharp({ create: { width: 8000, height: 6000, channels: 3, background: "#203040" } })
+            .jpeg()
+            .toBuffer(),
+    };
+    await page.goto("/create", { waitUntil: "domcontentloaded" });
+    await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
+    await selectImageMode(page);
+    await page.locator('input[type="file"][multiple]').setInputFiles([product, scene]);
+    for (const file of [product, scene]) await expect(page.getByLabel(`已上传图片 ${file.name}`)).toBeVisible({ timeout: 30_000 });
+    const created = await submitPrompt(page, goldenCase.userRequest, { reusePage: true });
+    const run = await waitForRun(request, created.runId, "completed");
+    expect(run.ecommerceReferenceReview).toBeFalsy();
+    const trace = await expectAdminTrace(request, run.id, "passed");
+    expectSuccessfulTrace(trace, { operation: goldenCase.expectedOperation, hardProtections: goldenCase.hardProtections, userRequest: goldenCase.userRequest, sceneReferenceCount: 1 });
+    await expectProductResult(page);
+    const resultSource = await page.getByTestId("creative-media-result").last().getByRole("img").getAttribute("src");
+    expect(resultSource).toMatch(/^\/api\/generation-log-assets\/permanent\//);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
+    await expect(page.getByTestId("creative-media-result").last().getByRole("img")).toHaveAttribute("src", resultSource!);
+    await expect(page.getByTestId("creative-reference-review")).toHaveCount(0);
+});
+
 test("historical-branch:连续编辑默认继承最近结果并可从较早结果建立分支", async ({ page, request }, testInfo) => {
     test.skip(testInfo.project.name !== "chromium", "连续性回归只在桌面 Chromium 执行");
     const first = await submitProductScene(page, cases[0]);

@@ -1,5 +1,5 @@
 import sharp from "sharp";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import { once } from "node:events";
 
@@ -11,11 +11,50 @@ import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } fr
 import type { EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 import { resolveImageEditProtocol } from "./image-edit-protocol";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
-import { createEcommerceSceneEditTask, createEcommerceLocalEditTask, loadEcommercePlanningImage } from "./ecommerce-generation-service";
+import { createEcommerceSceneEditTask, createEcommerceLocalEditTask, decodeEcommerceCanvasSize, loadEcommercePlanningImage } from "./ecommerce-generation-service";
 import { authorizedWorkerUserId, maintenanceWorkerContext } from "./maintenance-auth";
 import { buildWhiteBackgroundProductProtection, createEcommerceProductSceneTask, ecommerceGenerationEnabled, ecommerceRolloutStage, publicEcommerceProgress } from "./ecommerce-generation-service";
 
 describe("ecommerce generation service", () => {
+    describe("original reference dimensions", () => {
+        const sources = new Map<number, Buffer>();
+        beforeAll(async () => {
+            for (const height of [6000, 8000]) {
+                sources.set(
+                    height,
+                    await sharp({ create: { width: 8000, height, channels: 3, background: "#203040" } })
+                        .withMetadata({ orientation: 6 })
+                        .jpeg()
+                        .toBuffer(),
+                );
+            }
+        });
+
+        it.each([6000, 8000])("reads original oriented dimensions within the reference budget (8000 x %s)", async (height) => {
+            await expect(decodeEcommerceCanvasSize(sources.get(height)!)).resolves.toEqual({ width: height, height: 8000 });
+        });
+    });
+
+    it("rejects reference originals above the existing sixty-four-megapixel budget", async () => {
+        const source = await sharp({ create: { width: 8001, height: 8000, channels: 3, background: "#203040" } })
+            .jpeg()
+            .toBuffer();
+
+        await expect(decodeEcommerceCanvasSize(source)).rejects.toThrow(/pixel limit/i);
+    });
+
+    it("still fully decodes reference pixels with readable metadata", async () => {
+        const source = await sharp({ create: { width: 64, height: 64, channels: 3, background: "#203040" } })
+            .png()
+            .toBuffer();
+        const pixelChunk = source.indexOf(Buffer.from("IDAT"));
+        expect(pixelChunk).toBeGreaterThan(0);
+        source[pixelChunk + 4] ^= 0xff;
+        await expect(sharp(source, { failOn: "error" }).metadata()).resolves.toMatchObject({ width: 64, height: 64 });
+
+        await expect(decodeEcommerceCanvasSize(source)).rejects.toThrow();
+    });
+
     it.each(["local_edit", "scene_edit"] as const)("retains a v6 auxiliary image in the actual %s task", async (operation) => {
         const editPlan: EcommerceEditPlan = {
             ...plan(),
