@@ -121,13 +121,14 @@ export function CreativeImageEnhancement({
         activeAsset && Number.isInteger(activeAsset.width) && Number(activeAsset.width) > 0 && Number.isInteger(activeAsset.height) && Number(activeAsset.height) > 0
             ? `${activeAsset.id === original.id ? "当前原图" : "当前AI增强"} ${activeAsset.width}×${activeAsset.height}`
             : undefined;
+    const localEdit = task?.delivery?.scope === "local_edit" || enhanced?.metadata.scope === "local_edit";
     const status = readError
         ? "暂时无法读取增强状态，原图仍可用"
         : operationError
           ? "增强操作未完成，请检查增强状态，原图仍可用"
           : refreshError
             ? "增强图片暂时不可用，原图仍可用"
-            : skipLabel || imageEnhancementStatus(task, Boolean(enhanced), refreshingAssets);
+            : skipLabel || imageEnhancementStatus(task, Boolean(enhanced), refreshingAssets, localEdit);
     const buttonClass =
         "inline-flex h-7 items-center justify-center gap-1 rounded-md border border-[#e4e7ec] bg-white px-2 text-[11px] font-medium text-[#667085] transition hover:border-[#cfd4dc] hover:bg-[#f8f9fb] hover:text-[#344054] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-45 dark:border-[#343a43] dark:bg-[#181b20] dark:text-[#aab2bc] dark:hover:border-[#4a525c] dark:hover:bg-[#22262c] dark:hover:text-white";
     return (
@@ -158,13 +159,14 @@ export function CreativeImageEnhancement({
             </div>
             <p role="status" className="break-words text-[11px] leading-5 text-[#667085] dark:text-[#a4adb8]">
                 {status}
+                {localEdit ? " · 局部保护增强 · 保持原画幅" : task?.delivery?.scope === "product_background" || enhanced?.metadata.scope === "product_background" ? " · 商品保护增强 · 保持原画幅" : null}
                 {currentDimensions ? ` · ${currentDimensions}` : null}
             </p>
         </div>
     );
 }
 
-function imageEnhancementStatus(task: PublicImageEnhancement | undefined, hasEnhanced: boolean, refreshing: boolean) {
+function imageEnhancementStatus(task: PublicImageEnhancement | undefined, hasEnhanced: boolean, refreshing: boolean, localEdit: boolean) {
     if (!task) return hasEnhanced ? "AI增强已完成" : "正在读取增强状态，原图可用";
     switch (task.status) {
         case "queued":
@@ -185,6 +187,8 @@ function imageEnhancementStatus(task: PublicImageEnhancement | undefined, hasEnh
                     return "AI增强失败，增强结果摘要、尺寸或解码校验失败，原图仍可用";
                 case "output_storage_invalid":
                     return "AI增强失败，增强图片保存失败，原图仍可用";
+                case "protection_invalid":
+                    return `${localEdit ? "局部" : "商品"}保护校验未通过，本次增强未采用，原图仍可用`;
                 default:
                     return "AI增强失败，原图仍可用";
             }

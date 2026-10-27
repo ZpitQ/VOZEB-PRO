@@ -166,12 +166,12 @@ describe("file enhancement completion visibility", () => {
             expect(published).toMatchObject({ status: "succeeded", phase: "receipt", publication: { assetId: expect.any(String) } });
             expect(await listCreativeAssets(conversation.id, userId)).toContainEqual(expect.objectContaining({ id: published!.publication!.assetId, parentAssetId: original.id }));
         });
-        mocks.readSource.mockImplementation(async (reference: { dataUrl: string }) => `data:image/png;base64,${(stored.get(reference.dataUrl) || source).toString("base64")}`);
+        mocks.readSource.mockImplementation(async (reference: { dataUrl: string }) => `data:image/${reference.dataUrl.endsWith(".jpg") ? "jpeg" : "png"};base64,${(stored.get(reference.dataUrl) || source).toString("base64")}`);
         mocks.store.mockImplementation(async (bytes: Buffer) => {
-            const url = `/api/generation-log-assets/enhancement-${stored.size + 1}.png`;
-            stored.set(url, bytes);
             const dimensions = await sharp(bytes).metadata();
-            return { type: "image", url, serverUrl: url, width: dimensions.width, height: dimensions.height, bytes: bytes.length, mimeType: "image/png" };
+            const url = `/api/generation-log-assets/enhancement-${stored.size + 1}.${dimensions.format === "jpeg" ? "jpg" : "png"}`;
+            stored.set(url, bytes);
+            return { type: "image", url, serverUrl: url, width: dimensions.width, height: dimensions.height, bytes: bytes.length, mimeType: `image/${dimensions.format}` };
         });
 
         const successWrite = barrier();

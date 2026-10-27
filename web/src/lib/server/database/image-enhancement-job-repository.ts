@@ -1,12 +1,14 @@
 import type { EnhancementDecision } from "../image-enhancement-plan";
 import type { ImageEnhancementTimings } from "@/lib/image-enhancement-contract";
 import type { EnhancementArtifact, FrozenWorkerEnhancementPlan } from "../image-enhancement-worker-client";
+import type { ProductEnhancementEvidence } from "../image-enhancement-product-protection";
+import type { SceneEnhancementEvidence } from "../image-enhancement-scene-protection";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readJsonDataFile, withJsonDataFileLock, writeJsonDataFile } from "@/lib/server/data-adapter";
 import { ensurePostgresSchema, getDatabaseProvider, postgresQuery, withPostgresTransaction, type QueryExecutor } from "./postgres";
 
-export type StoredEnhancementArtifact = EnhancementArtifact & { url: string };
+export type StoredEnhancementArtifact = Omit<EnhancementArtifact, "format"> & { format: "png" | "jpeg"; url: string };
 export type ImageEnhancementJob = {
     id: string;
     userId: string;
@@ -27,7 +29,7 @@ export type ImageEnhancementJob = {
     receiptId: string;
     receiptConfirmedAt?: number;
     staged?: { ai?: StoredEnhancementArtifact; delivered?: StoredEnhancementArtifact };
-    publication?: { ai: StoredEnhancementArtifact; delivered: StoredEnhancementArtifact; assetId: string | null; publishedAt: number };
+    publication?: { ai: StoredEnhancementArtifact; delivered: StoredEnhancementArtifact; assetId: string | null; publishedAt: number; protection?: ProductEnhancementEvidence | SceneEnhancementEvidence };
     events: { stage: string; at: number; attempt: number; reason?: string }[];
     cancelRequested: boolean;
     createdAt: number;

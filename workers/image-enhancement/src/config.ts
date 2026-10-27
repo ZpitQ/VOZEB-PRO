@@ -20,7 +20,7 @@ export type EnhancementModel = Readonly<{
   nativeScale: 4;
   allowedTiles: readonly number[];
   defaultTile: number;
-  tta: false;
+  tta: boolean;
   gpuId: number;
 }>;
 
@@ -177,7 +177,7 @@ export function createWorkerConfig(value: unknown): WorkerConfig {
       !version(model.modelVersion) ||
       !sha256(model.modelSha256) ||
       model.nativeScale !== 4 ||
-      model.tta !== false ||
+      typeof model.tta !== "boolean" ||
       !integer(model.gpuId, 0) ||
       !Array.isArray(model.allowedTiles) ||
       model.allowedTiles.length === 0 ||
@@ -199,7 +199,7 @@ export function createWorkerConfig(value: unknown): WorkerConfig {
       nativeScale: 4 as const,
       allowedTiles: Object.freeze([...model.allowedTiles] as number[]),
       defaultTile: model.defaultTile,
-      tta: false as const,
+      tta: model.tta,
       gpuId: model.gpuId,
     });
   });

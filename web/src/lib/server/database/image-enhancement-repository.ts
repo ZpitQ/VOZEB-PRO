@@ -14,6 +14,7 @@ export type EnhancementConnectionProfile = {
 export type StoredImageEnhancementSettings = {
     revision: string;
     enabled: boolean;
+    tta: boolean;
     profileId: string;
     profiles: Record<string, EnhancementConnectionProfile>;
     timeoutMs: number | null;
@@ -27,6 +28,7 @@ function defaults(): StoredImageEnhancementSettings {
     return {
         revision: "initial",
         enabled: false,
+        tta: false,
         profileId: "initial",
         profiles: { initial: { id: "initial", endpoint: "", trust: "system", caPem: "", tokenCiphertext: "", credentialRevision: "initial", serviceId: null } },
         timeoutMs: null,

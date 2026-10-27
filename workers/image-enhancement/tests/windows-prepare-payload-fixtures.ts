@@ -625,9 +625,10 @@ export function nativeSemanticVectors(): RawVector[] {
     changedRaw("native scale unsupported", (s) =>
       setValue(s, ["engine", "nativeScale"], 2),
     ),
-    changedRaw("tta true", (s) => setValue(s, ["engine", "tta"], true)),
-    changedRaw("tta wrong type", (s) =>
-      setValue(s, ["engine", "tta"], "false"),
+    ...[null, 0, 1, "false", "true", [], {}].map((tta, index) =>
+      changedRaw(`tta wrong type ${index}`, (s) =>
+        setValue(s, ["engine", "tta"], tta),
+      ),
     ),
     changedRaw("heartbeat exceeds lease", (s) =>
       setValue(s, ["executionPolicy", "limits", "heartbeatIntervalMs"], 15001),

@@ -1,6 +1,6 @@
 {
-  "version": "m5-candidate-v1",
+  "version": "m5-tta-candidate-v1",
   "runtimeFile": "image-enhancement-worker-candidate.zip",
-  "zipSha256": "fbfaf7d18b8738b1a219631e11e891ec73c9280832e20b89fad2e4e223fe4555",
-  "inventorySha256": "12459e343e68ba1f5bfd4380702cd83aa0b861b27e36710ce9f3c710f44c151c"
+  "zipSha256": "75ea391790eea5e468b9bfc9b1060f8a3dbb47f63cbf7dc1b48496f8cf181112",
+  "inventorySha256": "3d44efe0911e4d008ebad409ec604bf1c417c4509c5c7868826399132accfa34"
 }

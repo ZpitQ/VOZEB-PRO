@@ -19,7 +19,7 @@ function enhancementFixture(): PublicImageEnhancement {
         plannedInference: { width: 5016, height: 5016 },
         ai: { width: 5016, height: 5016, byteLength: 4000, sha256: "b".repeat(64), format: "png" },
         enhanced: { url: "/api/generation-log-assets/delivered.png", width: 4096, height: 4096, byteLength: 3000, sha256: "c".repeat(64), format: "png", assetId: "asset-one" },
-        model: { id: "fixture-model", binaryVersion: "binary-v2", modelVersion: "model-v3" },
+        model: { id: "fixture-model", binaryVersion: "binary-v2", modelVersion: "model-v3", tta: false },
         timings: { workerQueueMs: 0, workerExecutionMs: 125.5, deliveryEncodingMs: 2.75 },
         events: [
             { stage: "prepared", at: 1000, attempt: 2 },
@@ -124,6 +124,23 @@ describe("GenerationLogDetail ecommerce observability", () => {
 });
 
 describe("GenerationLogDetail AI enhancement observations", () => {
+    it.each([
+        [true, "开启"],
+        [false, "关闭"],
+    ] as const)("shows the persisted TTA choice %s beside the actual engine timing", (tta, label) => {
+        const enhancement = enhancementFixture();
+        enhancement.model = { ...enhancement.model!, tta };
+        const markup = renderToStaticMarkup(<GenerationLogDetail log={enhancementLog([{ type: "image", url: enhancement.native.url, enhancement }])} />);
+        expect(markup).toMatch(new RegExp(`精细增强（TTA）[\\s\\S]*?title="${label}"`));
+        expect(markup).toContain("引擎执行（含启动与写出）");
+        expect(markup).toContain("125.5 ms");
+    });
+    it("shows the shared upgrade explanation for unavailable TTA instead of an unknown reason", () => {
+        const enhancement = { ...enhancementFixture(), status: "failed" as const, reason: "tta_unavailable" };
+        const markup = renderToStaticMarkup(<GenerationLogDetail log={enhancementLog([{ type: "image", url: enhancement.native.url, enhancement }])} />);
+        expect(markup).toContain("升级 Worker");
+        expect(markup).not.toContain("未分类原因");
+    });
     it.each([true, false])("previews permanent media after upstream expiry with serverUrl=%s", (hasServerUrl) => {
         const managed = "/api/generation-log-assets/permanent/fixture.png";
         const upstream = "https://expired-upstream.invalid/result.png";

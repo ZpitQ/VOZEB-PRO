@@ -16,6 +16,7 @@ import {
   nativeSemanticVectors,
   nativeShapeVectors,
   nativeUnicodeVectors,
+  setValue,
   typedProjection,
   type IndependentSpec,
   type RawVector,
@@ -252,6 +253,21 @@ windowsSuite("ordinary native Windows prepare payload contract", () => {
     expect(control.mode).toBe("control");
     expect(control.value).toBeUndefined();
   });
+
+  it.each([false, true])(
+    "preserves actual TTA %s through native parsing of TS-produced and independent carriers",
+    async (tta) => {
+      const attempt = claimedAttempt();
+      setValue(attempt, ["job", "plan", "engine", "tta"], tta);
+      const spec = independentSpec(attempt);
+      const independent = carrier(JSON.stringify(spec));
+      accepted(await invoke("parse", independent), spec, independent);
+      const produced = freezeWindowsPrepareRequest(attempt);
+      expect(produced).toEqual(independent);
+      accepted(await invoke("parse", produced), spec, produced);
+    },
+    testMs,
+  );
 
   it(
     "accepts an independent valid payload and projects every immutable typed field",

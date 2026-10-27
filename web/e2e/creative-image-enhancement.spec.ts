@@ -59,6 +59,199 @@ test("restored variants keep one result and download and reference the actual se
     expect(fixture.generatedRequests).toEqual([]);
 });
 
+test("product background variants keep the original canvas and download and reference the selected protected result", async ({ page }) => {
+    const fixture = await mockEnhancementRound(page, { status: "succeeded", persistentMedia: true, productBackground: true });
+    const originalBefore = JSON.stringify(fixture.original);
+    await openRound(page, fixture.id);
+    const result = page.getByTestId("creative-media-result");
+    const actions = page.getByLabel("本轮创作操作", { exact: true });
+    const versions = result.getByLabel("图像增强与版本", { exact: true });
+    const preview = result.getByTestId("creative-primary-result").locator("img");
+    await expect(result).toHaveAttribute("data-results-count", "1");
+    await expect(result.getByTestId("creative-result-switcher")).toHaveCount(0);
+    await expect(actions).toHaveAttribute("data-active-asset-id", fixture.child.id);
+    await expect(result.getByRole("button", { name: "AI增强", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(versions.getByRole("status")).toContainText("商品保护增强 · 保持原画幅");
+    await expect(versions).toContainText(/当前AI增强\s*1024×1024/);
+    await expect(versions).not.toContainText(/4K|4096/i);
+    await expect(preview).toHaveAttribute("src", `${fixture.child.serverUrl}?format=webp&width=960`);
+    const enhancedDownload = await downloadCurrent(page, actions);
+    expect(enhancedDownload.url.pathname).toBe(fixture.child.serverUrl);
+    expect(createHash("sha256").update(enhancedDownload.bytes).digest("hex")).toBe(fixture.enhancedSha256);
+    expect(await sharp(enhancedDownload.bytes).metadata()).toMatchObject({ format: "png", width: 1024, height: 1024 });
+    expect(fixture.enhancedSha256).not.toBe(fixture.nativeSha256);
+    await referenceCurrent(page, actions);
+    await expect(page.getByRole("button", { name: `移除${fixture.child.title}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: `移除${fixture.original.title}`, exact: true })).toHaveCount(0);
+
+    await result.getByRole("button", { name: "原图", exact: true }).click();
+    await expect(actions).toHaveAttribute("data-active-asset-id", fixture.original.id);
+    await expect(result.getByRole("button", { name: "原图", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(versions).toContainText(/当前原图\s*1024×1024/);
+    await expect(versions.getByRole("status")).toContainText("商品保护增强 · 保持原画幅");
+    await expect(preview).toHaveAttribute("src", `${fixture.original.serverUrl}?format=webp&width=960`);
+    const originalDownload = await downloadCurrent(page, actions);
+    expect(originalDownload.url.pathname).toBe(fixture.original.serverUrl);
+    expect(createHash("sha256").update(originalDownload.bytes).digest("hex")).toBe(fixture.nativeSha256);
+    expect(await sharp(originalDownload.bytes).metadata()).toMatchObject({ format: "png", width: 1024, height: 1024 });
+    await referenceCurrent(page, actions);
+    await expect(page.getByRole("button", { name: `移除${fixture.original.title}`, exact: true })).toBeVisible();
+
+    await result.getByRole("button", { name: "AI增强", exact: true }).click();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(actions).toHaveAttribute("data-active-asset-id", fixture.child.id);
+    await expect(result).toHaveAttribute("data-results-count", "1");
+    await expect(versions.getByRole("status")).toContainText("商品保护增强 · 保持原画幅");
+    await expect(versions).toContainText(/当前AI增强\s*1024×1024/);
+    await expect(versions).not.toContainText(/4K|4096/i);
+    await expect(preview).toHaveAttribute("src", `${fixture.child.serverUrl}?format=webp&width=960`);
+    await result.getByRole("button", { name: "原图", exact: true }).click();
+    await expect(actions).toHaveAttribute("data-active-asset-id", fixture.original.id);
+    await expect(versions).toContainText(/当前原图\s*1024×1024/);
+    const restoredOriginalDownload = await downloadCurrent(page, actions);
+    expect(restoredOriginalDownload.url.pathname).toBe(fixture.original.serverUrl);
+    expect(restoredOriginalDownload.bytes).toEqual(originalDownload.bytes);
+    expect(createHash("sha256").update(restoredOriginalDownload.bytes).digest("hex")).toBe(fixture.nativeSha256);
+    expect(JSON.stringify(fixture.original)).toBe(originalBefore);
+    expect(fixture.controls).toEqual([]);
+    expect(fixture.generatedRequests).toEqual([]);
+});
+
+test("a rejected product protection result keeps the qualified original available", async ({ page }) => {
+    const fixture = await mockEnhancementRound(page, { status: "failed", reason: "protection_invalid", productBackground: true });
+    await openRound(page, fixture.id);
+    const result = page.getByTestId("creative-media-result");
+    await expect(result.getByRole("status")).toContainText("商品保护校验未通过，本次增强未采用，原图仍可用");
+    await expect(result.getByRole("status")).toContainText("商品保护增强 · 保持原画幅");
+    await expect(page.getByLabel("本轮创作操作", { exact: true })).toHaveAttribute("data-active-asset-id", fixture.original.id);
+    await expect(result.getByRole("button", { name: "原图", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(result.getByRole("button", { name: "AI增强", exact: true })).toBeDisabled();
+    await expect(result.getByLabel("图像增强与版本", { exact: true })).toContainText(/当前原图\s*1024×1024/);
+    expect(fixture.controls).toEqual([]);
+    expect(fixture.generatedRequests).toEqual([]);
+});
+
+test("local edit variants keep the source canvas through late completion, preview, download, reload and reference", async ({ page }, info) => {
+    const fixture = await mockEnhancementRound(page, { status: "running", persistentMedia: true, localEdit: true });
+    const releaseInitialRead = fixture.holdJobReads();
+    const result = page.getByTestId("creative-media-result");
+    const actions = page.getByLabel("本轮创作操作", { exact: true });
+    const versions = result.getByLabel("图像增强与版本", { exact: true });
+    const preview = result.getByTestId("creative-primary-result").locator("img");
+    try {
+        await openRound(page, fixture.id);
+        await fixture.firstJobRead();
+        await expect(actions).toHaveAttribute("data-active-asset-id", fixture.original.id);
+        await expect(result.getByRole("button", { name: "AI增强", exact: true })).toBeDisabled();
+        await expect(preview).toHaveAttribute("src", `${fixture.original.serverUrl}?format=webp&width=960`);
+        await result.getByRole("button", { name: "原图", exact: true }).click();
+    } finally {
+        releaseInitialRead();
+    }
+    await expect(versions.getByRole("status")).toContainText("AI增强进行中，原图可用");
+    await expect(versions.getByRole("status")).toContainText("局部保护增强 · 保持原画幅");
+    await expect(versions).toContainText(/当前原图\s*1024×1024/);
+    const originalDownload = await downloadCurrent(page, actions);
+    expect(originalDownload.url.pathname).toBe(fixture.original.serverUrl);
+    expect(createHash("sha256").update(originalDownload.bytes).digest("hex")).toBe(fixture.nativeSha256);
+    await preview.click();
+    const originalDialog = page.getByRole("dialog", { name: fixture.original.title, exact: true });
+    const originalDetail = originalDialog.getByRole("img", { name: fixture.original.title, exact: true });
+    await expect(originalDetail).toHaveAttribute("src", new RegExp(`^${fixture.original.serverUrl}\\?format=webp&width=`));
+    await expect.poll(() => originalDetail.evaluate((image: HTMLImageElement) => [image.naturalWidth, image.naturalHeight])).toEqual([1024, 1024]);
+    await originalDialog.getByRole("button", { name: "close", exact: true }).click();
+    await referenceCurrent(page, actions);
+    await expect(page.getByRole("button", { name: `移除${fixture.original.title}`, exact: true })).toBeVisible();
+    const input = page.getByRole("textbox", { name: "描述你想生成或修改的图片", exact: true });
+    await input.fill("保留局部编辑的下一轮草稿");
+    fixture.finish();
+    await expect(result.getByRole("button", { name: "AI增强", exact: true })).toBeEnabled();
+    await expect(actions).toHaveAttribute("data-active-asset-id", fixture.original.id);
+    await expect(input).toHaveValue("保留局部编辑的下一轮草稿");
+    await expect(page.getByRole("button", { name: `移除${fixture.original.title}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: `移除${fixture.child.title}`, exact: true })).toHaveCount(0);
+    await result.getByRole("button", { name: "AI增强", exact: true }).click();
+    await expect(actions).toHaveAttribute("data-active-asset-id", fixture.child.id);
+    await expect(versions).toContainText(/当前AI增强\s*1024×1024/);
+    await expect(versions).not.toContainText(/商品保护|4K|4096/i);
+    await expect(result).toHaveAttribute("data-results-count", "1");
+    await expect(result.getByTestId("creative-result-switcher")).toHaveCount(0);
+    await expect(preview).toHaveAttribute("src", `${fixture.child.serverUrl}?format=webp&width=960`);
+    await preview.click();
+    const enhancedDialog = page.getByRole("dialog", { name: fixture.child.title, exact: true });
+    const enhancedDetail = enhancedDialog.getByRole("img", { name: fixture.child.title, exact: true });
+    await expect(enhancedDetail).toHaveAttribute("src", new RegExp(`^${fixture.child.serverUrl}\\?format=webp&width=`));
+    await expect.poll(() => enhancedDetail.evaluate((image: HTMLImageElement) => [image.naturalWidth, image.naturalHeight])).toEqual([1024, 1024]);
+    await enhancedDialog.getByRole("button", { name: "close", exact: true }).click();
+    const enhancedDownload = await downloadCurrent(page, actions);
+    expect(enhancedDownload.url.pathname).toBe(fixture.child.serverUrl);
+    expect(createHash("sha256").update(enhancedDownload.bytes).digest("hex")).toBe(fixture.enhancedSha256);
+    expect(await sharp(enhancedDownload.bytes).metadata()).toMatchObject({ format: "png", width: 1024, height: 1024 });
+    expect(fixture.enhancedSha256).not.toBe(fixture.nativeSha256);
+    await expectTightImage(result);
+    await page.screenshot({ path: info.outputPath("local-edit-enhancement-completed.png") });
+
+    const jobReadsBeforeReload = fixture.jobReads();
+    const releaseRestoredRead = fixture.holdJobReads();
+    try {
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect.poll(fixture.jobReads).toBeGreaterThan(jobReadsBeforeReload);
+        await expect(actions).toHaveAttribute("data-active-asset-id", fixture.child.id);
+        await expect(versions.getByRole("status")).toContainText("局部保护增强 · 保持原画幅");
+        await expect(versions).toContainText(/当前AI增强\s*1024×1024/);
+        await expect(versions).not.toContainText(/商品保护|4K|4096/i);
+    } finally {
+        releaseRestoredRead();
+    }
+    await expect(preview).toHaveAttribute("src", `${fixture.child.serverUrl}?format=webp&width=960`);
+    await result.getByRole("button", { name: "原图", exact: true }).click();
+    await expect(preview).toHaveAttribute("src", `${fixture.original.serverUrl}?format=webp&width=960`);
+    const restoredOriginalDownload = await downloadCurrent(page, actions);
+    expect(restoredOriginalDownload.url.pathname).toBe(fixture.original.serverUrl);
+    expect(restoredOriginalDownload.bytes).toEqual(originalDownload.bytes);
+    await result.getByRole("button", { name: "AI增强", exact: true }).click();
+    await referenceCurrent(page, actions);
+    await expect(page.getByRole("button", { name: `移除${fixture.child.title}`, exact: true })).toBeVisible();
+    await input.fill("明确引用局部保护增强图继续编辑");
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    await expect.poll(() => fixture.generatedRequests.length).toBe(1);
+    expect(fixture.generatedRequests[0].assetIds).toEqual([fixture.child.id]);
+    expect(fixture.controls).toEqual([]);
+});
+
+test("a rejected local protection result keeps the source available for preview, download and reference", async ({ page }, info) => {
+    const fixture = await mockEnhancementRound(page, { status: "failed", reason: "protection_invalid", persistentMedia: true, localEdit: true });
+    await openRound(page, fixture.id);
+    const result = page.getByTestId("creative-media-result");
+    const actions = page.getByLabel("本轮创作操作", { exact: true });
+    const versions = result.getByLabel("图像增强与版本", { exact: true });
+    await expect(versions.getByRole("status")).toContainText("局部保护校验未通过，本次增强未采用，原图仍可用");
+    await expect(versions.getByRole("status")).toContainText("局部保护增强 · 保持原画幅");
+    await expect(versions).not.toContainText(/商品保护|4K|4096/i);
+    await expect(versions).toContainText(/当前原图\s*1024×1024/);
+    await expect(actions).toHaveAttribute("data-active-asset-id", fixture.original.id);
+    await expect(result.getByRole("button", { name: "原图", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(result.getByRole("button", { name: "AI增强", exact: true })).toBeDisabled();
+    await result.getByTestId("creative-primary-result").getByRole("img", { name: fixture.original.title, exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: fixture.original.title, exact: true });
+    const detail = dialog.getByRole("img", { name: fixture.original.title, exact: true });
+    await expect(detail).toHaveAttribute("src", new RegExp(`^${fixture.original.serverUrl}\\?format=webp&width=`));
+    await expect.poll(() => detail.evaluate((image: HTMLImageElement) => [image.naturalWidth, image.naturalHeight])).toEqual([1024, 1024]);
+    await dialog.getByRole("button", { name: "close", exact: true }).click();
+    const download = await downloadCurrent(page, actions);
+    expect(download.url.pathname).toBe(fixture.original.serverUrl);
+    expect(createHash("sha256").update(download.bytes).digest("hex")).toBe(fixture.nativeSha256);
+    await expectTightImage(result);
+    await page.screenshot({ path: info.outputPath("local-edit-protection-rejected.png") });
+    await referenceCurrent(page, actions);
+    await expect(page.getByRole("button", { name: `移除${fixture.original.title}`, exact: true })).toBeVisible();
+    await page.getByRole("textbox", { name: "描述你想生成或修改的图片", exact: true }).fill("继续使用未被替换的局部编辑原图");
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    await expect.poll(() => fixture.generatedRequests.length).toBe(1);
+    expect(fixture.generatedRequests[0].assetIds).toEqual([fixture.original.id]);
+    expect(fixture.controls).toEqual([]);
+});
+
 test("enhanced detail preview loads delivered pixels while thumbnails remain small", async ({ page }) => {
     const fixture = await mockEnhancementRound(page, { status: "succeeded", persistentMedia: true, enhancedSize: { width: 3838, height: 2160 } });
     await openRound(page, fixture.id);
@@ -457,7 +650,17 @@ function gate() {
 
 async function mockEnhancementRound(
     page: Page,
-    options: { status?: PublicImageEnhancement["status"]; reason?: string; skip?: ImageEnhancementSkip["reason"]; publishChild?: boolean; failRead?: boolean; persistentMedia?: boolean; enhancedSize?: { width: number; height: number } },
+    options: {
+        status?: PublicImageEnhancement["status"];
+        reason?: string;
+        skip?: ImageEnhancementSkip["reason"];
+        publishChild?: boolean;
+        failRead?: boolean;
+        persistentMedia?: boolean;
+        enhancedSize?: { width: number; height: number };
+        productBackground?: boolean;
+        localEdit?: boolean;
+    },
 ) {
     const prefix = `enhancement-${randomUUID()}`;
     const id = `conversation-${prefix}`;
@@ -465,6 +668,7 @@ async function mockEnhancementRound(
     const enhancementId = `job-${prefix}`;
     const resultId = `result-${prefix}`;
     const now = Date.now();
+    const deliveryScope = options.localEdit ? "local_edit" : options.productBackground ? "product_background" : undefined;
     let nativeUrl = `/api/reference-assets/${prefix}/native.png`;
     let enhancedUrl = `/api/reference-assets/${prefix}/enhanced.png`;
     const original: CreativeAsset = {
@@ -496,8 +700,16 @@ async function mockEnhancementRound(
         serverUrl: enhancedUrl,
         width: 2048,
         height: 2048,
-        ...options.enhancedSize,
-        metadata: { provenance: "ai_enhanced", enhancementId, parentResultId: resultId, parentAssetIds: [original.id], nativeSha256: "a".repeat(64), sha256: "b".repeat(64) },
+        ...(deliveryScope ? { width: 1024, height: 1024 } : options.enhancedSize),
+        metadata: {
+            provenance: "ai_enhanced",
+            enhancementId,
+            parentResultId: resultId,
+            parentAssetIds: [original.id],
+            nativeSha256: "a".repeat(64),
+            sha256: "b".repeat(64),
+            ...(deliveryScope ? { deliveryVersion: "ecommerce-delivery.v2", scope: deliveryScope } : {}),
+        },
         createdAt: now + 1,
         updatedAt: now + 1,
     };
@@ -571,7 +783,8 @@ async function mockEnhancementRound(
     child.bytes = enhancedBytes.length;
     child.metadata.nativeSha256 = nativeSha256;
     child.metadata.sha256 = enhancedSha256;
-    original.metadata.nativeSource = { url: nativeUrl, width: 1024, height: 1024, sha256: nativeSha256, byteLength: nativeBytes.length, format: "png", hasAlpha: false, provenance: "provider_native" };
+    const providerNative = { url: deliveryScope ? `/api/reference-assets/${prefix}/provider-native.png` : nativeUrl, width: 1024, height: 1024, sha256: nativeSha256, byteLength: nativeBytes.length, format: "png" };
+    original.metadata.nativeSource = { ...providerNative, hasAlpha: false, provenance: "provider_native" };
     const job = (): PublicImageEnhancement => ({
         id: enhancementId,
         imageTaskId: "native-task",
@@ -580,7 +793,8 @@ async function mockEnhancementRound(
         phase: status === "succeeded" ? "completed" : "poll",
         reason: options.reason || null,
         attempt: controls.filter((action) => action === "retry").length + 1,
-        native: { url: nativeUrl, width: 1024, height: 1024, sha256: nativeSha256, byteLength: nativeBytes.length, format: "png", provenance: "provider_native" },
+        native: { url: nativeUrl, width: 1024, height: 1024, sha256: nativeSha256, byteLength: nativeBytes.length, format: "png", provenance: deliveryScope ? "protected_composite" : "provider_native" },
+        ...(deliveryScope ? { providerNative, delivery: { version: "ecommerce-delivery.v2" as const, scope: deliveryScope, requestedTarget: { width: 4096, height: 4096 } } } : {}),
         target: { width: child.width!, height: child.height! },
         ...(status === "succeeded" ? { enhanced: { url: enhancedUrl, assetId: child.id, width: child.width!, height: child.height!, sha256: enhancedSha256, byteLength: enhancedBytes.length, format: "png" } } : {}),
         events: [],
@@ -588,7 +802,7 @@ async function mockEnhancementRound(
         canCancel: status === "queued" || status === "running",
     });
 
-    await page.route(new RegExp(`/api/reference-assets/${prefix}/(?:second-)?(?:native|enhanced)\\.png(?:\\?.*)?$`), async (route) => {
+    await page.route(new RegExp(`/api/reference-assets/${prefix}/(?:second-)?(?:native|enhanced|provider-native)\\.png(?:\\?.*)?$`), async (route) => {
         const url = new URL(route.request().url());
         const originalBytes = url.pathname.endsWith("enhanced.png") ? enhancedBytes : nativeBytes;
         const previewWidth = Number(url.searchParams.get("width"));

@@ -2,6 +2,7 @@ import { connect } from "node:net";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createWorkerConfig } from "../src/config.js";
 import { createClient, revokeCredential } from "../src/credentials.js";
 import {
   createEnhancementHandler,
@@ -9,6 +10,7 @@ import {
   localUploadFiles,
 } from "../src/http.js";
 import { httpFixture, jobOf, transportLimits } from "./http-fixtures.js";
+import { configInput } from "./fixtures.js";
 import { sourceImage } from "./storage-fixtures.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -33,6 +35,18 @@ const routes = [
 ] as const;
 
 describe("HTTP authentication before body and business access", () => {
+  it.each([false, true])("advertises supported TTA modes independently from model default %s", async (tta) => {
+    const f = await fixture();
+    const input = configInput();
+    input.models[0]!.tta = tta;
+    f.setConfig(createWorkerConfig(input));
+    const response = await f.call("GET", "/v1/capabilities");
+    expect(response.status).toBe(200);
+    expect(response.body.data.models).toEqual([
+      { ...f.config.models[0]!, ttaModes: [false, true] },
+    ]);
+  });
+
   it.each(["missing", "malformed", "wrong", "revoked", "duplicate"] as const)(
     "rejects %s authentication on all seven endpoints with zero upload side effects",
     async (kind) => {
@@ -164,6 +178,7 @@ describe("HTTP authentication before body and business access", () => {
     expect(first.status).toBe(200);
     expect(Object.keys(first.body.data).sort()).toEqual([
       "budgets",
+      "features",
       "models",
       "normalizationProfile",
       "protocolVersion",

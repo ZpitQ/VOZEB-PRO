@@ -113,11 +113,12 @@ public sealed class PreparePayload
                 throw InvalidArgument();
             long nativeScale = Number(engineValues.GetProperty("nativeScale"));
             long engineTile = Tile(engineValues.GetProperty("tile"));
-            if (nativeScale != 4 || engineValues.GetProperty("tta").ValueKind != JsonValueKind.False ||
+            JsonElement tta = engineValues.GetProperty("tta");
+            if (nativeScale != 4 || tta.ValueKind is not (JsonValueKind.False or JsonValueKind.True) ||
                 !seenTiles.Contains(engineTile)) throw InvalidArgument();
             var engine = new EngineSelection(modelId, Identifier(engineValues, "binaryVersion"),
                 Sha256(engineValues, "binarySha256"), Identifier(engineValues, "modelVersion"),
-                Sha256(engineValues, "modelSha256"), nativeScale, engineTile, false, Number(engineValues.GetProperty("gpuId")));
+                Sha256(engineValues, "modelSha256"), nativeScale, engineTile, tta.GetBoolean(), Number(engineValues.GetProperty("gpuId")));
 
             long firstStartedAt = Number(root.GetProperty("firstStartedAt"));
             long executionDeadlineAt = Number(root.GetProperty("executionDeadlineAt"));

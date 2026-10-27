@@ -5,6 +5,8 @@ import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createEnhancementTaskClient } from "./image-enhancement-worker-client";
 import { planImageEnhancement } from "./image-enhancement-plan";
+import type { EcommerceEnhancementDelivery } from "./image-enhancement-delivery";
+import type { EnhancementModel } from "@/lib/image-enhancement-contract";
 
 const serviceId = "31313131-3131-4131-8131-313131313131";
 const jobId = "42424242-4242-4242-8242-424242424242";
@@ -25,6 +27,8 @@ let submissions: { key: string | undefined; plan: Record<string, unknown>; multi
 let receipts: unknown[];
 let timings: unknown;
 let rawTimingNumber: string | undefined;
+let advertisedModel: Record<string, unknown>;
+let acceptedJobs: Map<string | undefined, { requestFingerprint: string; job: ReturnType<typeof job> }>;
 const result = () => {
     const bytes = mode === "truncated-consistent" ? ai.subarray(0, 50) : ai;
     return { format: "png" as const, width: 8, height: 8, sha256: digest(bytes), byteLength: bytes.length };
@@ -36,7 +40,7 @@ const job = () => ({
     reason: null,
     source: { sha256: digest(source), width: 2, height: 2 },
     engineInput: { width: 2, height: 2 },
-    plan: frozen,
+    plan: mode === "false-engine" ? { ...frozen, engine: { ...frozen.engine, tta: false } } : frozen,
     result: mode === "status-array" ? null : result(),
     createdAt: 1,
     completedAt: 2,
@@ -50,6 +54,8 @@ beforeEach(async () => {
     receipts = [];
     timings = undefined;
     rawTimingNumber = undefined;
+    advertisedModel = { ...model };
+    acceptedJobs = new Map();
     source = await sharp({ create: { width: 2, height: 2, channels: 3, background: "#dedede" } })
         .png()
         .toBuffer();
@@ -70,7 +76,7 @@ beforeEach(async () => {
                 protocolVersion: "image-enhancement.v1",
                 normalizationProfile: "srgb-upright-v1",
                 features: { expectedStrategyFingerprint: mode !== "legacy" },
-                models: [{ ...model, modelSha256: mode === "weights" ? "d".repeat(64) : model.modelSha256 }],
+                models: [{ ...advertisedModel, modelSha256: mode === "weights" ? "d".repeat(64) : advertisedModel.modelSha256 }],
                 budgets: mode === "budget" ? { ...budgets, input: { ...budgets.input, maxPixels: 3 } } : mode === "native-delivery-budget" ? { ...budgets, delivery: { ...budgets.delivery, maxPixels: 36 } } : budgets,
                 ready: mode !== "unready",
             };
@@ -79,11 +85,21 @@ beforeEach(async () => {
             const part = bytes.toString("utf8").split(`--${boundary}`)[1];
             const plan = JSON.parse(part.split("\r\n\r\n")[1].trim()) as Record<string, unknown>;
             submissions.push({ key: request.headers["idempotency-key"] as string | undefined, plan, multipart: part });
+            const key = request.headers["idempotency-key"] as string | undefined;
+            // Like the Worker identity, this includes the presence of the optional TTA field.
+            const requestFingerprint = digest(Buffer.from(JSON.stringify(plan)));
+            const existing = acceptedJobs.get(key);
+            if (existing && existing.requestFingerprint !== requestFingerprint) {
+                response.writeHead(409).end(JSON.stringify({ code: "idempotency_conflict" }));
+                return;
+            }
+            const accepted = existing ?? { requestFingerprint, job: job() };
+            acceptedJobs.set(key, accepted);
             if (mode === "lost-submit") {
                 request.socket.destroy();
                 return;
             }
-            data = { job: job(), replayed: submissions.length > 1 };
+            data = { job: accepted.job, replayed: !!existing };
         } else if (request.url === `/v1/enhancement-jobs/${jobId}/result`) {
             response.writeHead(200, { "content-type": "image/png" }).end(mode === "truncated-consistent" ? ai.subarray(0, 50) : mode === "corrupt" ? Buffer.from("corrupt") : ai);
             return;
@@ -111,7 +127,7 @@ afterEach(async () => {
     server?.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
 });
-async function prepare(snapshotServiceId = serviceId, target = { width: 6, height: 6 }, frozenModel = model) {
+async function prepare(snapshotServiceId = serviceId, target = { width: 6, height: 6 }, frozenModel: EnhancementModel = model) {
     const decision = planImageEnhancement({
         nativeValid: true,
         enabled: true,
@@ -128,6 +144,139 @@ async function prepare(snapshotServiceId = serviceId, target = { width: 6, heigh
 }
 
 describe("frozen enhancement task client over HTTP", () => {
+    it.each([false, true])("submits the explicit frozen TTA choice %s to a capable Worker", async (tta) => {
+        advertisedModel = { ...model, ttaModes: [false, true] };
+        const plan = await prepare(serviceId, undefined, { ...model, tta, ttaModes: [false, true] });
+        expect(plan.engine.tta).toBe(tta);
+        await client.submit(plan, source, "tta-frozen-key");
+        expect(submissions[0].plan).toMatchObject({ tta, expectedStrategyFingerprint: plan.strategyFingerprint });
+        expect(requests).not.toContain("POST /v1/self-test");
+    });
+    it("keeps the old ordinary wire contract free of an unsupported TTA field", async () => {
+        const plan = await prepare();
+        await client.submit(plan, source, "legacy-ordinary-key");
+        expect(submissions[0].plan).not.toHaveProperty("tta");
+        expect(plan.engine.tta).toBe(false);
+    });
+    it("accepts an old frozen ordinary plan after a capability-only Worker upgrade", async () => {
+        advertisedModel = { ...model, tta: true, ttaModes: [false, true] };
+        const plan = await prepare();
+        expect(plan.engine.tta).toBe(false);
+        await client.submit(plan, source, "upgraded-ordinary-key");
+        expect(submissions[0].plan.tta).toBe(false);
+    });
+    it("recovers an accepted legacy request after response loss and a capability upgrade", async () => {
+        const plan = await prepare();
+        const persisted = JSON.parse(JSON.stringify(plan)) as typeof plan;
+        mode = "lost-submit";
+        await expect(client.submit(persisted, source, "legacy-upgrade-recovery-key")).rejects.toMatchObject({ reason: "connection_failed" });
+        expect(submissions[0].plan).not.toHaveProperty("tta");
+        expect(acceptedJobs.size).toBe(1);
+        advertisedModel = { ...model, tta: true, ttaModes: [false, true] };
+        mode = "ok";
+        expect(await client.submit(persisted, source, "legacy-upgrade-recovery-key")).toMatchObject({ job: { jobId }, replayed: true });
+        expect(submissions.map((entry) => entry.key)).toEqual(["legacy-upgrade-recovery-key", "legacy-upgrade-recovery-key"]);
+        expect(submissions[1].plan).toEqual(submissions[0].plan);
+        expect(submissions[1].plan).not.toHaveProperty("tta");
+        expect(acceptedJobs.size).toBe(1);
+    });
+    it("keeps explicit ordinary mode after response loss and a Worker default change", async () => {
+        advertisedModel = { ...model, ttaModes: [false, true] };
+        const plan = await prepare();
+        mode = "lost-submit";
+        await expect(client.submit(plan, source, "explicit-ordinary-recovery-key")).rejects.toMatchObject({ reason: "connection_failed" });
+        advertisedModel = { ...model, tta: true, ttaModes: [false, true] };
+        mode = "ok";
+        expect(await client.submit(JSON.parse(JSON.stringify(plan)), source, "explicit-ordinary-recovery-key")).toMatchObject({ job: { jobId }, replayed: true });
+        expect(submissions[0].plan.tta).toBe(false);
+        expect(submissions[1].plan).toEqual(submissions[0].plan);
+        expect(acceptedJobs.size).toBe(1);
+    });
+    it("rejects inconsistent persisted TTA request metadata before submission", async () => {
+        advertisedModel = { ...model, ttaModes: [false, true] };
+        const plan = await prepare();
+        await expect(client.submit({ ...plan, requestTta: true }, source, "inconsistent-request-key")).rejects.toMatchObject({ reason: "invalid_response" });
+        expect(submissions).toEqual([]);
+    });
+    it("binds distinct TTA modes to distinct fingerprints while keeping model identity stable", async () => {
+        advertisedModel = { ...model, ttaModes: [false, true] };
+        const ordinary = await prepare();
+        const precise = await prepare(serviceId, undefined, { ...model, tta: true });
+        expect(ordinary.strategyFingerprint).not.toBe(precise.strategyFingerprint);
+        expect(ordinary.planFingerprint).not.toBe(precise.planFingerprint);
+        expect(precise.engine).toEqual({ ...ordinary.engine, tta: true });
+    });
+    it("keeps an allowed frozen tile when the Worker changes its current default", async () => {
+        advertisedModel = { ...model, allowedTiles: [64, 0], defaultTile: 64, ttaModes: [false, true] };
+        const plan = await prepare();
+        expect(plan.engine.tile).toBe(0);
+        await client.submit(plan, source, "frozen-tile-key");
+        expect(submissions[0].plan.tile).toBe(0);
+    });
+    it.each(["binarySha256", "binaryVersion", "modelSha256", "modelVersion", "gpuId", "nativeScale", "allowedTiles"])("rejects changed execution identity before submission: %s", async (field) => {
+        advertisedModel = { ...model, [field]: field.endsWith("Sha256") ? "d".repeat(64) : field.endsWith("Version") ? "changed" : field === "gpuId" ? 1 : field === "nativeScale" ? 2 : [64], ...(field === "allowedTiles" ? { defaultTile: 64 } : {}) };
+        await expect(prepare()).rejects.toMatchObject({ reason: "model_unavailable" });
+        expect(submissions).toEqual([]);
+    });
+    it("rejects true before submission when the Worker declares no TTA modes", async () => {
+        await expect(prepare(serviceId, undefined, { ...model, tta: true })).rejects.toMatchObject({ reason: "tta_unavailable" });
+        expect(submissions).toEqual([]);
+    });
+    it("does not silently replace a prepared TTA choice after capabilities change", async () => {
+        advertisedModel = { ...model, ttaModes: [false, true] };
+        const plan = await prepare(serviceId, undefined, { ...model, tta: true });
+        advertisedModel = { ...model };
+        await expect(client.submit(plan, source, "tta-no-downgrade")).rejects.toMatchObject({ reason: "tta_unavailable" });
+        expect(submissions).toEqual([]);
+        expect(plan.engine.tta).toBe(true);
+    });
+    it("rejects an ordinary engine response that copies a TTA plan fingerprint", async () => {
+        advertisedModel = { ...model, ttaModes: [false, true] };
+        const plan = await prepare(serviceId, undefined, { ...model, tta: true });
+        mode = "false-engine";
+        await expect(client.submit(plan, source, "tta-response-mismatch")).rejects.toMatchObject({ reason: "invalid_response" });
+        await expect(client.query(plan, jobId)).rejects.toMatchObject({ reason: "invalid_response" });
+        expect(submissions).toHaveLength(1);
+    });
+    it("recovers the same frozen TTA request after a lost response despite a new Worker default", async () => {
+        advertisedModel = { ...model, ttaModes: [false, true] };
+        const plan = await prepare(serviceId, undefined, { ...model, tta: true });
+        mode = "lost-submit";
+        await expect(client.submit(plan, source, "tta-recovery-key")).rejects.toMatchObject({ reason: "connection_failed" });
+        advertisedModel = { ...model, tta: false, ttaModes: [false, true] };
+        mode = "ok";
+        expect(await client.submit(plan, source, "tta-recovery-key")).toMatchObject({ replayed: true });
+        expect(submissions.map((entry) => entry.key)).toEqual(["tta-recovery-key", "tta-recovery-key"]);
+        expect(submissions[0].plan).toEqual(submissions[1].plan);
+        expect(submissions[1].plan.tta).toBe(true);
+    });
+    it("uses the qualified local context for budget, prepare, actual HTTP submit and native 4x download", async () => {
+        const native = await sharp(source).resize(1, 1).png().toBuffer();
+        const baseline = { url: "/api/generation-log-assets/local-qualified.png", sha256: digest(source), width: 2, height: 2, byteLength: source.length, format: "png", hasAlpha: false };
+        const decision = planImageEnhancement({
+            nativeValid: true,
+            enabled: true,
+            requested4k: true,
+            protectedContract: false,
+            layered: false,
+            source: { ...baseline, url: "/api/generation-log-assets/local-raw.png", sha256: digest(native), byteLength: native.length, width: 1, height: 1, provenance: "provider_native" },
+            target: { width: 4096, height: 4096 },
+            connection: { revision: "fixture", credentialRef: "fixture", serviceId, timeoutMs: 10000, model },
+            delivery: { contract: { version: "ecommerce-delivery.v2", scope: "local_edit" } as EcommerceEnhancementDelivery, baseline },
+        });
+        expect(decision).toMatchObject({ status: "queued", inference: { width: 8, height: 8 }, target: { width: 2, height: 2 }, source: { sha256: digest(native) } });
+        if (decision.status !== "queued") throw new Error("Expected local fixture");
+        frozen = await client.prepare(decision);
+        expect(frozen.source).toEqual(baseline);
+        expect(frozen.sourceSha256).toBe(digest(source));
+        await expect(client.submit(frozen, native, "wrong-raw")).rejects.toMatchObject({ reason: "input_digest_mismatch" });
+        const accepted = await client.submit(frozen, source, "qualified-local");
+        expect(submissions).toHaveLength(1);
+        expect(submissions[0].plan).toMatchObject({ scope: "full_image", sourceSha256: digest(source), target: { width: 8, height: 8 } });
+        await expect(client.download(frozen, jobId, accepted.job.result!)).resolves.toEqual(ai);
+        mode = "budget";
+        await expect(client.prepare(decision)).rejects.toMatchObject({ reason: "budget_exceeded" });
+    });
     it("accepts only measured Worker timing fields and drops private timing details over TCP", async () => {
         const plan = await prepare();
         timings = { workerQueueMs: 0, workerExecutionMs: 12.5, deliveryEncodingMs: 99, ownerDescriptor: { path: "private-worker-path", token }, attemptNo: 3 };

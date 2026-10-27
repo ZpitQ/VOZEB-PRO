@@ -35,6 +35,37 @@ async function inputs(directory: string) {
 }
 
 describe("durable immutable submissions", () => {
+  it.each([false, true])("rejects a changed explicit TTA %s on an accepted idempotency key", async (tta) => {
+    const f = await fixture();
+    const base = submission(await sourceImage());
+    const request = { ...base, plan: { ...base.plan, tta } };
+    const accepted = await f.service().submit(f.principal(), request);
+    await expect(f.service().submit(f.principal(), {
+      ...request,
+      plan: { ...request.plan, tta: !tta },
+    })).rejects.toMatchObject({ code: "idempotency_conflict", status: 409 });
+    expect(f.service().get(f.principal(), accepted.job.jobId)).toEqual(accepted.job);
+    expect(await inputs(f.directory)).toEqual([accepted.job.jobId]);
+  });
+
+  it.each([false, true])("retains frozen TTA %s across reopening and a changed model default", async (tta) => {
+    const f = await fixture();
+    const config = configInput();
+    config.models[0]!.tta = tta;
+    f.setConfig(createWorkerConfig(config));
+    const request = submission(await sourceImage());
+    const accepted = await f.service().submit(f.principal(), request);
+    expect(accepted.job.plan.engine.tta).toBe(tta);
+    f.store.close();
+    f.setStore(openStore({ directory: f.directory, clock: f.clock }));
+    config.models[0]!.tta = !tta;
+    f.setConfig(createWorkerConfig(config));
+    expect(f.service().get(f.principal(), accepted.job.jobId)).toEqual(accepted.job);
+    expect(await f.service().submit(f.principal(), request)).toEqual({ job: accepted.job, replayed: true });
+    const next = await f.service().submit(f.principal(), submission(request.sourceBytes, "new-tta-default"));
+    expect(next.job.plan.engine.tta).toBe(!tta);
+  });
+
   it("registers original bytes and an independent upright engine PNG before accepting", async () => {
     const f = await fixture();
     const source = await sharp(await sourceImage())

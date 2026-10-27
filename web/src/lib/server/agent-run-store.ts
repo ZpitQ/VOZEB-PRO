@@ -20,6 +20,7 @@ import { ECOMMERCE_GENERATION_SNAPSHOT_VERSION, type EcommerceGenerationSnapshot
 import { toSafeGenerationErrorMessage } from "./generation-errors";
 import { getEnhancementJob } from "./database/image-enhancement-job-repository";
 import type { ImageTask } from "./image-task-store";
+import { enhancementNativeIdentityMatches, imageTaskEnhancementDelivery } from "./image-enhancement-enqueue";
 
 export type AgentRunStatus = "planning" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type AgentRunReviewStatus = "review_pending" | "reviewing" | "review_completed" | "review_unavailable";
@@ -302,29 +303,32 @@ function baselineWithEvidence(asset: CreativeAsset, run: AgentRun, ordinaryScene
     };
 }
 
-async function savedNativeResult(asset: CreativeAsset, run: AgentRun) {
+async function savedNativeResult(asset: CreativeAsset, run: AgentRun, sourceTask?: ImageTask | null) {
     if (!asset.sourceTaskId || !run.assetIds.includes(asset.id)) return null;
-    const task = await getStoredGenerationTask<ImageTask>("image", asset.sourceTaskId);
+    const task = sourceTask === undefined ? await getStoredGenerationTask<ImageTask>("image", asset.sourceTaskId) : sourceTask;
     if (!task || task.id !== asset.sourceTaskId || task.userId !== run.userId || task.conversationId !== run.conversationId || task.runId !== run.id || task.status !== "success") return null;
     const result = (task.result?.results?.length ? task.result.results : task.result ? [task.result] : []).find((candidate) => candidate.resultId === asset.metadata.resultId);
     const source = result?.nativeSource;
-    return result &&
-        source &&
-        result.resultId &&
+    if (!result || !source) return null;
+    const delivery = imageTaskEnhancementDelivery(task, result);
+    if ((task.enhancementDelivery || result.productEnhancementEvidence || asset.metadata.provenance === "protected_baseline") && !delivery) return null;
+    const baseline = delivery?.baseline || source;
+    return result.resultId &&
         result.resultId === asset.metadata.resultId &&
         source.provenance === "provider_native" &&
         /^[a-f0-9]{64}$/.test(source.sha256) &&
         [source.width, source.height, source.byteLength].every((value) => Number.isSafeInteger(value) && value > 0) &&
-        source.url === (result.serverUrl || result.dataUrl) &&
-        source.url === asset.serverUrl &&
-        source.width === result.width &&
-        source.width === asset.width &&
-        source.height === result.height &&
-        source.height === asset.height &&
-        source.byteLength === result.bytes &&
-        source.byteLength === asset.bytes &&
+        enhancementNativeIdentityMatches(task, result, source, delivery) &&
+        baseline.url === (result.serverUrl || result.dataUrl) &&
+        baseline.url === asset.serverUrl &&
+        baseline.width === result.width &&
+        baseline.width === asset.width &&
+        baseline.height === result.height &&
+        baseline.height === asset.height &&
+        baseline.byteLength === result.bytes &&
+        baseline.byteLength === asset.bytes &&
         (!asset.metadata.nativeSource || isDeepStrictEqual(asset.metadata.nativeSource, source))
-        ? result
+        ? { result, delivery, task }
         : null;
 }
 
@@ -356,12 +360,88 @@ async function publishedEnhancementBaseline(asset: CreativeAsset, run: AgentRun)
     const parent = (await getCreativeAssetsByIds([asset.parentAssetId], run.userId)).find((candidate) => candidate.id === asset.parentAssetId);
     if (!parent || parent.userId !== run.userId || parent.conversationId !== run.conversationId || parent.sourceRunId !== run.id || parent.sourceTaskId !== job.imageTaskId || parent.type !== "image" || parent.status !== "ready") return null;
     const original = await savedNativeResult(parent, run);
-    if (!original || original.resultId !== job.resultId || original.enhancementId !== job.id || !isDeepStrictEqual(original.nativeSource, job.decision.source) || asset.metadata.nativeSha256 !== original.nativeSource?.sha256) return null;
-    if (run.ecommerceSnapshot) return validBaselineQuality(run, true) && (await hasEcommerceResultLineage(parent, run)) ? baselineWithEvidence(asset, run) : null;
+    if (
+        !original ||
+        original.result.resultId !== job.resultId ||
+        original.result.enhancementId !== job.id ||
+        !isDeepStrictEqual(original.result.nativeSource, job.decision.source) ||
+        !isDeepStrictEqual(original.delivery, job.decision.delivery) ||
+        asset.metadata.nativeSha256 !== original.result.nativeSource?.sha256
+    )
+        return null;
+    const delivery = original.delivery;
+    if (delivery?.contract.scope === "product_background") {
+        const proof = job.publication!.protection;
+        const contract = delivery.contract;
+        const sourceSize = { width: delivery.baseline.width, height: delivery.baseline.height };
+        const ai = job.publication!.ai;
+        if (
+            !proof ||
+            !isDeepStrictEqual(asset.metadata.protection, proof) ||
+            asset.metadata.deliveryVersion !== contract.version ||
+            asset.metadata.scope !== contract.scope ||
+            proof.version !== contract.protection.version ||
+            proof.version !== "product-enhancement.v2" ||
+            proof.normalization !== contract.protection.normalization ||
+            proof.productAnchorId !== contract.protection.product.productAnchorId ||
+            proof.sourceAssetId !== contract.protection.product.sourceAssetId ||
+            proof.sourceSha256 !== delivery.baseline.sha256 ||
+            proof.maskSha256 !== contract.protection.maskSha256 ||
+            proof.aiSha256 !== ai.sha256 ||
+            proof.compositeSha256 !== delivered.sha256 ||
+            !isDeepStrictEqual(proof.sourceSize, sourceSize) ||
+            !isDeepStrictEqual(proof.aiSize, { width: ai.width, height: ai.height }) ||
+            proof.protectedChangedPixels !== 0 ||
+            ![proof.protectedPixels, proof.allowedPixels].every((value) => Number.isSafeInteger(value) && value > 0) ||
+            proof.protectedPixels + proof.allowedPixels !== sourceSize.width * sourceSize.height ||
+            delivered.format !== "png" ||
+            !isDeepStrictEqual({ width: delivered.width, height: delivered.height }, sourceSize)
+        )
+            return null;
+    }
+    if (delivery?.contract.scope === "local_edit") {
+        const proof = job.publication!.protection;
+        const contract = delivery.contract;
+        const scene = contract.protection.scene;
+        const sourceSize = { width: delivery.baseline.width, height: delivery.baseline.height };
+        const ai = job.publication!.ai;
+        if (
+            !proof ||
+            proof.version !== "scene-enhancement.v1" ||
+            proof.normalization !== contract.protection.normalization ||
+            !isDeepStrictEqual(asset.metadata.protection, proof) ||
+            asset.metadata.deliveryVersion !== contract.version ||
+            asset.metadata.scope !== contract.scope ||
+            proof.sourceAssetId !== scene.sourceAssetId ||
+            proof.sourceSha256 !== delivery.baseline.sha256 ||
+            proof.maskSha256 !== scene.maskDigest ||
+            proof.aiSha256 !== ai.sha256 ||
+            proof.compositeSha256 !== delivered.sha256 ||
+            !/^[a-f0-9]{64}$/.test(ai.sha256) ||
+            !isDeepStrictEqual(proof.sourceSize, sourceSize) ||
+            !isDeepStrictEqual(proof.aiSize, { width: ai.width, height: ai.height }) ||
+            !isDeepStrictEqual(proof.mapping, { context: { x: 0, y: 0, ...sourceSize }, targetRegion: scene.targetRegion }) ||
+            proof.protectedChangedPixels !== 0 ||
+            ![proof.protectedPixels, proof.allowedPixels].every((value) => Number.isSafeInteger(value) && value > 0) ||
+            proof.allowedPixels !== scene.targetRegion.width * scene.targetRegion.height ||
+            proof.protectedPixels + proof.allowedPixels !== sourceSize.width * sourceSize.height ||
+            delivered.format !== "png" ||
+            ai.format !== "png" ||
+            !isDeepStrictEqual({ width: delivered.width, height: delivered.height }, sourceSize) ||
+            !isDeepStrictEqual(job.decision.target, sourceSize) ||
+            ai.width !== sourceSize.width * job.decision.connection.model.nativeScale ||
+            ai.height !== sourceSize.height * job.decision.connection.model.nativeScale
+        )
+            return null;
+    }
+    if (run.ecommerceSnapshot) return validBaselineQuality(run, true) && (await hasEcommerceResultLineage(parent, run, original.task)) ? baselineWithEvidence(asset, run) : null;
     return baselineWithEvidence(asset, run, parent.id);
 }
 
-async function hasEcommerceResultLineage(asset: CreativeAsset, run: AgentRun): Promise<boolean> {
+async function hasEcommerceResultLineage(asset: CreativeAsset, run: AgentRun, sourceTask?: ImageTask | null): Promise<boolean> {
+    const task = sourceTask === undefined && asset.sourceTaskId ? await getStoredGenerationTask<ImageTask>("image", asset.sourceTaskId) : sourceTask;
+    const result = (task?.result?.results?.length ? task.result.results : task?.result ? [task.result] : []).find((candidate) => candidate.resultId === asset.metadata.resultId);
+    if ((task?.enhancementDelivery || result?.productEnhancementEvidence || asset.metadata.provenance === "protected_baseline") && !(await savedNativeResult(asset, run, task || null))) return false;
     const continuity = record(asset.metadata.ecommerceContinuity);
     const recordedAnchorId = typeof continuity.productAnchorId === "string" ? continuity.productAnchorId : undefined;
     const previousAnchorId = run.ecommerceSnapshot?.plan?.source.productAnchorId;

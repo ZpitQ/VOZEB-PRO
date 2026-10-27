@@ -8,6 +8,7 @@ import { listEnhancementJobsForTask } from "./database/image-enhancement-job-rep
 import { createStoredGenerationTask } from "./generation-task-store";
 import { getImageTask, transitionImageTask, type ImageTask } from "./image-task-store";
 import type { FrozenImageEnhancementPolicy } from "./image-enhancement-config";
+import { planImageTaskEnhancement } from "./image-enhancement-enqueue";
 
 const userId = "enhancement-enqueue-fixture-owner";
 const pg = process.env.VOZEB_PRO_RUN_POSTGRES_INTEGRATION === "1" && process.env.VOZEB_PRO_ECOMMERCE_ISOLATED_DATABASE === "1";
@@ -52,6 +53,108 @@ function nativeTask(): ImageTask {
         result: { ...media, results: [media] },
     };
 }
+describe("ecommerce v2 enhancement admission", () => {
+    function canvasTask() {
+        const task = nativeTask();
+        const canvas = { mode: "ratio" as const, size: { width: 1, height: 1 }, source: "baseline" as const, allowReframe: true };
+        task.ecommerceExecution = {
+            state: "ready",
+            compilerVersion: "ecommerce-nano-banana-2.v1",
+            providerProfileId: "nano-banana-2",
+            prompt: "fixture",
+            parameters: { variant: "nano-banana-2" },
+            modelSnapshot: { logicalRole: "image_generation", capability: "image", logicalModelId: "image", channelId: "fixture", upstreamModel: "nano-banana-2", apiFormat: "openai" },
+            canvas,
+            protection: { scope: "global", protectedObjectIds: [], preserveOutsideMask: false, allowLightingChange: true },
+            referenceRoles: [{ assetId: "scene", role: "scene" }],
+        };
+        task.enhancementDelivery = { version: "ecommerce-delivery.v2", scope: "full_image", canvas: structuredClone(canvas) };
+        task.result!.canvasEvidence = { constraint: structuredClone(canvas), nativeSize: { width: 1254, height: 1254 }, storedSize: { width: 1254, height: 1254 }, nativeUrl: task.result!.nativeSource!.url, normalization: "none" };
+        return task;
+    }
+    function productTask() {
+        const task = canvasTask();
+        const raw = task.result!.nativeSource!;
+        const product = {
+            compilerVersion: "strict-product.v1" as const,
+            state: "ready" as const,
+            productAnchorId: "root",
+            sourceAssetId: "product",
+            sourceSize: { width: raw.width, height: raw.height },
+            productCore: [{ x: 0, y: 0, width: 1, height: 1 }],
+            fusionHalo: [],
+            editableBackground: [],
+        };
+        task.kind = "edit";
+        task.productProtection = product;
+        task.mask = { id: "mask", type: "image/png", name: "mask.png", dataUrl: "data:image/png;base64,AA==" };
+        task.enhancementDelivery = {
+            version: "ecommerce-delivery.v2",
+            scope: "product_background",
+            canvas: structuredClone(task.ecommerceExecution!.canvas!),
+            protection: { version: "product-enhancement.v2", normalization: "srgb-upright-v1", product: structuredClone(product), maskDataUrl: task.mask.dataUrl, maskSha256: "d".repeat(64) },
+            baseline: { url: "/api/reference-assets/product.png", sha256: "c".repeat(64), byteLength: 1200, width: raw.width, height: raw.height, normalizedSha256: "e".repeat(64) },
+        };
+        task.result!.serverUrl = task.result!.dataUrl = "/api/generation-log-assets/product-base.png";
+        task.result!.productEnhancementEvidence = {
+            version: "product-baseline.v2",
+            nativeUrl: raw.url,
+            nativeSha256: raw.sha256,
+            baselineUrl: task.result!.serverUrl,
+            baselineSha256: "b".repeat(64),
+            composition: {
+                version: "product-enhancement.v2",
+                normalization: "srgb-upright-v1",
+                productAnchorId: "root",
+                sourceAssetId: "product",
+                sourceSha256: "c".repeat(64),
+                maskSha256: "d".repeat(64),
+                aiSha256: raw.sha256,
+                compositeSha256: "b".repeat(64),
+                sourceSize: { width: raw.width, height: raw.height },
+                aiSize: { width: raw.width, height: raw.height },
+                allowedPixels: 10,
+                protectedPixels: raw.width * raw.height - 10,
+                protectedChangedPixels: 0,
+            },
+        };
+        return task;
+    }
+    it("queues an explicitly unprotected new canvas without losing the native canvas constraint", () => {
+        const task = canvasTask();
+        expect(planImageTaskEnhancement(task, task.result!)).toMatchObject({ status: "queued", delivery: { contract: task.enhancementDelivery, baseline: { url: task.result!.serverUrl } } });
+    });
+    it("binds raw native, protected original and product anchor before background work", () => {
+        const task = productTask();
+        expect(planImageTaskEnhancement(task, task.result!)).toMatchObject({
+            status: "queued",
+            target: { width: 1254, height: 1254 },
+            source: task.result!.nativeSource,
+            delivery: { contract: task.enhancementDelivery, baseline: { url: task.result!.serverUrl, sha256: "b".repeat(64) } },
+        });
+    });
+    it.each(["old", "protected_object", "wrong_canvas", "native_failure", "local"])("keeps %s out of new full-canvas enhancement", (variant) => {
+        const task = canvasTask();
+        if (variant === "old") task.enhancementDelivery = undefined;
+        if (variant === "protected_object") task.ecommerceExecution!.protection!.protectedObjectIds = ["product"];
+        if (variant === "wrong_canvas") task.ecommerceExecution!.canvas!.size.width = 2;
+        if (variant === "native_failure") {
+            task.ecommerceExecution!.canvas!.mode = "exact";
+            task.ecommerceExecution!.canvas!.size = { width: 4096, height: 4096 };
+            task.enhancementDelivery = { version: "ecommerce-delivery.v2", scope: "full_image", canvas: structuredClone(task.ecommerceExecution!.canvas!) };
+        }
+        if (variant === "local") task.sceneProtection = {} as ImageTask["sceneProtection"];
+        expect(planImageTaskEnhancement(task, task.result!).status).not.toBe("queued");
+    });
+    it.each(["native_digest", "base_digest", "mask", "root"])("rejects a changed %s protected binding", (variant) => {
+        const task = productTask();
+        if (variant === "native_digest") task.result!.productEnhancementEvidence!.nativeSha256 = "f".repeat(64);
+        if (variant === "base_digest") task.result!.productEnhancementEvidence!.baselineSha256 = "f".repeat(64);
+        if (variant === "mask") task.result!.productEnhancementEvidence!.composition.maskSha256 = "f".repeat(64);
+        if (variant === "root") task.result!.productEnhancementEvidence!.composition.productAnchorId = "wrong";
+        expect(planImageTaskEnhancement(task, task.result!).status).not.toBe("queued");
+    });
+});
 for (const provider of ["file", "postgres"] as const) {
     describe.skipIf(provider === "postgres" && !pg)(`${provider} image completion enhancement outbox`, () => {
         let directory: string;

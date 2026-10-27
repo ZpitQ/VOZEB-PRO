@@ -498,6 +498,26 @@ windowsSuite("ordinary Windows installation binding", () => {
   );
 
   it(
+    "TTA appends exactly one native -x only for the frozen enabled engine",
+    async () => {
+      const { values } = await runFixture("TTA");
+      const cases = objects(values.cases);
+      expect(cases.map((entry) => entry.tta)).toEqual([false, true]);
+      for (const entry of cases) {
+        expect(entry).toMatchObject({
+          outcome: { opened: true, diagnostic: null },
+          snapshotFrozen: true,
+          argumentsReadOnly: true,
+          bytesAndTimesUnchanged: true,
+        });
+        expect(entry.arguments).toEqual(entry.expectedArguments);
+        expect((entry.arguments as string[]).filter((value) => value === "-x")).toHaveLength(entry.tta ? 1 : 0);
+      }
+    },
+    testMs,
+  );
+
+  it(
     "T2 rejects manifest parsing, external digest, duplicate fields and noncanonical declarations",
     async () => {
       const { values } = await runFixture("T2");
@@ -547,7 +567,6 @@ windowsSuite("ordinary Windows installation binding", () => {
         "model-digest",
         "model-id",
         "native-scale",
-        "tta",
         "tile-small",
         "tile-unsafe",
         "gpu-negative",
@@ -763,7 +782,6 @@ windowsSuite("ordinary Windows installation binding", () => {
         "binary-hash-invalid",
         "model-hash-invalid",
         "scale-invalid",
-        "tta-invalid",
         "tile-negative",
         "tile-invalid",
         "tile-unsafe",

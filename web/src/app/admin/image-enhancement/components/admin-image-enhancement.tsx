@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Alert, App, Button, Card, Form, Input, InputNumber, Select, Space, Switch, Tag, Typography } from "antd";
 import type { ImageEnhancementSettings, ImageEnhancementUpdate } from "@/lib/image-enhancement-contract";
-import { DEFAULT_ENHANCEMENT_TIMEOUT_MS, ENHANCEMENT_REASONS } from "@/lib/image-enhancement-contract";
+import { DEFAULT_ENHANCEMENT_TIMEOUT_MS, ENHANCEMENT_REASONS, supportsEnhancementTta } from "@/lib/image-enhancement-contract";
 import { checkImageEnhancementSettings, getImageEnhancementSettings, saveImageEnhancementSettings } from "@/services/api/image-enhancement";
 
 export function AdminImageEnhancement() {
@@ -12,6 +12,8 @@ export function AdminImageEnhancement() {
     const trust = Form.useWatch("trust", form);
     const endpoint = Form.useWatch("endpoint", form);
     const token = Form.useWatch("token", form);
+    const modelId = Form.useWatch("modelId", form);
+    const tta = Form.useWatch("tta", form);
     const [settings, setSettings] = useState<ImageEnhancementSettings | null>(null);
     const [busy, setBusy] = useState(true);
     const [dirty, setDirty] = useState(false);
@@ -23,7 +25,7 @@ export function AdminImageEnhancement() {
             .then((data) => {
                 if (!active) return;
                 setSettings(data);
-                form.setFieldsValue({ endpoint: data.endpoint, trust: data.trust, timeoutMs: data.timeoutMs ?? DEFAULT_ENHANCEMENT_TIMEOUT_MS, modelId: data.modelId });
+                form.setFieldsValue({ endpoint: data.endpoint, trust: data.trust, timeoutMs: data.timeoutMs ?? DEFAULT_ENHANCEMENT_TIMEOUT_MS, modelId: data.modelId, tta: data.tta });
             })
             .catch((failure) => {
                 if (active) setError(failure instanceof Error ? failure.message : "配置读取失败");
@@ -44,7 +46,7 @@ export function AdminImageEnhancement() {
         try {
             const data = await operation();
             setSettings(data);
-            form.setFieldsValue({ endpoint: data.endpoint, trust: data.trust, timeoutMs: data.timeoutMs ?? DEFAULT_ENHANCEMENT_TIMEOUT_MS, modelId: data.modelId, token: "", caPem: "" });
+            form.setFieldsValue({ endpoint: data.endpoint, trust: data.trust, timeoutMs: data.timeoutMs ?? DEFAULT_ENHANCEMENT_TIMEOUT_MS, modelId: data.modelId, tta: data.tta, token: "", caPem: "" });
             setDirty(false);
         } catch (failure) {
             if (!(failure && typeof failure === "object" && "errorFields" in failure)) {
@@ -63,6 +65,8 @@ export function AdminImageEnhancement() {
         return data;
     }
     const check = settings?.check;
+    const selectedModel = settings?.models.find((model) => model.id === modelId);
+    const ttaSupported = supportsEnhancementTta(selectedModel, true);
     return (
         <Card>
             <div className="mb-6 flex items-start justify-between gap-6">
@@ -136,6 +140,14 @@ export function AdminImageEnhancement() {
                         />
                     </Form.Item>
                 </div>
+                <Form.Item
+                    name="tta"
+                    label="精细增强（TTA）"
+                    valuePropName="checked"
+                    extra={ttaSupported ? "可改善部分细节，处理更慢；效果需同图对比确认。仅影响后续任务。" : selectedModel ? ENHANCEMENT_REASONS.tta_unavailable : "检查连接并选择支持 TTA 的增强模型后可开启。"}
+                >
+                    <Switch aria-label="精细增强（TTA）" disabled={busy || (!ttaSupported && !tta)} />
+                </Form.Item>
                 {trust === "custom_ca" ? (
                     <Form.Item name="caPem" label="CA 证书（PEM）" extra={settings?.hasCa ? "证书已配置；留空保留原值。" : "仅填写 CA 公共证书，不填写私钥。"}>
                         <Input.TextArea autoComplete="off" rows={4} />
@@ -164,7 +176,7 @@ export function AdminImageEnhancement() {
                     >
                         {check?.reason === "sample_pending" ? "刷新自检状态" : "样图自检"}
                     </Button>
-                    <Typography.Text type="secondary">检查连接会先保存修改并获取模型列表；样图自检验证 GPU 服务。</Typography.Text>
+                    <Typography.Text type="secondary">检查连接会先保存修改并获取模型列表；样图自检验证 GPU 服务，TTA 画质需单独对比。</Typography.Text>
                 </Space>
             </Form>
             <div className="mt-6 border-t border-[var(--border)] pt-5">

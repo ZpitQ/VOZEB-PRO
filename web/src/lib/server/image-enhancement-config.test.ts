@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getImageEnhancementSettings, saveImageEnhancementSettings, checkImageEnhancementSettings, freezeImageEnhancementConnection, resolveImageEnhancementConnection, captureImageEnhancementPolicy } from "./image-enhancement-config";
 import { createImageTask, getImageTask } from "./image-task-store";
+import { mutateImageEnhancementSettings } from "./database/image-enhancement-repository";
 
 const token = "fixture-enhancement-access";
 let directory: string;
@@ -20,7 +21,7 @@ let capabilityReadiness: boolean[];
 let image: Buffer;
 let gate: Promise<void> | undefined;
 let release: (() => void) | undefined;
-let availableModels: Array<typeof model>;
+let availableModels: Array<typeof model & { ttaModes?: unknown }>;
 const serviceId = "31313131-3131-4131-8131-313131313131";
 const jobId = "42424242-4242-4242-8242-424242424242";
 const model = { id: "fixture-model", binaryVersion: "v1", binarySha256: "a".repeat(64), modelVersion: "v1", modelSha256: "b".repeat(64), nativeScale: 4, allowedTiles: [0], defaultTile: 0, tta: false, gpuId: 0 };
@@ -80,7 +81,7 @@ beforeEach(async () => {
                 serviceId: mode === "identity" ? jobId : serviceId,
                 protocolVersion: "image-enhancement.v1",
                 normalizationProfile: "srgb-upright-v1",
-                models: mode === "no-model" ? [] : availableModels.map((entry) => ({ ...entry, nativeScale: mode === "scale" ? 2 : 4 })),
+                models: mode === "no-model" ? [] : availableModels.map((entry) => ({ ...entry, nativeScale: mode === "scale" ? 2 : 4, tta: mode === "tta-default" ? true : entry.tta })),
                 budgets: { input: { maxBytes: 1_000_000, maxPixels: 1_000_000 }, ai: { maxBytes: 1_000_000, maxPixels: 1_000_000 }, delivery: { maxBytes: 1_000_000, maxPixels: 1_000_000 } },
                 ready: capabilityReadiness.shift() ?? mode !== "gpu",
                 reason: mode === "gpu" ? "runner_unavailable" : null,
@@ -134,6 +135,101 @@ afterEach(async () => {
 });
 
 describe("image enhancement administrator configuration", () => {
+    it("defaults TTA to off without contacting the Worker", async () => {
+        expect(await getImageEnhancementSettings()).toMatchObject({ tta: false });
+        expect(requests).toEqual([]);
+    });
+    it("reads an existing settings value without TTA as ordinary mode without a migration", async () => {
+        await qualified();
+        await mutateImageEnhancementSettings((settings) => {
+            Reflect.deleteProperty(settings, "tta");
+        });
+        expect(await getImageEnhancementSettings()).toMatchObject({ tta: false, ready: true });
+        expect((await captureImageEnhancementPolicy()).connection?.model.tta).toBe(false);
+    });
+    it("uses the fixed ordinary GPU calibration even when a Worker model defaults to TTA", async () => {
+        mode = "tta-default";
+        availableModels = [{ ...model, ttaModes: [false, true] }];
+        expect(await qualified()).toMatchObject({ tta: false, ready: true });
+        expect((await freezeImageEnhancementConnection())?.model.tta).toBe(false);
+        expect(requests.every((entry) => entry.startsWith("GET"))).toBe(true);
+    });
+    it("persists TTA immediately and freezes its actual choice independently of later model defaults", async () => {
+        availableModels = [{ ...model, ttaModes: [false, true] }];
+        await qualified();
+        const before = await getImageEnhancementSettings();
+        const enabled = await save({ tta: true });
+        expect(enabled).toMatchObject({ tta: true, enabled: true, ready: false, check: null });
+        expect(enabled.revision).not.toBe(before.revision);
+        expect(await getImageEnhancementSettings()).toEqual(enabled);
+        expect(await captureImageEnhancementPolicy()).toMatchObject({ enabled: true, connection: null });
+        await check("sample");
+        const frozen = await freezeImageEnhancementConnection();
+        expect(frozen?.model).toMatchObject({ id: model.id, tta: true, ttaModes: [false, true] });
+        const serialized = JSON.stringify(frozen);
+        const disabled = await save({ tta: false });
+        expect(disabled).toMatchObject({ tta: false, ready: false, check: null });
+        expect(await getImageEnhancementSettings()).toEqual(disabled);
+        await check("sample");
+        expect((await freezeImageEnhancementConnection())?.model.tta).toBe(false);
+        expect(JSON.stringify(frozen)).toBe(serialized);
+        expect(await resolveImageEnhancementConnection(frozen!)).toMatchObject({ endpoint, token, timeoutMs: 10_000 });
+        expect(requests.every((entry) => entry.startsWith("GET"))).toBe(true);
+        expect(requests.some((entry) => entry.includes("/v1/enhancement-jobs") && entry.startsWith("POST"))).toBe(false);
+    });
+    it.each(["true", 1, null, [], {}].map((value) => [value]))("rejects nonboolean TTA without persisting: %j", async (tta) => {
+        await configured();
+        const before = await getImageEnhancementSettings();
+        await expect(save({ tta })).rejects.toMatchObject({ code: "invalid_configuration", status: 400 });
+        expect(await getImageEnhancementSettings()).toEqual(before);
+    });
+    it("rejects unsupported TTA with an upgrade explanation and leaves persistence unchanged", async () => {
+        await qualified();
+        const before = await getImageEnhancementSettings();
+        const failure = await save({ tta: true }).catch((error: Error) => error);
+        expect(failure).toMatchObject({ code: "tta_unavailable", status: 400 });
+        expect(String(failure)).toContain("升级 Worker");
+        expect(await getImageEnhancementSettings()).toEqual(before);
+    });
+    it("keeps TTA independent of model selection and rejects an unsupported replacement", async () => {
+        availableModels = [
+            { ...model, ttaModes: [false, true] },
+            { ...model, id: "fixture-ordinary" },
+        ];
+        await configured();
+        await save({ tta: true });
+        const before = await getImageEnhancementSettings();
+        await expect(save({ modelId: "fixture-ordinary" })).rejects.toMatchObject({ code: "tta_unavailable" });
+        expect(await getImageEnhancementSettings()).toEqual(before);
+        expect(await save({ modelId: "fixture-ordinary", tta: false })).toMatchObject({ modelId: "fixture-ordinary", tta: false });
+    });
+    it("allows new connection discovery after TTA selection clears the previous capability list", async () => {
+        availableModels = [{ ...model, ttaModes: [false, true] }];
+        await qualified();
+        await save({ tta: true });
+        const changed = await save({ endpoint: endpoint + "/replacement" });
+        expect(changed).toMatchObject({ tta: true, models: [], ready: false, check: null });
+        expect(await save({ token: "replacement-fixture-token" })).toMatchObject({ tta: true, models: [], ready: false });
+        expect(await save({ endpoint, token })).toMatchObject({ tta: true, models: [], ready: false });
+        await check();
+        expect(await check("sample")).toMatchObject({ tta: true, ready: true });
+    });
+    it("remains unavailable when a selected TTA capability disappears", async () => {
+        availableModels = [{ ...model, ttaModes: [false, true] }];
+        await qualified();
+        await save({ tta: true });
+        await check("sample");
+        availableModels = [model];
+        expect(await check("sample")).toMatchObject({ tta: true, ready: false, check: { reason: "tta_unavailable" } });
+        expect((await captureImageEnhancementPolicy()).connection).toBeNull();
+        expect(await save({ enabled: false })).toMatchObject({ enabled: false, tta: true, ready: false });
+        expect(await save({ tta: false })).toMatchObject({ tta: false, ready: false });
+    });
+    it.each([[], [false, false], [true], [false, "true"], null].map((value) => [value]))("rejects malformed TTA capabilities: %j", async (ttaModes) => {
+        availableModels = [{ ...model, ttaModes }];
+        await save({ endpoint, token });
+        expect(await check()).toMatchObject({ ready: false, check: { reason: "invalid_response" } });
+    });
     it("discovers models using only an address and token with the standard request deadline", async () => {
         const saved = await save({ endpoint, token });
         expect(saved.timeoutMs).toBe(30_000);
