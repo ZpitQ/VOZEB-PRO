@@ -96,7 +96,8 @@ async function immutableImage(request: APIRequestContext, asset: CreativeAsset) 
     const response = await request.get(asset.serverUrl!);
     expect(response.ok()).toBe(true);
     const facts = await decoded(await response.body());
-    expect(facts).toMatchObject({ width: asset.width, height: asset.height, byteLength: asset.bytes, format: "png", opaque: true });
+    expect(facts).toMatchObject({ width: asset.width, height: asset.height, byteLength: asset.bytes, format: asset.mimeType === "image/jpeg" ? "jpeg" : "png", opaque: true });
+    expect(response.headers()["content-type"]).toContain(asset.mimeType);
     return { asset, immutableUrl: asset.serverUrl!, ...facts };
 }
 async function freezeScene(request: APIRequestContext, root: string, id: string) {
@@ -253,7 +254,7 @@ async function createOrdinaryA(page: Page, request: APIRequestContext, fixture: 
     return { run, source, id, pending, nativeRun: await persistedRun(ownedDataDirectory(), run.id), nativeMedia: await mediaSnapshot(ownedDataDirectory(), pending.imageTaskId) };
 }
 
-async function confirmScene(page: Page, request: APIRequestContext, root: string, run: CreativeAgentRun, source: FrozenImage, info: TestInfo, label: string) {
+async function confirmScene(page: Page, request: APIRequestContext, root: string, run: CreativeAgentRun, source: FrozenImage, info: TestInfo, label: string, area = { left: 0.35, top: 0.15, right: 0.55, bottom: 0.35 }) {
     const waiting = await persistedRun(root, run.id);
     await evidence(info, `${label}-actual-planning-before-selection`, { publicRun: run, persistedRun: waiting, source });
     expect(run.status).toBe("paused");
@@ -281,8 +282,8 @@ async function confirmScene(page: Page, request: APIRequestContext, root: string
     await image.hover();
     const bounds = await image.boundingBox();
     expect(bounds).not.toBeNull();
-    const start = { x: Math.round(bounds!.x + bounds!.width * 0.35), y: Math.round(bounds!.y + bounds!.height * 0.15) };
-    const end = { x: Math.round(bounds!.x + bounds!.width * 0.55), y: Math.round(bounds!.y + bounds!.height * 0.35) };
+    const start = { x: Math.round(bounds!.x + bounds!.width * area.left), y: Math.round(bounds!.y + bounds!.height * area.top) };
+    const end = { x: Math.round(bounds!.x + bounds!.width * area.right), y: Math.round(bounds!.y + bounds!.height * area.bottom) };
     const startPixel = { x: Math.round(((start.x - bounds!.x) / bounds!.width) * source.width), y: Math.round(((start.y - bounds!.y) / bounds!.height) * source.height) };
     const endPixel = { x: Math.round(((end.x - bounds!.x) / bounds!.width) * source.width), y: Math.round(((end.y - bounds!.y) / bounds!.height) * source.height) };
     const intended = { x: startPixel.x, y: startPixel.y, width: endPixel.x - startPixel.x, height: endPixel.y - startPixel.y };
@@ -324,7 +325,7 @@ async function confirmScene(page: Page, request: APIRequestContext, root: string
     await evidence(info, `${label}-actual-selection-response`, { status: response.status(), result: resumeResult, selection, pointer: { bounds, start, end, intended, frames, pointerRegion } });
     expect(response.ok(), JSON.stringify(resumeResult)).toBe(true);
     expect(selection.baselineAssetId).toBe(source.asset.id);
-    expect(selection.region).toEqual(intended);
+    // Modal animation can change the pre-drag box; trusted event bounds determine actual pixels.
     expect(selection.region).toEqual(pointerRegion);
     expect(resumeResult.data.run.id).toBe(run.id);
     expect((await waitRun(request, run.id, info)).status).toBe("completed");
@@ -394,6 +395,20 @@ async function assertScene(request: APIRequestContext, scene: Awaited<ReturnType
     expect(scene.output).toMatchObject({ width: source.width, height: source.height });
     const result = scene.persistedResults[0].result!.results![0];
     const sourceSize = { width: source.width, height: source.height };
+    const nativeResponse = await request.get(result.canvasEvidence!.nativeUrl!);
+    expect(nativeResponse.ok()).toBe(true);
+    const nativeBytes = await nativeResponse.body();
+    const native = await decoded(nativeBytes);
+    expect(native).toMatchObject(sourceSize);
+    const sourceResponse = await request.get(source.immutableUrl);
+    expect(sourceResponse.ok()).toBe(true);
+    const sourceBytes = await sourceResponse.body();
+    expect(sha256(sourceBytes)).toBe(source.sha256);
+    // The controlled upstream emits PNG even when its source reference is JPG.
+    const actualPixels = await sharp(nativeBytes).rotate().toColourspace("srgb").ensureAlpha().raw().toBuffer();
+    const referencePixels = await sharp(sourceBytes).rotate().toColourspace("srgb").ensureAlpha().raw().toBuffer();
+    expect(actualPixels.equals(referencePixels)).toBe(true);
+    if (source.format === "png") expect(native.sha256).toBe(source.sha256);
     expect(result).toMatchObject({
         serverUrl: scene.output.immutableUrl,
         canvasEvidence: { nativeSize: sourceSize, storedSize: sourceSize, nativeUrl: expect.stringMatching(/^\/api\/generation-log-assets\/permanent\//), normalization: "none" },
@@ -402,7 +417,7 @@ async function assertScene(request: APIRequestContext, scene: Awaited<ReturnType
             sourceDigest: source.sha256,
             sourceSize,
             nativeSize: sourceSize,
-            nativeDigest: source.sha256,
+            nativeDigest: native.sha256,
             compositeDigest: scene.output.sha256,
             compositeUrl: scene.output.immutableUrl,
             compositeOutsideChangedPixels: 0,
@@ -411,10 +426,6 @@ async function assertScene(request: APIRequestContext, scene: Awaited<ReturnType
     });
     expect(result.canvasEvidence!.nativeUrl).toBe(result.sceneProtectionEvidence!.nativeUrl);
     expect(result.canvasEvidence!.nativeUrl).not.toBe(scene.output.immutableUrl);
-    const nativeResponse = await request.get(result.canvasEvidence!.nativeUrl!);
-    expect(nativeResponse.ok()).toBe(true);
-    const native = await decoded(await nativeResponse.body());
-    expect(native).toMatchObject({ ...sourceSize, sha256: source.sha256 });
     const task = run.tasks[0];
     expect(task).toMatchObject({
         status: "completed",
@@ -485,7 +496,7 @@ async function sourceHashes() {
 test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selected B and explicit enhanced C starts its own native branch", async ({ page, request }, info) => {
     await page.setViewportSize({ width: 1672, height: 941 });
     const root = ownedDataDirectory();
-    const fixture = await createBusinessFaultFixture({ root, caseId: `f13-${randomUUID()}`, imagePath: process.env.VOZEB_PRO_M5_BUSINESS_NATIVE_SOURCE!, sceneOutputs: true });
+    const fixture = await createBusinessFaultFixture({ root, caseId: `f13-${randomUUID()}`, imagePath: process.env.VOZEB_PRO_M5_BUSINESS_NATIVE_SOURCE!, sceneOutputs: true, native4xDelivery: true });
     const browserWorkerRequests: string[] = [];
     page.context().on("request", (entry) => {
         if (new URL(entry.url()).origin === fixture.endpoint) browserWorkerRequests.push(entry.url());
@@ -608,7 +619,12 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
                 expect(publishing).toMatchObject({
                     status: "succeeded",
                     phase: "receipt",
-                    publication: { publishedAt: expect.any(Number), assetId: expect.any(String), ai: { width: 5016, height: 5016, sha256: fixture.expected.sha256 }, delivered: { width: 4096, height: 4096 } },
+                    publication: {
+                        publishedAt: expect.any(Number),
+                        assetId: expect.any(String),
+                        ai: { width: 5016, height: 5016, format: "png", sha256: fixture.expected.sha256 },
+                        delivered: { width: 4096, height: 4096, format: "jpeg", url: expect.stringMatching(/\.jpg$/) },
+                    },
                 });
                 expect(children).toHaveLength(1);
                 const media = await mediaSnapshot(root, a.id);
@@ -724,7 +740,12 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
         });
 
         phase = "C actual explicit enhanced reference and new native scene branch";
-        await fixture.setSceneOutput("c-native", fixture.delivery, { width: 4096, height: 4096 });
+        const enhancedResponse = await request.get(enhanced.immutableUrl);
+        expect(enhancedResponse.ok()).toBe(true);
+        const enhancedBytes = await enhancedResponse.body();
+        expect(sha256(enhancedBytes)).toBe(enhanced.sha256);
+        const cNative = await sharp(enhancedBytes).rotate().toColourspace("srgb").ensureAlpha().png().toBuffer();
+        await fixture.setSceneOutput("c-native", cNative, { width: 4096, height: 4096 });
         const beforeC = fixture.counts();
         const cRun = await submitPrompt(page, "修改图片1，场景只加花瓶，局部修改柜面；保持原图尺寸，选区外保持原样 F13-C 明确引用AI增强件");
         expect(cRun.conversationId).toBe(a.run.conversationId);
@@ -830,5 +851,394 @@ test("SR-M5-07/F13 actual frozen scene chain: late A enhancement preserves selec
         throw new AggregateError(
             cleanupErrors.map((item) => new Error(`${item.action}: ${item.message}`)),
             "F13 cleanup failed after assertions",
+        );
+});
+
+test("SR-M8 actual protected local scene chain: confirmed baseline enters Worker HTTP and enhanced reference starts a fresh selection", async ({ page, request }, info) => {
+    test.skip(process.env.VOZEB_PRO_M8_SCENE_BUSINESS !== "1", "Requires the freshly owned M8 application and controlled HTTP fixtures.");
+    await page.setViewportSize({ width: 1672, height: 941 });
+    const root = ownedDataDirectory();
+    const fixture = await createBusinessFaultFixture({ root, caseId: `m8-${randomUUID()}`, imagePath: process.env.VOZEB_PRO_M5_BUSINESS_NATIVE_SOURCE!, sceneOutputs: true, native4xDelivery: true, protectedBaselineInput: true });
+    const size = { width: 1254, height: 1254 };
+    const browserWorkerRequests: string[] = [];
+    page.context().on("request", (entry) => {
+        if (new URL(entry.url()).origin === fixture.endpoint) browserWorkerRequests.push(entry.url());
+    });
+    const stages: Array<{ stage: string; at: number; counts: Counts; facts: unknown }> = [];
+    let phase = "setup";
+    let failure: { phase: string; message: string } | undefined;
+    let primaryError: unknown;
+    const cleanupErrors: Array<{ action: string; message: string }> = [];
+    const record = async (stage: string, facts: unknown) => {
+        stages.push({ stage, at: Date.now(), counts: fixture.counts(), facts });
+        await evidence(info, "m8-stage-timeline", { kind: "actual /create Agent, user selection/resume, image-task guard, persistence and Worker HTTP; controlled synthetic pixels, not GPU or home-photo quality acceptance", stages });
+    };
+    const image = async (url: string) => {
+        const response = await request.get(url);
+        expect(response.ok(), url).toBe(true);
+        const bytes = await response.body();
+        const pixels = await sharp(bytes, { failOn: "warning" }).toColourspace("srgb").ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+        return { bytes, pixels, ...(await decoded(bytes)) };
+    };
+    const storedImageTask = async (id: string) => {
+        const rows = JSON.parse(await readFile(path.join(root, "generation-tasks.json"), "utf8")) as Array<{ type: string; id: string; payload: ImageTask }>;
+        const task = rows.find((row) => row.type === "image" && row.id === id)?.payload;
+        expect(task).toBeDefined();
+        return task!;
+    };
+    const selectedUpstreamSha256 = async () => {
+        const call = fixture
+            .upstreamRequests()
+            .filter((entry: { method: string; path: string }) => entry.method === "POST" && entry.path.endsWith("/images/edits"))
+            .at(-1);
+        expect(call, "A real provider image-edit HTTP request must carry the selected source").toBeDefined();
+        const form = await new Response(call.body, { headers: { "content-type": call.contentType } }).formData();
+        const file = form.get("image") || form.get("image[]");
+        expect(file instanceof File).toBe(true);
+        return sha256(Buffer.from(await (file as File).arrayBuffer()));
+    };
+    try {
+        const initialSources = await sourceHashes();
+        await qualify(request, fixture);
+        await configureGeneration(request, fixture, false);
+        phase = "A seed and explicit enhancement cancellation";
+        const a = await createOrdinaryA(page, request, fixture, info);
+        const cancel = await request.post(`/api/image-enhancements/${encodeURIComponent(a.id)}`, { data: { action: "cancel" } });
+        expect(cancel.ok(), await cancel.text()).toBe(true);
+        const cancelled = await waitEnhancement(request, a.id, (job) => job.status === "cancelled" || job.status === "failed", info);
+        expect(cancelled.status).toBe("cancelled");
+        const seedWorker = await fixture.snapshot();
+        expect(seedWorker.jobs).toHaveLength(1);
+        expect(seedWorker.jobs[0]).toMatchObject({ status: "cancelled", input: { sha256: a.source.sha256 } });
+        expect(seedWorker.cancelRequests).toHaveLength(1);
+        expect(seedWorker.acceptedReceipts).toEqual([]);
+        await record("A real native seed retained; unrelated enhancement explicitly cancelled", { source: a.source, public: cancelled, owned: await readOwnedJob(root, a.id), worker: seedWorker, preload: await readPreloadRecords(root), initialSources });
+
+        phase = "B explicit original reference, current 4K preference and real scene planning";
+        await configureGeneration(request, fixture, true);
+        const nativeB = await sharp({ create: { ...size, channels: 3, background: "#b14f35" } })
+            .png()
+            .toBuffer();
+        expect(sha256(nativeB)).not.toBe(a.source.sha256);
+        await fixture.setSceneOutput("m8-b-native", nativeB, size);
+        await page.goto(`/create?conversationId=${encodeURIComponent(a.run.conversationId)}`, { waitUntil: "domcontentloaded" });
+        const aRound = roundFor(page, a.source.asset.id);
+        await expect(aRound).toHaveCount(1);
+        await referenceCurrent(page, aRound.getByLabel("本轮创作操作", { exact: true }));
+        await expect(page.getByRole("button", { name: `移除${a.source.asset.title}`, exact: true })).toBeVisible();
+        await page.getByRole("button", { name: /^生成参数：/ }).click();
+        const preferences = page.locator("[data-creative-generation-preferences]");
+        await preferences.getByRole("tab", { name: "输出", exact: true }).click();
+        await preferences.getByRole("button", { name: /高画质/ }).click();
+        await page.getByRole("button", { name: /^生成参数：/ }).click();
+        const beforeB = fixture.counts();
+        const bRun = await submitPrompt(page, "修改图片1，场景只加花瓶，局部修改柜面；保持原图尺寸，选区外保持原样 F13-B M8");
+        const bWaiting = await waitRun(request, bRun.id, info);
+        phase = "B actual pointer selection, confirmation/resume and protected baseline";
+        const b = await confirmScene(page, request, root, bWaiting, a.source, info, "M8-B");
+        const bTask = await storedImageTask(b.frozen.persistedResults[0].imageTaskId);
+        // The UI persists high; the existing 4k alias resolves to this same quality.
+        expect(b.frozen.run.generationPreferences?.image?.quality).toBe("high");
+        expect(b.frozen.run.tasks[0].quality).toBe("high");
+        expect(bTask.config.quality).toBe("high");
+        expect(bTask).toMatchObject({
+            runId: bRun.id,
+            enhancementDelivery: { version: "ecommerce-delivery.v2", scope: "local_edit", baseline: { url: a.source.immutableUrl, sha256: a.source.sha256, ...size }, protection: { scene: b.frozen.run.tasks[0].sceneProtection } },
+            sceneProtection: { sourceAssetId: a.source.asset.id, sourceDigest: a.source.sha256, targetRegion: b.selection.region },
+        });
+        expect(b.frozen.run.referencedAssetIds).toEqual([a.source.asset.id]);
+        expect(b.frozen.run.ecommerceSnapshot).toMatchObject({ continuity: { parentResultId: a.source.asset.id, sceneRootAssetId: a.source.asset.id, branchId: `ecommerce-${bRun.id}` }, technicalCheck: { status: "passed" } });
+        expect(b.frozen.baseline).toEqual(a.source);
+        expect(b.frozen.output.asset).toMatchObject({ parentAssetId: a.source.asset.id, sourceRunId: bRun.id });
+        const original = bTask.result!.results![0];
+        const id = original.enhancementId!;
+        expect(id).toEqual(expect.any(String));
+        expect(original.enhancementSkip).toBeUndefined();
+        const raw = await image(original.nativeSource!.url);
+        const baseline = await image(b.frozen.output.immutableUrl);
+        const source = await image(a.source.immutableUrl);
+        expect(raw.bytes.equals(nativeB)).toBe(true);
+        expect(new Set([source.sha256, raw.sha256, baseline.sha256]).size).toBe(3);
+        expect(original.sceneProtectionEvidence).toMatchObject({ sourceDigest: source.sha256, nativeDigest: raw.sha256, compositeDigest: baseline.sha256, compositeOutsideChangedPixels: 0 });
+        const mask = Buffer.from(bTask.sceneProtection!.mask.dataUrl!.split(",")[1], "base64");
+        expect(sha256(mask)).toBe(bTask.sceneProtection!.maskDigest);
+        const decodedMask = await sharp(mask).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+        expect(decodedMask.info).toMatchObject({ ...size, channels: 4 });
+        const maskPixels = decodedMask.data;
+        let wrongAlpha = 0;
+        for (let y = 0; y < size.height; y++)
+            for (let x = 0; x < size.width; x++) {
+                const region = b.selection.region;
+                const inside = x >= region.x && x < region.x + region.width && y >= region.y && y < region.y + region.height;
+                if (maskPixels[(y * size.width + x) * 4 + 3] !== (inside ? 0 : 255)) wrongAlpha++;
+            }
+        expect(wrongAlpha).toBe(0);
+        const compare = (before: Buffer, after: Buffer) => {
+            let protectedPixels = 0;
+            let allowedPixels = 0;
+            let outsideChangedPixels = 0;
+            let insideChangedPixels = 0;
+            for (let offset = 0; offset < before.length; offset += 4) {
+                const changed = !before.subarray(offset, offset + 4).equals(after.subarray(offset, offset + 4));
+                if (maskPixels[offset + 3] === 255) {
+                    protectedPixels++;
+                    if (changed) outsideChangedPixels++;
+                } else {
+                    allowedPixels++;
+                    if (changed) insideChangedPixels++;
+                }
+            }
+            expect(outsideChangedPixels, "All four RGBA channels outside alpha255 must remain identical").toBe(0);
+            expect(insideChangedPixels).toBeGreaterThan(0);
+            return { protectedPixels, allowedPixels, outsideChangedPixels, insideChangedPixels };
+        };
+        const baselinePixels = compare(source.pixels.data, baseline.pixels.data);
+        const pending = await waitEnhancement(request, id, (job) => job.status === "failed" || (job.status === "running" && job.phase === "poll"), info);
+        expect(pending).toMatchObject({
+            status: "running",
+            phase: "poll",
+            native: { sha256: baseline.sha256, provenance: "protected_composite", ...size },
+            providerNative: { sha256: raw.sha256 },
+            target: size,
+            plannedInference: { width: 5016, height: 5016 },
+            delivery: { scope: "local_edit", requestedTarget: size },
+        });
+        const submitted = await fixture.snapshot();
+        expect(submitted.fixtureError).toBeUndefined();
+        expect(submitted.jobs).toHaveLength(2);
+        const remoteB = submitted.jobs.find((job: { jobId: string }) => job.jobId !== seedWorker.jobs[0].jobId)!;
+        expect(remoteB).toMatchObject({
+            source: { ...size, sha256: baseline.sha256 },
+            engineInput: { ...size, sha256: baseline.sha256 },
+            input: { ...size, sha256: baseline.sha256, byteLength: baseline.byteLength },
+            plan: { sourceSha256: baseline.sha256, scope: "full_image", target: { width: 5016, height: 5016, format: "png" } },
+        });
+        expect((await readFile(remoteB.input.file)).equals(baseline.bytes)).toBe(true);
+        await info.attach("m8-actual-worker-baseline-upload", { path: remoteB.input.file, contentType: "image/png" });
+        await info.attach("m8-provider-native", { body: raw.bytes, contentType: "image/png" });
+        expect(remoteB.source.sha256).not.toBe(raw.sha256);
+        const ownedPending = await readOwnedJob(root, id);
+        expect(ownedPending).toMatchObject({ decision: { source: { sha256: raw.sha256 }, delivery: { baseline: { sha256: baseline.sha256 } } }, remotePlan: { sourceSha256: baseline.sha256, planFingerprint: remoteB.plan.planFingerprint } });
+        expect(await selectedUpstreamSha256()).toBe(a.source.sha256);
+        const bDelta = delta(beforeB, fixture.counts());
+        expect(bDelta.generation).toBe(1);
+        expect(bDelta.analysis).toBeGreaterThan(0);
+        expect(bDelta.planning).toBeGreaterThan(0);
+        const bFrozen = JSON.stringify(b.frozen);
+        const nativeMedia = await mediaSnapshot(root, bTask.id);
+        await record("B real 4K Agent task froze local protection; Worker received exact protected baseline bytes", {
+            b: b.frozen,
+            selection: b.selection,
+            task: bTask,
+            public: pending,
+            source: { sha256: source.sha256, ...size },
+            raw: await decoded(raw.bytes),
+            baseline: await decoded(baseline.bytes),
+            baselinePixels,
+            workerInput: remoteB.input,
+            owned: ownedPending,
+            generationDelta: bDelta,
+        });
+
+        phase = "real image-task inbound 409 guard";
+        const guardBefore = fixture.counts();
+        const guard = await request.post("/api/image-tasks", {
+            data: {
+                kind: bTask.kind,
+                source: bTask.source,
+                prompt: bTask.prompt,
+                config: bTask.config,
+                references: bTask.references,
+                mask: bTask.mask,
+                sceneProtection: bTask.sceneProtection,
+                ecommerceExecution: bTask.ecommerceExecution,
+                context: { runId: bRun.id, parentTaskId: b.frozen.run.tasks[0].id, conversationId: a.run.conversationId, surface: "chat", attemptNo: b.frozen.run.tasks[0].attempts, clientRequestId: randomUUID() },
+            },
+        });
+        const guardResult = await guard.json();
+        expect(guard.status()).toBe(409);
+        expect(guardResult.error).toBe("场景保护与任务的已确认快照不匹配");
+        noCalls(guardBefore, fixture.counts());
+        expect(JSON.stringify(await freezeScene(request, root, bRun.id))).toBe(bFrozen);
+        await record("Completed confirmed scene snapshot cannot be replayed as a fresh image task", { status: guard.status(), result: guardResult, generationDelta: delta(guardBefore, fixture.counts()) });
+
+        phase = "B permanent complete AI/final publication before real receipt";
+        let receiptBoundary: unknown;
+        let receiptFailure: unknown;
+        fixture.beforeReceipt(async (boundary: { job: { jobId: string }; acceptedReceipts: unknown[] }) => {
+            try {
+                const persisted = await readOwnedJob(root, id);
+                expect(boundary.job.jobId).toBe(remoteB.jobId);
+                expect(boundary.acceptedReceipts).toEqual([]);
+                expect(persisted).toMatchObject({
+                    status: "succeeded",
+                    phase: "receipt",
+                    publication: { assetId: expect.any(String), protection: { protectedChangedPixels: 0, protectedPixels: baselinePixels.protectedPixels, allowedPixels: baselinePixels.allowedPixels } },
+                });
+                expect((await image(persisted.publication.ai.url)).sha256).toBe(fixture.expected.sha256);
+                expect((await image(persisted.publication.delivered.url)).sha256).toBe(persisted.publication.delivered.sha256);
+                expect((await listedAssets(request, a.run.conversationId)).find((asset) => asset.id === persisted.publication.assetId)).toMatchObject({
+                    parentAssetId: b.frozen.output.asset.id,
+                    metadata: { provenance: "ai_enhanced", scope: "local_edit" },
+                });
+                receiptBoundary = { persisted, remoteJobId: boundary.job.jobId, permanentMedia: await mediaSnapshot(root, id) };
+                await record("B full AI and final bytes plus independent child exist before receipt acceptance", receiptBoundary);
+            } catch (error) {
+                receiptFailure = error;
+                throw error;
+            }
+        });
+        await fixture.setFault("ok");
+        const completed = await waitEnhancement(request, id, (job) => Boolean(receiptFailure) || job.status === "failed" || (job.status === "succeeded" && job.phase === "completed"), info);
+        if (receiptFailure) throw receiptFailure;
+        expect(receiptBoundary).toBeDefined();
+        expect(completed).toMatchObject({
+            status: "succeeded",
+            phase: "completed",
+            native: pending.native,
+            providerNative: pending.providerNative,
+            target: size,
+            delivery: { scope: "local_edit", protectedPixels: baselinePixels.protectedPixels, allowedPixels: baselinePixels.allowedPixels, protectedChangedPixels: 0 },
+            ai: { width: 5016, height: 5016, sha256: fixture.expected.sha256 },
+            enhanced: size,
+        });
+        for (const stage of ["protection_verified", "published", "receipt_confirmed"]) expect(completed.events.filter((event) => event.stage === stage)).toHaveLength(1);
+        const final = await image(completed.enhanced!.url);
+        expect(final).toMatchObject({ ...size, format: "png", opaque: true });
+        await info.attach("m8-protected-final", { body: final.bytes, contentType: "image/png" });
+        const finalPixels = compare(baseline.pixels.data, final.pixels.data);
+        expect(new Set([raw.sha256, baseline.sha256, fixture.expected.sha256, final.sha256]).size).toBe(4);
+        expect((await image(a.source.immutableUrl)).bytes.equals(source.bytes)).toBe(true);
+        expect((await image(b.frozen.output.immutableUrl)).bytes.equals(baseline.bytes)).toBe(true);
+        expect(await mediaSnapshot(root, bTask.id)).toEqual(nativeMedia);
+        expect(JSON.stringify(await freezeScene(request, root, bRun.id))).toBe(bFrozen);
+        const finalAsset = (await listedAssets(request, a.run.conversationId)).find((asset) => asset.id === completed.enhanced!.assetId)!;
+        const enhanced = await immutableImage(request, finalAsset);
+        expect(finalAsset).toMatchObject({
+            sourceRunId: bRun.id,
+            sourceTaskId: id,
+            parentAssetId: b.frozen.output.asset.id,
+            metadata: { provenance: "ai_enhanced", parentResultId: completed.resultId, parentAssetIds: [b.frozen.output.asset.id], enhancementId: id, nativeSha256: raw.sha256, scope: "local_edit" },
+        });
+        const publicJson = JSON.stringify(completed);
+        for (const privateValue of ["maskDataUrl", "data:image/", fixture.token, bTask.sceneProtection!.maskDigest]) expect(publicJson).not.toContain(privateValue);
+        const stableWorker = await fixture.snapshot();
+        expect(stableWorker.acceptedReceipts).toHaveLength(1);
+        expect(stableWorker.acceptedReceipts[0]).toMatchObject({ jobId: remoteB.jobId, receipt: { serviceId: fixture.serviceId, result: fixture.expected } });
+        await record("B local final keeps source canvas and zero outside RGBA change; receipt confirmed", { completed, enhanced, finalPixels, worker: stableWorker });
+
+        phase = "B real version downloads and refresh";
+        const beforeRead = fixture.counts();
+        await page.reload({ waitUntil: "domcontentloaded" });
+        const finalRound = roundFor(page, enhanced.asset.id);
+        await expect(finalRound).toHaveCount(1);
+        await expect(finalRound.getByText(/局部保护增强 · 保持原画幅/)).toBeVisible();
+        await finalRound.getByRole("button", { name: "原图", exact: true }).click();
+        const baselineRound = roundFor(page, b.frozen.output.asset.id);
+        await downloadCurrent(page, baselineRound.getByLabel("本轮创作操作", { exact: true }), b.frozen.output);
+        await baselineRound.getByRole("button", { name: "AI增强", exact: true }).click();
+        await downloadCurrent(page, roundFor(page, enhanced.asset.id).getByLabel("本轮创作操作", { exact: true }), enhanced);
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect(roundFor(page, enhanced.asset.id)).toHaveCount(1);
+        await screenshot(page, info, "m8-final-local-protection-and-source-size");
+        noCalls(beforeRead, fixture.counts());
+
+        phase = "C explicit final reference, lower quality and fresh local selection";
+        await referenceCurrent(page, roundFor(page, enhanced.asset.id).getByLabel("本轮创作操作", { exact: true }));
+        await expect(page.getByRole("button", { name: `移除${enhanced.asset.title}`, exact: true })).toBeVisible();
+        await page.getByRole("button", { name: /^生成参数：/ }).click();
+        await preferences.getByRole("tab", { name: "输出", exact: true }).click();
+        await preferences.getByRole("button", { name: /中画质/ }).click();
+        await page.getByRole("button", { name: /^生成参数：/ }).click();
+        await fixture.setSceneOutput("m8-c-native", final.bytes, size);
+        const beforeC = fixture.counts();
+        const cRun = await submitPrompt(page, "修改图片1，场景只加花瓶，局部修改柜面；保持原图尺寸，选区外保持原样 F13-C M8 明确引用AI增强件");
+        const cWaiting = await waitRun(request, cRun.id, info);
+        const c = await confirmScene(page, request, root, cWaiting, enhanced, info, "M8-C", { left: 0.6, top: 0.55, right: 0.8, bottom: 0.75 });
+        const cGraph = await assertScene(request, c.frozen, enhanced, a.source.asset.id, c.selection);
+        const cTask = await storedImageTask(c.frozen.persistedResults[0].imageTaskId);
+        expect(c.frozen.run.generationPreferences?.image?.quality).toBe("medium");
+        expect(cTask.config.quality).toBe("medium");
+        expect(cTask.enhancementDelivery).toBeUndefined();
+        expect(cTask.result!.results![0].enhancementId).toBeUndefined();
+        expect(cTask.result!.results![0].enhancementSkip).toEqual({ status: "skipped", reason: "not_requested" });
+        expect(cTask.sceneProtection!.maskDigest).not.toBe(bTask.sceneProtection!.maskDigest);
+        expect(cTask.sceneProtection!.sourceDigest).toBe(final.sha256);
+        expect(cTask.sceneProtection!.sourceAssetId).toBe(enhanced.asset.id);
+        expect(c.selection.region).not.toEqual(b.selection.region);
+        expect(cGraph.continuity).toEqual({ parentResultId: enhanced.asset.id, sceneRootAssetId: a.source.asset.id, branchId: `ecommerce-${cRun.id}` });
+        expect(cGraph.continuity.branchId).not.toBe(`ecommerce-${bRun.id}`);
+        expect(c.frozen.baseline).toEqual(enhanced);
+        expect(await selectedUpstreamSha256()).toBe(final.sha256);
+        const cDelta = delta(beforeC, fixture.counts());
+        expect(cDelta.generation).toBe(1);
+        expect(cDelta.analysis).toBeGreaterThan(0);
+        expect(cDelta.planning).toBeGreaterThan(0);
+        expect(JSON.stringify(await freezeScene(request, root, bRun.id))).toBe(bFrozen);
+        const afterC = await fixture.snapshot();
+        expect(afterC.jobs).toEqual(stableWorker.jobs);
+        expect(afterC.acceptedReceipts).toEqual(stableWorker.acceptedReceipts);
+        expect(afterC.calls.filter((call: { method: string; path: string }) => call.method === "POST" && call.path === "/v1/enhancement-jobs")).toHaveLength(2);
+        expect(browserWorkerRequests).toEqual([]);
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect(roundFor(page, c.frozen.output.asset.id)).toHaveCount(1);
+        expect(JSON.stringify(await freezeScene(request, root, cRun.id))).toBe(JSON.stringify(c.frozen));
+        expect(
+            await immutableImage(
+                request,
+                (await listedAssets(request, a.run.conversationId)).find((asset) => asset.id === enhanced.asset.id)!,
+            ),
+        ).toEqual(enhanced);
+        const enhancementRows = JSON.parse(await readFile(path.join(root, "image-enhancement-jobs.json"), "utf8")) as Array<{ id: string }>;
+        expect(enhancementRows.map((row) => row.id).sort()).toEqual([a.id, id].sort());
+        expect((await fixture.snapshot()).jobs).toEqual(stableWorker.jobs);
+        expect((await fixture.snapshot()).acceptedReceipts).toEqual(stableWorker.acceptedReceipts);
+        expect(await sourceHashes()).toEqual(initialSources);
+        await screenshot(page, info, "m8-explicit-enhanced-C-new-selection");
+        await record("C real final-byte provider upload uses new baseline, selection and branch; B/source preserved", {
+            c: c.frozen,
+            selection: c.selection,
+            graph: cGraph,
+            task: cTask,
+            selectedUploadSha256: final.sha256,
+            generationDelta: cDelta,
+            enhancementIds: enhancementRows.map((row) => row.id),
+            worker: afterC,
+            browserWorkerRequests,
+        });
+    } catch (error) {
+        primaryError = error;
+        failure = { phase, message: error instanceof Error ? error.message : String(error) };
+        try {
+            await screenshot(page, info, "m8-first-failure");
+        } catch (error) {
+            cleanupErrors.push({ action: "first-failure screenshot", message: String(error) });
+        }
+    } finally {
+        for (const [action, cleanup] of [
+            ["preserve Worker ledger", async () => evidence(info, "m8-final-worker-ledger", await fixture.snapshot())],
+            [
+                "disable owned enhancement",
+                async () => {
+                    const settings = await getData<ImageEnhancementSettings>(request, "/api/admin/image-enhancement");
+                    const reply = await request.patch("/api/admin/image-enhancement", { data: { revision: settings.revision, enabled: false } });
+                    expect(reply.ok()).toBe(true);
+                },
+            ],
+            ["close owned fixture", async () => fixture.close()],
+        ] as const) {
+            try {
+                await cleanup();
+            } catch (error) {
+                cleanupErrors.push({ action, message: error instanceof Error ? error.message : String(error) });
+            }
+        }
+        await evidence(info, "m8-outcome", { firstFailure: failure || null, completed: !failure && cleanupErrors.length === 0, phase, cleanupErrors, stages: stages.map(({ stage, at, counts }) => ({ stage, at, counts })), browserWorkerRequests });
+    }
+    if (failure) throw primaryError;
+    if (cleanupErrors.length)
+        throw new AggregateError(
+            cleanupErrors.map(({ action, message }) => new Error(`${action}: ${message}`)),
+            "M8 cleanup failed after assertions",
         );
 });

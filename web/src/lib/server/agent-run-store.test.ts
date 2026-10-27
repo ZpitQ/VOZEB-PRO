@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentRun } from "./agent-run-store";
+import type { EcommerceEnhancementDelivery, ProductEnhancementBaselineEvidence } from "./image-enhancement-delivery";
+import type { ProductEnhancementEvidence } from "./image-enhancement-product-protection";
+import type { SceneEditProtection } from "./ecommerce-product-regions";
+import type { ImageTask } from "./image-task-store";
+import type { ImageEnhancementJob } from "./database/image-enhancement-job-repository";
 
 const mocks = vi.hoisted(() => ({
     createCreativeRunBundle: vi.fn(),
@@ -468,6 +473,376 @@ describe("explicit saved native and published enhancement baselines", () => {
     });
 });
 
+describe("protected ecommerce delivery continuity", () => {
+    beforeEach(() => vi.clearAllMocks());
+
+    it.each(["native", "enhanced"] as const)("uses the explicitly selected protected %s without confusing its identity with provider native", async (variant) => {
+        const history = protectedImageHistory();
+        bindGeneratedImageHistory(history);
+        const before = structuredClone(history);
+        const selected = history[variant];
+
+        await expect(selectCurrentSceneBaseline("conversation", selected.id, "user")).resolves.toMatchObject({
+            id: selected.id,
+            serverUrl: selected.serverUrl,
+            width: 1254,
+            height: 1254,
+            bytes: selected.bytes,
+            metadata: { ecommerceContinuity: { productAnchorId: history.anchor.id } },
+        });
+        let current = { ...canvasRun(), id: `protected-${variant}-edit`, surface: "chat" as const };
+        mocks.mutateCreativeRun.mockImplementation(async (_id, _ttl, mutate) => {
+            const mutation = mutate(current);
+            if (!mutation) return null;
+            current = mutation.run;
+            return current;
+        });
+        await expect(createEditBranch(selected.id, current, "execution")).resolves.toMatchObject({ parentResultId: selected.id, branchId: `ecommerce-${current.id}` });
+        expect(history).toEqual(before);
+        expect(history.native.serverUrl).not.toBe(history.imageTask.result.nativeSource.url);
+        expect(history.native.bytes).not.toBe(history.imageTask.result.nativeSource.byteLength);
+    });
+
+    it.each<[string, (history: ReturnType<typeof protectedImageHistory>) => void]>([
+        [
+            "raw native evidence",
+            (history) => {
+                history.imageTask.result.productEnhancementEvidence.nativeSha256 = "f".repeat(64);
+            },
+        ],
+        [
+            "baseline evidence",
+            (history) => {
+                history.imageTask.result.productEnhancementEvidence.baselineSha256 = "f".repeat(64);
+            },
+        ],
+        [
+            "frozen mask",
+            (history) => {
+                history.imageTask.enhancementDelivery.protection.maskSha256 = "f".repeat(64);
+            },
+        ],
+        [
+            "frozen product",
+            (history) => {
+                history.imageTask.enhancementDelivery.protection.product.productCore[0].width = 2;
+            },
+        ],
+        [
+            "baseline media bytes",
+            (history) => {
+                history.native.bytes += 1;
+            },
+        ],
+        [
+            "baseline media URL",
+            (history) => {
+                history.native.serverUrl = "/api/generation-log-assets/other-base.png";
+            },
+        ],
+        [
+            "asset provider identity",
+            (history) => {
+                history.native.metadata.nativeSource.sha256 = "f".repeat(64);
+            },
+        ],
+        [
+            "failed source task",
+            (history) => {
+                history.imageTask.status = "error";
+            },
+        ],
+        [
+            "different product owner",
+            (history) => {
+                history.anchor.userId = "other-user";
+            },
+        ],
+        [
+            "missing creation contract",
+            (history) => {
+                Reflect.deleteProperty(history.imageTask, "enhancementDelivery");
+            },
+        ],
+        [
+            "missing baseline proof",
+            (history) => {
+                Reflect.deleteProperty(history.imageTask.result, "productEnhancementEvidence");
+            },
+        ],
+        [
+            "removed asset markers with invalid source proof",
+            (history) => {
+                Reflect.deleteProperty(history.native.metadata, "provenance");
+                Reflect.deleteProperty(history.native.metadata, "nativeSource");
+                history.imageTask.result.productEnhancementEvidence.nativeSha256 = "f".repeat(64);
+            },
+        ],
+    ])("rejects a protected original and its enhancement with changed %s", async (_reason, invalidate) => {
+        const history = protectedImageHistory();
+        invalidate(history);
+        bindGeneratedImageHistory(history);
+        await expect(selectCurrentSceneBaseline("conversation", history.native.id, "user")).resolves.toBeNull();
+        await expect(selectCurrentSceneBaseline("conversation", history.enhanced.id, "user")).resolves.toBeNull();
+    });
+
+    it.each<[string, (history: ReturnType<typeof protectedImageHistory>) => void]>([
+        [
+            "publication creation contract",
+            (history) => {
+                history.publication.decision.delivery.contract.protection.maskSha256 = "f".repeat(64);
+            },
+        ],
+        [
+            "publication baseline",
+            (history) => {
+                history.publication.decision.delivery.baseline.sha256 = "f".repeat(64);
+            },
+        ],
+        [
+            "publication pixel evidence",
+            (history) => {
+                history.publication.publication.protection.protectedChangedPixels = 1 as 0;
+            },
+        ],
+        [
+            "asset pixel evidence",
+            (history) => {
+                history.enhanced.metadata.protection.compositeSha256 = "f".repeat(64);
+            },
+        ],
+        [
+            "published protected source",
+            (history) => {
+                history.publication.publication.protection.sourceSha256 = "f".repeat(64);
+                history.enhanced.metadata.protection.sourceSha256 = "f".repeat(64);
+            },
+        ],
+        [
+            "published protected output",
+            (history) => {
+                history.publication.publication.protection.compositeSha256 = "f".repeat(64);
+                history.enhanced.metadata.protection.compositeSha256 = "f".repeat(64);
+            },
+        ],
+        [
+            "asset parent chain",
+            (history) => {
+                history.enhanced.parentAssetId = history.anchor.id;
+            },
+        ],
+    ])("rejects a protected enhancement with changed %s while preserving its qualified original", async (_reason, invalidate) => {
+        const history = protectedImageHistory();
+        invalidate(history);
+        bindGeneratedImageHistory(history);
+        await expect(selectCurrentSceneBaseline("conversation", history.native.id, "user")).resolves.toMatchObject({ id: history.native.id });
+        await expect(selectCurrentSceneBaseline("conversation", history.enhanced.id, "user")).resolves.toBeNull();
+    });
+
+    it("retains the ecommerce technical gate after a valid protected publication", async () => {
+        const history = protectedImageHistory();
+        history.run.ecommerceSnapshot!.technicalCheck!.status = "blocked";
+        bindGeneratedImageHistory(history);
+        await expect(selectCurrentSceneBaseline("conversation", history.native.id, "user")).resolves.toBeNull();
+        await expect(selectCurrentSceneBaseline("conversation", history.enhanced.id, "user")).resolves.toBeNull();
+    });
+
+    it("inherits only the qualified protected original and revalidates its persisted task on later reads", async () => {
+        const history = protectedImageHistory();
+        bindGeneratedImageHistory(history);
+        await expect(selectCurrentSceneBaseline("conversation", undefined, "user")).resolves.toMatchObject({ id: history.native.id });
+        history.imageTask.result.productEnhancementEvidence.nativeSha256 = "f".repeat(64);
+        await expect(selectCurrentSceneBaseline("conversation", undefined, "user")).resolves.toBeNull();
+    });
+});
+
+function protectedImageHistory() {
+    const history = generatedImageHistory();
+    const raw = history.imageTask.result.nativeSource;
+    const sourceSize = { width: raw.width, height: raw.height };
+    const anchor = productAsset("product");
+    const product = { compilerVersion: "strict-product.v1" as const, state: "ready" as const, productAnchorId: anchor.id, sourceAssetId: anchor.id, sourceSize, productCore: [{ x: 0, y: 0, width: 1, height: 1 }], fusionHalo: [], editableBackground: [] };
+    const contract: Extract<EcommerceEnhancementDelivery, { scope: "product_background" }> = {
+        version: "ecommerce-delivery.v2",
+        scope: "product_background",
+        protection: { version: "product-enhancement.v2", normalization: "srgb-upright-v1", product: structuredClone(product), maskDataUrl: "data:image/png;base64,AA==", maskSha256: "d".repeat(64) },
+        baseline: { url: "/api/reference-assets/product.png", sha256: "c".repeat(64), byteLength: 1200, ...sourceSize, normalizedSha256: "e".repeat(64) },
+    };
+    const baseline = { url: "/api/generation-log-assets/protected-base.png", sha256: "b".repeat(64), ...sourceSize, byteLength: 1500, format: "png", hasAlpha: false };
+    const composition: ProductEnhancementEvidence = {
+        version: "product-enhancement.v2",
+        normalization: "srgb-upright-v1",
+        productAnchorId: anchor.id,
+        sourceAssetId: anchor.id,
+        sourceSha256: contract.baseline.sha256,
+        maskSha256: contract.protection.maskSha256,
+        aiSha256: raw.sha256,
+        compositeSha256: baseline.sha256,
+        sourceSize: structuredClone(sourceSize),
+        aiSize: structuredClone(sourceSize),
+        allowedPixels: 10,
+        protectedPixels: sourceSize.width * sourceSize.height - 10,
+        protectedChangedPixels: 0,
+    };
+    const evidence: ProductEnhancementBaselineEvidence = { version: "product-baseline.v2", nativeUrl: raw.url, nativeSha256: raw.sha256, baselineUrl: baseline.url, baselineSha256: baseline.sha256, composition };
+    const imageTask = Object.assign(history.imageTask, {
+        kind: "edit",
+        references: [],
+        productProtection: product,
+        mask: { id: "mask", dataUrl: contract.protection.maskDataUrl },
+        enhancementDelivery: contract,
+        result: Object.assign(history.imageTask.result, { dataUrl: baseline.url, serverUrl: baseline.url, bytes: baseline.byteLength, productEnhancementEvidence: evidence }),
+    });
+    const passed = passedSnapshot(anchor.id)!;
+    history.run.ecommerceSnapshot = {
+        version: "ecommerce-generation.v1",
+        mode: "active",
+        userId: history.run.userId,
+        runId: history.run.id,
+        createdAt: 1,
+        input: { userRequest: "fixture", assetIds: [anchor.id], conversationId: history.run.conversationId, surface: "chat" },
+        plan: passed.plan,
+        qualityCheck: passed.qualityCheck,
+        qualityPolicy: "disabled",
+        technicalCheck: { version: "ecommerce-technical.v1", status: "passed", checks: [], hardFailures: [], canvasEvidence: [], sceneProtectionEvidence: [], checkedAt: 2 },
+    };
+    const native = Object.assign(history.native, {
+        parentAssetId: anchor.id,
+        serverUrl: baseline.url,
+        bytes: baseline.byteLength,
+        metadata: Object.assign(history.native.metadata, { provenance: "protected_baseline", ecommerceContinuity: { productAnchorId: anchor.id } }),
+    });
+    const delivered = { ...history.publication.publication.delivered, ...sourceSize };
+    const protection = {
+        ...structuredClone(composition),
+        sourceSha256: baseline.sha256,
+        aiSha256: history.publication.publication.ai.sha256,
+        compositeSha256: delivered.sha256,
+        aiSize: { width: history.publication.publication.ai.width, height: history.publication.publication.ai.height },
+    };
+    const publication = Object.assign(history.publication, {
+        decision: Object.assign(history.publication.decision, { delivery: { contract: structuredClone(contract), baseline: structuredClone(baseline) }, target: sourceSize }),
+        publication: Object.assign(history.publication.publication, { delivered, protection }),
+    });
+    const enhanced = Object.assign(history.enhanced, { ...sourceSize, metadata: Object.assign(history.enhanced.metadata, { protection: structuredClone(protection), deliveryVersion: contract.version, scope: contract.scope }) });
+    return { ...history, imageTask, native, publication, enhanced, anchor };
+}
+
+describe("local enhancement explicit continuity", () => {
+    it("keeps the qualified original selectable and validates local publication proof before explicit enhancement selection", async () => {
+        const history = localImageHistory();
+        bindGeneratedImageHistory(history as unknown as ReturnType<typeof protectedImageHistory>);
+        await expect(selectCurrentSceneBaseline("conversation", history.native.id, "user")).resolves.toMatchObject({ id: history.native.id });
+        await expect(selectCurrentSceneBaseline("conversation", history.enhanced.id, "user")).resolves.toMatchObject({ id: history.enhanced.id });
+        await expect(selectCurrentSceneBaseline("conversation", history.enhanced.id, "other-user")).resolves.toBeNull();
+    });
+    it.each(["mapping", "source", "mask", "metadata", "outside"])("rejects changed local %s lineage evidence", async (variant) => {
+        const history = localImageHistory();
+        bindGeneratedImageHistory(history as unknown as ReturnType<typeof protectedImageHistory>);
+        const proof = history.publication.publication!.protection!;
+        if (proof.version !== "scene-enhancement.v1") throw new Error("Expected local proof");
+        if (variant === "mapping") proof.mapping.targetRegion.x = 1;
+        if (variant === "source") proof.sourceSha256 = "f".repeat(64);
+        if (variant === "mask") proof.maskSha256 = "f".repeat(64);
+        if (variant === "outside") proof.protectedChangedPixels = 1 as 0;
+        if (variant === "metadata") history.enhanced.metadata.protection = { ...history.enhanced.metadata.protection, compositeSha256: "f".repeat(64) };
+        await expect(selectCurrentSceneBaseline("conversation", history.enhanced.id, "user")).resolves.toBeNull();
+    });
+});
+
+function localImageHistory() {
+    const history = protectedImageHistory();
+    const imageTask = history.imageTask as unknown as ImageTask;
+    const publication = history.publication as unknown as ImageEnhancementJob;
+    const raw = imageTask.result!.nativeSource!;
+    const size = { width: raw.width, height: raw.height };
+    const scene: SceneEditProtection = {
+        version: "scene-edit-protection.v1",
+        sourceAssetId: history.anchor.id,
+        sourceSize: size,
+        sourceDigest: "c".repeat(64),
+        maskSize: size,
+        maskDigest: "d".repeat(64),
+        targetRegion: { x: 0, y: 0, width: 1, height: 10 },
+        semantics: ["vase"],
+        selectionSource: "user_selection",
+        confirmation: { actorUserId: "user", confirmedAt: 1 },
+        maskSemantics: "alpha_zero_edit",
+        method: "source_pixels_copy",
+        mask: { id: "local-mask", dataUrl: "data:image/png;base64,AA==", ...size },
+    };
+    const contract = {
+        version: "ecommerce-delivery.v2",
+        scope: "local_edit",
+        protection: { version: "scene-enhancement.v1", normalization: "srgb-upright-v1", scene: structuredClone(scene) },
+        baseline: { ...history.imageTask.enhancementDelivery.baseline, url: "/api/reference-assets/scene.png" },
+    } as unknown as EcommerceEnhancementDelivery;
+    delete imageTask.productProtection;
+    delete imageTask.result!.productEnhancementEvidence;
+    imageTask.kind = "edit";
+    imageTask.references = [{ id: scene.sourceAssetId, dataUrl: "/api/reference-assets/scene.png", ecommerceRole: "scene" }];
+    imageTask.sceneProtection = scene;
+    imageTask.mask = structuredClone(scene.mask);
+    imageTask.enhancementDelivery = contract;
+    imageTask.ecommerceExecution = {
+        state: "ready",
+        compilerVersion: "ecommerce-nano-banana-2.v1",
+        providerProfileId: "nano-banana-2",
+        prompt: "fixture",
+        parameters: { variant: "nano-banana-2" },
+        modelSnapshot: { logicalRole: "image_generation", capability: "image", logicalModelId: "image", channelId: "fixture", upstreamModel: "nano-banana-2", apiFormat: "openai" },
+        protection: { scope: "local", preserveOutsideMask: true, protectedObjectIds: [], allowLightingChange: false },
+        referenceRoles: [{ assetId: scene.sourceAssetId, role: "scene" }],
+    };
+    const { mask: _mask, ...snapshot } = scene;
+    imageTask.result!.sceneProtectionEvidence = {
+        ...snapshot,
+        nativeSize: size,
+        normalization: "none",
+        nativeDigest: raw.sha256,
+        compositeDigest: "b".repeat(64),
+        outsidePixels: size.width * size.height - 10,
+        mappedOutsideChangedPixels: 0,
+        nativeOutsideChangedPixels: 0,
+        compositeOutsideChangedPixels: 0,
+        nativeUrl: raw.url,
+        compositeUrl: history.native.serverUrl,
+    };
+    const baseline = publication.decision.delivery!.baseline;
+    publication.decision = {
+        ...publication.decision,
+        delivery: { contract, baseline },
+        status: "queued",
+        reason: null,
+        inference: { width: size.width * 4, height: size.height * 4 },
+        connection: {
+            revision: "fixture",
+            credentialRef: "fixture",
+            serviceId: "31313131-3131-4131-8131-313131313131",
+            timeoutMs: 60000,
+            model: { id: "fixture", binaryVersion: "v1", binarySha256: "a".repeat(64), modelVersion: "v1", modelSha256: "a".repeat(64), nativeScale: 4, allowedTiles: [0], defaultTile: 0, tta: false, gpuId: 0 },
+        },
+    };
+    const proof = {
+        version: "scene-enhancement.v1" as const,
+        normalization: "srgb-upright-v1" as const,
+        sourceAssetId: scene.sourceAssetId,
+        sourceSha256: baseline.sha256,
+        maskSha256: scene.maskDigest,
+        aiSha256: publication.publication!.ai.sha256,
+        compositeSha256: publication.publication!.delivered.sha256,
+        sourceSize: size,
+        aiSize: { width: publication.publication!.ai.width, height: publication.publication!.ai.height },
+        allowedPixels: 10,
+        protectedPixels: size.width * size.height - 10,
+        protectedChangedPixels: 0 as const,
+        mapping: { context: { x: 0 as const, y: 0 as const, ...size }, targetRegion: structuredClone(scene.targetRegion) },
+    };
+    publication.publication!.protection = proof;
+    const enhanced = { ...history.enhanced, metadata: { ...history.enhanced.metadata, scope: "local_edit", protection: structuredClone(proof) } };
+    return { ...history, imageTask, publication, enhanced };
+}
+
 function generatedImageHistory(resultSlot = 1) {
     const url = "/api/generation-log-assets/native.png";
     const nativeSource = { url, sha256: "1".repeat(64), width: 1254, height: 1254, byteLength: 1000, format: "png", hasAlpha: false, provenance: "provider_native" };
@@ -531,11 +906,11 @@ function generatedImageHistory(resultSlot = 1) {
     return { run, imageTask, native, enhanced, publication };
 }
 
-function bindGeneratedImageHistory(history: ReturnType<typeof generatedImageHistory>) {
+function bindGeneratedImageHistory(history: ReturnType<typeof generatedImageHistory> & { anchor?: ReturnType<typeof productAsset> }) {
     mocks.queryStoredGenerationTasks.mockResolvedValue([history.run]);
     mocks.getStoredGenerationTask.mockImplementation(async (type: string, id: string) => (type === "agent" && id === history.run.id ? history.run : type === "image" && id === history.imageTask.id ? history.imageTask : null));
     mocks.getEnhancementJob.mockImplementation(async (id: string) => (id === history.publication.id ? history.publication : null));
-    mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[]) => [history.native, history.enhanced].filter((asset) => ids.includes(asset.id)));
+    mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[]) => [history.native, history.enhanced, ...(history.anchor ? [history.anchor] : [])].filter((asset) => ids.includes(asset.id)));
 }
 
 function productAsset(id: string) {

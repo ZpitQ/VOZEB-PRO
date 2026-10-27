@@ -51,6 +51,24 @@ function exact(attempt: ReturnType<typeof claimedAttempt>) {
 }
 
 describe("frozen Windows prepare request", () => {
+  it.each([false, true])("preserves frozen boolean TTA %s in the exact native carrier", (tta) => {
+    const attempt = claimedAttempt();
+    setValue(attempt, ["job", "plan", "engine", "tta"], tta);
+    const result = exact(attempt);
+    const payload = JSON.parse(Buffer.from(result.requestUtf8Base64, "base64").toString("utf8"));
+    expect(payload.engine.tta).toBe(tta);
+    if (tta) expect(result.requestFingerprint).not.toBe(freezeWindowsPrepareRequest(claimedAttempt()).requestFingerprint);
+  });
+
+  it.each([undefined, null, 0, 1, "false", "true", [], {}])(
+    "rejects non-boolean frozen TTA %#",
+    (tta) => {
+      const attempt = claimedAttempt();
+      setValue(attempt, ["job", "plan", "engine", "tta"], tta);
+      rejected(attempt, `tta ${String(tta)}`);
+    },
+  );
+
   it("encodes the frozen claimed attempt as exactly two immutable original-byte strings", () => {
     const result = exact(claimedAttempt());
     expect(Reflect.ownKeys(result)).toEqual([
@@ -168,7 +186,6 @@ describe("frozen Windows prepare request", () => {
       ["deadline equals start", ["executionDeadlineAt"], 1_000],
       ["deadline before start", ["executionDeadlineAt"], 999],
       ["native scale", ["job", "plan", "engine", "nativeScale"], 2],
-      ["tta", ["job", "plan", "engine", "tta"], true],
     ] as const;
     for (const [name, path, value] of vectors) {
       const attempt = claimedAttempt();

@@ -115,7 +115,7 @@ export type FrozenEngine = Readonly<{
   modelSha256: string;
   nativeScale: 4;
   tile: number;
-  tta: false;
+  tta: boolean;
   gpuId: number;
 }>;
 
@@ -139,6 +139,7 @@ export type EnhancementPlanRequest = Readonly<{
   modelId: string;
   normalizationProfile: typeof NORMALIZATION_PROFILE;
   tile?: number;
+  tta?: boolean;
   expectedStrategyFingerprint?: string;
 }>;
 
@@ -247,7 +248,7 @@ export function parsePlanRequest(value: unknown): EnhancementPlanRequest {
       "modelId",
       "normalizationProfile",
     ],
-    ["tile", "expectedStrategyFingerprint"],
+    ["tile", "tta", "expectedStrategyFingerprint"],
   );
   const targetInput = record(input.target);
   exactKeys(targetInput, ["width", "height", "format"]);
@@ -266,6 +267,7 @@ export function parsePlanRequest(value: unknown): EnhancementPlanRequest {
       (typeof input.tile !== "number" ||
         !Number.isSafeInteger(input.tile) ||
         (input.tile !== 0 && input.tile < 32))) ||
+    (Object.hasOwn(input, "tta") && typeof input.tta !== "boolean") ||
     !positiveInteger(targetInput.width) ||
     !positiveInteger(targetInput.height) ||
     (targetInput.format !== "png" && targetInput.format !== "jpeg")
@@ -284,6 +286,7 @@ export function parsePlanRequest(value: unknown): EnhancementPlanRequest {
     modelId: input.modelId,
     normalizationProfile: NORMALIZATION_PROFILE,
     ...(Object.hasOwn(input, "tile") ? { tile: input.tile as number } : {}),
+    ...(typeof input.tta === "boolean" ? { tta: input.tta } : {}),
     ...(typeof input.expectedStrategyFingerprint === "string"
       ? { expectedStrategyFingerprint: input.expectedStrategyFingerprint.toLowerCase() }
       : {}),
@@ -302,6 +305,7 @@ export function requestFingerprint(
     modelId: request.modelId,
     normalizationProfile: request.normalizationProfile,
     tile: request.tile ?? frozenDefaultTile,
+    ...(request.tta !== undefined ? { tta: request.tta } : {}),
     ...(request.expectedStrategyFingerprint
       ? { expectedStrategyFingerprint: request.expectedStrategyFingerprint }
       : {}),
@@ -338,7 +342,7 @@ export function normalizePlan(
     modelSha256: model.modelSha256,
     nativeScale: model.nativeScale,
     tile,
-    tta: model.tta,
+    tta: input.tta ?? model.tta,
     gpuId: model.gpuId,
   });
   const budgets: EnhancementBudgets = Object.freeze({

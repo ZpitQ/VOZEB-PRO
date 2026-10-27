@@ -631,6 +631,7 @@ export function createEnhancementHandler(
           allowedTiles: model.allowedTiles,
           defaultTile: model.defaultTile,
           tta: model.tta,
+          ttaModes: [false, true],
           gpuId: model.gpuId,
         })),
         budgets: controlled.budgets,

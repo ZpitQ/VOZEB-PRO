@@ -7,6 +7,7 @@ import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { emptyAdvancedConfig } from "@/lib/channel-protocol-registry";
+import type { EcommerceEnhancementDelivery } from "./image-enhancement-delivery";
 import type { ImageTask } from "./image-task-store";
 
 const storage = vi.hoisted(() => ({ rejectedBytes: new Set<string>() }));
@@ -17,7 +18,12 @@ vi.mock("@/lib/server/image-enhancement-worker-client", () => worker);
 
 vi.mock("@/app/api/image-tasks/image-task-support", () => ({
     directRemoteImageResult: vi.fn(),
-    imageReferenceToDataUrl: async (reference: { dataUrl: string }) => reference.dataUrl,
+    imageReferenceToDataUrl: async (reference: { dataUrl: string; serverUrl?: string }) => {
+        const url = reference.serverUrl || reference.dataUrl;
+        if (!url.startsWith("/api/generation-log-assets/")) return url;
+        const { localAssetUrlToPath } = await import("./generation-log-repository");
+        return `data:image/png;base64,${(await readFile(localAssetUrlToPath(url))).toString("base64")}`;
+    },
     inlineRemoteImageResult: async (dataUrl: string) => ({ dataUrl }),
     resolveProxiedMediaSource: () => ({}),
 }));
@@ -129,6 +135,217 @@ describe("image task result persistence", () => {
                 { resultId: "custom-gemini-image:2", resultIndex: 2, nativeStatus: "unavailable", storageStatus: "unavailable" },
             ],
         });
+    });
+
+    it.each([false, true])("gives a v2 canvas its independently saved native identity (enabled=%s)", async (enabled) => {
+        const task = canvasTask();
+        task.config.quality = "4k";
+        task.enhancementPolicy = { revision: "frozen-v2", enabled, connection: null };
+        task.enhancementDelivery = { version: "ecommerce-delivery.v2", scope: "full_image", canvas: structuredClone(task.ecommerceExecution!.canvas!) };
+        const native = await imageBytes(6, 4);
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture");
+        expect(result.nativeSource).toEqual({ url: result.serverUrl, sha256: digest(native), width: 6, height: 4, byteLength: native.length, format: "png", hasAlpha: false, provenance: "provider_native" });
+        expect(result.enhancementId).toBe(`enhancement:${task.id}:1`);
+        expect(result.canvasEvidence).toMatchObject({ nativeUrl: result.serverUrl, nativeSize: { width: 6, height: 4 }, storedSize: { width: 6, height: 4 }, normalization: "none" });
+        if (enabled) expect(result).not.toHaveProperty("enhancementSkip");
+        else expect(result.enhancementSkip).toEqual({ status: "skipped", reason: "disabled" });
+        expect(await readFile(assetPath(result.serverUrl!))).toEqual(native);
+    });
+
+    it("keeps native canvas geometry independently failing the v2 requested exact size", async () => {
+        const { evaluateEcommerceCanvas } = await import("./ecommerce-quality-check");
+        const task = canvasTask();
+        task.config.quality = "4k";
+        task.enhancementPolicy = { revision: "frozen-v2", enabled: true, connection: null };
+        task.ecommerceExecution!.canvas!.size = { width: 12, height: 8 };
+        task.enhancementDelivery = { version: "ecommerce-delivery.v2", scope: "full_image", canvas: structuredClone(task.ecommerceExecution!.canvas!) };
+        const native = await imageBytes(6, 4);
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture");
+        expect(result.nativeSource).toMatchObject({ width: 6, height: 4, sha256: digest(native) });
+        expect(result.canvasEvidence).toMatchObject({ nativeSize: { width: 6, height: 4 }, storedSize: { width: 6, height: 4 } });
+        expect(evaluateEcommerceCanvas(task.ecommerceExecution!.canvas!, result.canvasEvidence!.nativeSize, result.canvasEvidence!.storedSize)).toMatchObject({ nativeMatches: false, storedMatches: false, hardFailures: ["canvas_geometry"] });
+        expect(await readFile(assetPath(result.serverUrl!))).toEqual(native);
+    });
+
+    it("keeps an unrequested v2 canvas skipped without signing an enhancement source", async () => {
+        const task = canvasTask();
+        task.config.quality = "2k";
+        task.enhancementPolicy = { revision: "frozen-v2", enabled: true, connection: null };
+        task.enhancementDelivery = { version: "ecommerce-delivery.v2", scope: "full_image", canvas: structuredClone(task.ecommerceExecution!.canvas!) };
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(await imageBytes(6, 4)) }, "http://fixture.local", "fixture");
+        expect(result.enhancementSkip).toEqual({ status: "skipped", reason: "not_requested" });
+        expect(result).not.toHaveProperty("nativeSource");
+        expect(result).not.toHaveProperty("enhancementId");
+    });
+
+    it.each((["read", "geometry", "store"] as const).flatMap((failure) => [0, 1].map((index) => ({ failure, index }))))("retains the valid product slot and its original identity after slot $index fails at $failure", async ({ failure, index }) => {
+        const { task, native } = await productDeliveryTask(true);
+        const bad = await sharp({ create: { width: failure === "geometry" ? 3 : 6, height: failure === "geometry" ? 2 : 4, channels: 3, background: "blue" } })
+            .png()
+            .toBuffer();
+        if (failure === "store") storage.rejectedBytes.add(bad.toString("base64"));
+        const inputs = [{ dataUrl: dataUrl(native) }, { dataUrl: dataUrl(native) }];
+        inputs[index] = { dataUrl: failure === "read" ? "https://fixture.invalid/unreadable.png" : dataUrl(bad) };
+        const goodIndex = 1 - index;
+        const prepared = await prepare(task, { dataUrl: inputs[0].dataUrl, results: inputs }, "http://fixture.local", "fixture");
+        expect(prepared.results).toHaveLength(1);
+        const good = prepared.results[0];
+        expect(good.resultId).toBe(`${task.id}:${goodIndex + 1}`);
+        expect(good.enhancementId).toBe(`enhancement:${task.id}:${goodIndex + 1}`);
+        expect(prepared.batchEvidence?.map((slot) => slot.resultId)).toEqual([`${task.id}:1`, `${task.id}:2`]);
+        expect(prepared.batchEvidence?.[index]).toMatchObject({ resultIndex: index + 1, storageStatus: "unavailable", failureStage: failure === "geometry" ? "validation" : failure });
+        expect(prepared.batchEvidence?.[goodIndex]).toMatchObject({ resultIndex: goodIndex + 1, nativeStatus: "readable", storageStatus: "stored", storedUrl: good.serverUrl });
+        expect(await readFile(assetPath(good.productEnhancementEvidence!.nativeUrl))).toEqual(native);
+        expect(digest(await readFile(assetPath(good.serverUrl!)))).toBe(good.productEnhancementEvidence!.baselineSha256);
+    });
+
+    it.each([false, true])("persists the qualified product baseline independently from untouched raw native bytes (canvas=%s)", async (withCanvas) => {
+        const { task, source, native, mask, delivery } = await productDeliveryTask(withCanvas);
+        const before = structuredClone(task);
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture");
+        expect(result).toMatchObject({ width: 6, height: 4, mimeType: "image/png", enhancementId: `enhancement:${task.id}:1` });
+        expect(result).not.toHaveProperty("enhancementSkip");
+        const proof = result.productEnhancementEvidence!;
+        expect(proof).toMatchObject({
+            version: "product-baseline.v2",
+            nativeSha256: digest(native),
+            baselineUrl: result.serverUrl,
+            composition: {
+                version: "product-enhancement.v2",
+                normalization: "srgb-upright-v1",
+                sourceAssetId: "scene",
+                productAnchorId: "product",
+                sourceSha256: digest(source),
+                maskSha256: digest(mask),
+                aiSha256: digest(native),
+                sourceSize: { width: 6, height: 4 },
+                aiSize: { width: 6, height: 4 },
+                allowedPixels: 4,
+                protectedPixels: 20,
+                protectedChangedPixels: 0,
+            },
+        });
+        expect(proof.nativeUrl).not.toBe(result.serverUrl);
+        const [baseBytes, rawBytes] = await Promise.all([readFile(assetPath(result.serverUrl!)), readFile(assetPath(proof.nativeUrl))]);
+        expect(rawBytes).toEqual(native);
+        expect(proof.baselineSha256).toBe(digest(baseBytes));
+        expect(result.nativeSource).toEqual({ url: proof.nativeUrl, sha256: digest(native), byteLength: native.length, width: 6, height: 4, format: "png", hasAlpha: false, provenance: "provider_native" });
+        expect(result.bytes).toBe(baseBytes.length);
+        expect(proof.composition.compositeSha256).toBe(digest(baseBytes));
+        const [original, composite] = await Promise.all([sharp(source).rotate().toColourspace("srgb").ensureAlpha().raw().toBuffer(), sharp(baseBytes).ensureAlpha().raw().toBuffer()]);
+        for (let y = 0; y < 4; y++)
+            for (let x = 0; x < 6; x++) {
+                const offset = (y * 6 + x) * 4;
+                expect(composite.subarray(offset, offset + 4)).toEqual(x >= 4 && y < 2 ? Buffer.from([255, 0, 0, 255]) : original.subarray(offset, offset + 4));
+            }
+        if (withCanvas) expect(result.canvasEvidence).toMatchObject({ nativeUrl: proof.nativeUrl, nativeSize: { width: 6, height: 4 }, storedSize: { width: 6, height: 4 }, normalization: "none" });
+        expect(task).toEqual(before);
+        expect(delivery.baseline.sha256).toBe(digest(source));
+    });
+
+    it("restores protected base pixels for an unrequested product delivery without resizing the composite", async () => {
+        const { task, native } = await productDeliveryTask();
+        task.config.quality = "1k";
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture");
+        expect(result).toMatchObject({ width: 6, height: 4, enhancementSkip: { status: "skipped", reason: "not_requested" }, productEnhancementEvidence: { composition: { protectedChangedPixels: 0 } } });
+        expect(result).not.toHaveProperty("nativeSource");
+        expect(result).not.toHaveProperty("enhancementId");
+    });
+
+    it("keeps an old product protection task skipped without assigning the v2 baseline contract", async () => {
+        const { task, native } = await productDeliveryTask();
+        delete task.enhancementDelivery;
+        const {
+            results: [result],
+        } = await prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture");
+        expect(result.enhancementSkip).toEqual({ status: "skipped", reason: "protected_contract" });
+        expect(result).not.toHaveProperty("productEnhancementEvidence");
+        expect(result).not.toHaveProperty("nativeSource");
+        expect(result).not.toHaveProperty("enhancementId");
+        expect(await readFile(assetPath(result.serverUrl!))).toEqual(native);
+    });
+
+    it.each([
+        { width: 3, height: 2 },
+        { width: 12, height: 8 },
+        { width: 6, height: 5 },
+    ])("rejects product raw native geometry $width x $height before any persistence", async ({ width, height }) => {
+        const { task } = await productDeliveryTask(true);
+        const before = await savedFiles();
+        const prepared = await prepare(task, { dataUrl: dataUrl(await imageBytes(width, height)) }, "http://fixture.local", "fixture");
+        expect(prepared).toMatchObject({ results: [], batchEvidence: [expect.objectContaining({ nativeStatus: "readable", nativeSize: { width, height }, storageStatus: "unavailable", failureStage: "validation" })] });
+        expect(mediaRegistry.register).not.toHaveBeenCalled();
+        expect(await savedFiles()).toEqual(before);
+    });
+
+    it.each(["source", "source-digest", "source-length", "normalized-digest", "source-dimensions", "mask"] as const)("rejects a changed frozen product %s before persistence", async (changed) => {
+        const { task, native, delivery } = await productDeliveryTask();
+        if (changed === "source") delivery.baseline.url = dataUrl(native);
+        if (changed === "source-digest") delivery.baseline.sha256 = "0".repeat(64);
+        if (changed === "source-length") delivery.baseline.byteLength++;
+        if (changed === "normalized-digest") delivery.baseline.normalizedSha256 = "0".repeat(64);
+        if (changed === "source-dimensions") delivery.baseline.width++;
+        if (changed === "mask") delivery.protection.maskDataUrl = dataUrl(native);
+        const before = await savedFiles();
+        await expect(prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture")).rejects.toThrow();
+        expect(mediaRegistry.register).not.toHaveBeenCalled();
+        expect(await savedFiles()).toEqual(before);
+    });
+
+    it("durably retains the immutable product snapshot and independent base/native evidence", async () => {
+        const { createImageTask, getImageTask, updateImageTask } = await import("./image-task-store");
+        const { task, native } = await productDeliveryTask(true);
+        const created = await createImageTask(task);
+        const prepared = await prepare(created, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture");
+        expect(prepared.results[0].productEnhancementEvidence?.version).toBe("product-baseline.v2");
+        await updateImageTask(created.id, { result: { ...prepared.results[0], ...prepared } });
+        const restored = await getImageTask(created.id);
+        expect(restored?.enhancementDelivery).toEqual(task.enhancementDelivery);
+        expect(restored?.result?.productEnhancementEvidence).toEqual(prepared.results[0].productEnhancementEvidence);
+        expect(restored?.result?.nativeSource).toEqual(prepared.results[0].nativeSource);
+    });
+
+    it("cleans new product outputs after storage failure while preserving the already stored source", async () => {
+        const { normalizeAssets } = await import("./generation-log-repository");
+        const { compositeProductEnhancement } = await import("./image-enhancement-product-protection");
+        const { task, source, native, delivery } = await productDeliveryTask();
+        const [sourceAsset] = await normalizeAssets([{ type: "image", url: dataUrl(source) }], { ownerUserId: task.userId, source: task.source, taskId: "original-product", originalName: "original-product.png" });
+        delivery.baseline.url = sourceAsset.serverUrl!;
+        task.references[0].dataUrl = sourceAsset.serverUrl!;
+        const composite = await compositeProductEnhancement(source, native, delivery.protection, 24);
+        storage.rejectedBytes.add(composite.bytes.toString("base64"));
+        mediaRegistry.register.mockClear();
+        const before = await savedFiles();
+        await expect(prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture")).rejects.toThrow();
+        expect(mediaRegistry.register).toHaveBeenCalled();
+        expect(await savedFiles()).toEqual(before);
+        expect(await readFile(assetPath(sourceAsset.serverUrl!))).toEqual(source);
+    });
+
+    it("deletes discarded product delivery outputs while retaining their frozen source", async () => {
+        const { deletePreparedImageTaskResults } = await import("./image-task-result-service");
+        const { normalizeAssets } = await import("./generation-log-repository");
+        const { task, source, native, delivery } = await productDeliveryTask();
+        const [sourceAsset] = await normalizeAssets([{ type: "image", url: dataUrl(source) }], { ownerUserId: task.userId, source: task.source, taskId: "original-product", originalName: "original-product.png" });
+        delivery.baseline.url = sourceAsset.serverUrl!;
+        task.references[0].dataUrl = sourceAsset.serverUrl!;
+        const { results } = await prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture");
+        const proof = results[0].productEnhancementEvidence!;
+        expect(proof).toBeDefined();
+        await deletePreparedImageTaskResults(results);
+        await expect(readFile(assetPath(results[0].serverUrl!))).rejects.toThrow();
+        await expect(readFile(assetPath(proof.nativeUrl))).rejects.toThrow();
+        expect(await readFile(assetPath(sourceAsset.serverUrl!))).toEqual(source);
     });
 
     it.each([
@@ -453,6 +670,63 @@ function imageBytes(width: number, height: number) {
 
 function dataUrl(bytes: Buffer) {
     return `data:image/png;base64,${bytes.toString("base64")}`;
+}
+
+function digest(bytes: Buffer) {
+    return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function productDeliveryTask(withCanvas = false) {
+    const pixels = Buffer.alloc(6 * 4 * 4);
+    const maskPixels = Buffer.alloc(pixels.length, 255);
+    for (let y = 0; y < 4; y++)
+        for (let x = 0; x < 6; x++) {
+            const offset = (y * 6 + x) * 4;
+            pixels.set([30 + x * 10, 40 + y * 20, 180 - x * 5, 255], offset);
+            if (x >= 4 && y < 2) maskPixels[offset + 3] = 0;
+        }
+    const [source, native, mask] = await Promise.all([
+        sharp(pixels, { raw: { width: 6, height: 4, channels: 4 } })
+            .png()
+            .toBuffer(),
+        sharp({ create: { width: 6, height: 4, channels: 3, background: "red" } })
+            .png()
+            .toBuffer(),
+        sharp(maskPixels, { raw: { width: 6, height: 4, channels: 4 } })
+            .png()
+            .toBuffer(),
+    ]);
+    const task = withCanvas ? canvasTask() : imageTask({ size: "300x200" });
+    task.config.quality = "4k";
+    task.kind = "edit";
+    task.enhancementPolicy = { revision: "frozen-v2", enabled: true, connection: null };
+    task.references = [{ id: "scene", dataUrl: dataUrl(source), width: 6, height: 4, ecommerceRole: "scene" }];
+    task.mask = { id: "product-mask", type: "image/png", dataUrl: dataUrl(mask), width: 6, height: 4 };
+    task.productProtection = {
+        compilerVersion: "strict-product.v1",
+        state: "ready",
+        productAnchorId: "product",
+        sourceAssetId: "scene",
+        sourceSize: { width: 6, height: 4 },
+        productCore: [{ x: 1, y: 1, width: 2, height: 2 }],
+        fusionHalo: [
+            { x: 0, y: 0, width: 4, height: 1 },
+            { x: 0, y: 3, width: 4, height: 1 },
+            { x: 0, y: 1, width: 1, height: 2 },
+            { x: 3, y: 1, width: 1, height: 2 },
+        ],
+        editableBackground: [{ x: 4, y: 0, width: 2, height: 4 }],
+    };
+    const normalized = await sharp(source).rotate().toColourspace("srgb").ensureAlpha().png().toBuffer();
+    const delivery: Extract<EcommerceEnhancementDelivery, { scope: "product_background" }> = {
+        version: "ecommerce-delivery.v2",
+        scope: "product_background",
+        ...(withCanvas ? { canvas: structuredClone(task.ecommerceExecution!.canvas!) } : {}),
+        protection: { version: "product-enhancement.v2", normalization: "srgb-upright-v1", product: structuredClone(task.productProtection), maskDataUrl: dataUrl(mask), maskSha256: digest(mask) },
+        baseline: { url: dataUrl(source), sha256: digest(source), byteLength: source.length, width: 6, height: 4, normalizedSha256: digest(normalized) },
+    };
+    task.enhancementDelivery = delivery;
+    return { task, source, native, mask, delivery };
 }
 
 function imageTask(config: Partial<ImageTask["config"]> = {}): ImageTask {

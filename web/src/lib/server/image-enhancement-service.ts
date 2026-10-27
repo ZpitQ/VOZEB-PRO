@@ -4,7 +4,7 @@ import { imageReferenceToDataUrl } from "@/app/api/image-tasks/image-task-suppor
 import { withJsonDataFileLock } from "./data-adapter";
 import { getDatabaseProvider } from "./database/postgres";
 import { canResumeSkippedEnhancement, claimEnhancementJobs, getEnhancementJob, mutateEnhancementJob, type ImageEnhancementJob } from "./database/image-enhancement-job-repository";
-import { planImageTaskEnhancement } from "./image-enhancement-enqueue";
+import { enhancementNativeIdentityMatches, planImageTaskEnhancement } from "./image-enhancement-enqueue";
 import { ImageEnhancementConfigError, resolveImageEnhancementConnection } from "./image-enhancement-config";
 import { createEnhancementTaskClient, WorkerCheckError, type RemoteEnhancementJob } from "./image-enhancement-worker-client";
 import { GENERATION_TASK_FILE } from "./generation-task-store";
@@ -49,10 +49,7 @@ async function processEnhancement(lease: ImageEnhancementJob, origin: string) {
         if (current.cancelRequested && !current.submittedAt && !current.remoteJobId) return await finish("cancelled", "cancelled_before_submission");
         const task = await (getDatabaseProvider() === "file" ? withJsonDataFileLock(GENERATION_TASK_FILE, () => getImageTask(current.imageTaskId)) : getImageTask(current.imageTaskId));
         const native = (task?.result?.results?.length ? task.result.results : task?.result ? [task.result] : []).find((result) => result.resultId === current.resultId);
-        if (
-            !current.publication &&
-            (!task || task.status !== "success" || task.userId !== current.userId || !native || !isDeepStrictEqual(native.nativeSource, current.decision.source) || (native.serverUrl || native.dataUrl) !== current.decision.source.url)
-        )
+        if (!current.publication && (!task || task.status !== "success" || task.userId !== current.userId || !native || !enhancementNativeIdentityMatches(task, native, current.decision.source, current.decision.delivery)))
             throw new EnhancementExecutionError("native_identity_changed");
         if (!current.publication && !(current.cancelRequested && current.remoteJobId)) {
             const output = task?.ecommerceTrace?.stages.find((stage) => stage.key === "image_generation")?.output;
@@ -94,7 +91,7 @@ async function processEnhancement(lease: ImageEnhancementJob, origin: string) {
                 };
             });
         if (current.phase === "submit") {
-            const dataUrl = await imageReferenceToDataUrl({ dataUrl: current.decision.source.url }, "enhancement-native.png", origin, maintenanceWorkerContext(current.userId));
+            const dataUrl = await imageReferenceToDataUrl({ dataUrl: plan.source.url }, "enhancement-native.png", origin, maintenanceWorkerContext(current.userId), plan.budgets.input.maxBytes);
             const bytes = Buffer.from(dataUrl.split(",")[1] || "", "base64");
             if (bytes.length !== plan.source.byteLength || createHash("sha256").update(bytes).digest("hex") !== plan.sourceSha256) throw new EnhancementExecutionError("input_digest_mismatch");
             const marked = await update((job) => (job.cancelRequested && !job.submittedAt ? job : { ...job, submittedAt: job.submittedAt || Date.now() }));
@@ -156,7 +153,7 @@ export async function retryImageEnhancement(id: string, userId: string) {
         const native = (task?.result?.results?.length ? task.result.results : task?.result ? [task.result] : []).find((result) => result.resultId === initial.resultId && result.enhancementId === id);
         if (!task || task.userId !== userId || task.status !== "success" || !native || !isDeepStrictEqual(native.nativeSource, initial.decision.source)) return null;
         const decision = planImageTaskEnhancement(task, native);
-        if (decision.status !== "queued" || !isDeepStrictEqual(decision.target, initial.decision.target)) return null;
+        if (decision.status !== "queued" || !isDeepStrictEqual(decision.target, initial.decision.target) || !isDeepStrictEqual(decision.delivery, initial.decision.delivery)) return null;
         resumed = decision;
     }
     let accepted = false;

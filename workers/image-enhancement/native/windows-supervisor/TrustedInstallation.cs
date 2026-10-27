@@ -121,12 +121,14 @@ public sealed class TrustedInstallation : IDisposable
         {
             ObjectDisposedException.ThrowIf(disposed, this);
             if (!IsLocalPath(inputPath) || !IsLocalPath(outputPath)) throw InvalidArgument();
-            return Array.AsReadOnly(new[]
+            var arguments = new List<string>
             {
                 "-i", inputPath, "-o", outputPath, "-m", Launch.ModelDirectory, "-n", Launch.ModelName,
                 "-z", "4", "-t", engine.Tile.ToString(CultureInfo.InvariantCulture), "-f", "png",
                 "-g", engine.GpuId.ToString(CultureInfo.InvariantCulture),
-            });
+            };
+            if (engine.Tta) arguments.Add("-x");
+            return arguments.AsReadOnly();
         }
     }
 
@@ -347,7 +349,7 @@ public sealed class TrustedInstallation : IDisposable
     private static void ValidateSelection(EngineSelection engine)
     {
         if (engine is null || !IsModelId(engine.ModelId) || !IsVersion(engine.BinaryVersion) || !IsVersion(engine.ModelVersion) ||
-            !IsSha256(engine.BinarySha256) || !IsSha256(engine.ModelSha256) || engine.NativeScale != 4 || engine.Tta ||
+            !IsSha256(engine.BinarySha256) || !IsSha256(engine.ModelSha256) || engine.NativeScale != 4 ||
             engine.Tile < 0 || engine.Tile > MaxSafeInteger || (engine.Tile != 0 && engine.Tile < 32) ||
             engine.GpuId < 0 || engine.GpuId > MaxSafeInteger) throw InvalidArgument();
     }

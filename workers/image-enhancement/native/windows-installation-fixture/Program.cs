@@ -41,6 +41,7 @@ internal static class Program
             {
                 "T0" => Positive(context),
                 "T1" => ValidInstallation(context),
+                "TTA" => TtaArguments(context),
                 "T2" => ManifestRejections(context),
                 "T3" => BindingRejections(context),
                 "T4" => UnsafeEvidence(context),
@@ -251,6 +252,27 @@ internal static class Program
         return new { cases };
     }
 
+    private static object TtaArguments(Context context)
+    {
+        var cases = new List<object>();
+        foreach (bool tta in new[] { false, true })
+        {
+            var bundle = context.Bundle();
+            bundle.Engine = bundle.Engine with { Tta = tta };
+            var before = bundle.Snapshot();
+            var outcome = Open(context, bundle, out var installation);
+            if (installation is null) { cases.Add(new { tta, outcome }); continue; }
+            var arguments = installation.CreateArguments(bundle.Input, bundle.Output);
+            string[] expected = [.. ExpectedArguments(bundle, installation.Launch), .. (tta ? new[] { "-x" } : Array.Empty<string>())];
+            bundle.Engine = bundle.Engine with { Tta = !tta };
+            var frozen = installation.CreateArguments(bundle.Input, bundle.Output).SequenceEqual(expected);
+            var readOnly = ArgumentsReadOnly(arguments);
+            context.Release(installation);
+            cases.Add(new { tta, outcome, arguments, expectedArguments = expected, snapshotFrozen = frozen, argumentsReadOnly = readOnly, bytesAndTimesUnchanged = Equal(before, bundle.Snapshot()) });
+        }
+        return new { cases };
+    }
+
     private static object BindingRejections(Context context)
     {
         var cases = new List<object>();
@@ -261,7 +283,6 @@ internal static class Program
         Add("model-digest", b => b.Engine = b.Engine with { ModelSha256 = Different(b.Engine.ModelSha256) });
         Add("model-id", b => b.Engine = b.Engine with { ModelId = "missing-model" });
         Add("native-scale", b => b.Engine = b.Engine with { NativeScale = 2 }, true);
-        Add("tta", b => b.Engine = b.Engine with { Tta = true }, true);
         Add("tile-small", b => b.Engine = b.Engine with { Tile = 31 }, true);
         Add("tile-unsafe", b => b.Engine = b.Engine with { Tile = UnsafeInteger }, true);
         Add("gpu-negative", b => b.Engine = b.Engine with { GpuId = -1 }, true);
@@ -455,7 +476,7 @@ internal static class Program
         Engine("engine-null", null); Engine("id-empty", reference.Engine with { ModelId = "" }); Engine("id-invalid", reference.Engine with { ModelId = "bad/id" });
         Engine("version-empty", reference.Engine with { BinaryVersion = "" }); Engine("version-whitespace", reference.Engine with { BinaryVersion = "\ufeffversion" }); Engine("version-control", reference.Engine with { BinaryVersion = "v\u007f1" });
         Engine("model-version-empty", reference.Engine with { ModelVersion = "" }); Engine("binary-hash-invalid", reference.Engine with { BinarySha256 = "invalid" }); Engine("model-hash-invalid", reference.Engine with { ModelSha256 = "invalid" });
-        Engine("scale-invalid", reference.Engine with { NativeScale = 3 }); Engine("tta-invalid", reference.Engine with { Tta = true }); Engine("tile-negative", reference.Engine with { Tile = -1 }); Engine("tile-invalid", reference.Engine with { Tile = 1 });
+        Engine("scale-invalid", reference.Engine with { NativeScale = 3 }); Engine("tile-negative", reference.Engine with { Tile = -1 }); Engine("tile-invalid", reference.Engine with { Tile = 1 });
         Engine("tile-unsafe", reference.Engine with { Tile = UnsafeInteger }); Engine("gpu-negative", reference.Engine with { GpuId = -1 }); Engine("gpu-unsafe", reference.Engine with { GpuId = UnsafeInteger });
         return variants.Select((variant, index) =>
         {

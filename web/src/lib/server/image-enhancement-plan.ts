@@ -1,5 +1,6 @@
 import type { FrozenEnhancementConnection } from "./image-enhancement-config";
 import type { ImageEnhancementSkip } from "@/lib/image-enhancement-contract";
+import type { EcommerceEnhancementDelivery } from "./image-enhancement-delivery";
 
 export type EnhancementSource = {
     url: string;
@@ -12,6 +13,10 @@ export type EnhancementSource = {
     provenance: "provider_native" | "ai_enhanced";
 };
 type Dimensions = { width: number; height: number };
+export type EnhancementDeliverySnapshot = {
+    contract: EcommerceEnhancementDelivery;
+    baseline: Omit<EnhancementSource, "provenance">;
+};
 export type EnhancementPlanningInput = {
     nativeValid: boolean;
     enabled: boolean;
@@ -21,9 +26,10 @@ export type EnhancementPlanningInput = {
     source: EnhancementSource;
     target: Dimensions;
     connection: FrozenEnhancementConnection | null;
+    delivery?: EnhancementDeliverySnapshot;
 };
 type EnhancementSkipReason = ImageEnhancementSkip["reason"] | "provider_unavailable" | "native_sufficient" | "already_enhanced" | "unsupported_transparency" | "unsupported_media_type" | "aspect_ratio_mismatch" | "unsupported_target";
-type NativeSnapshot = { source: Readonly<EnhancementSource>; target: Readonly<Dimensions> };
+type NativeSnapshot = { source: Readonly<EnhancementSource>; target: Readonly<Dimensions>; delivery?: EnhancementDeliverySnapshot; requestedTarget?: Readonly<Dimensions> };
 export type EnhancementDecision = Readonly<
     NativeSnapshot & ({ status: "queued"; reason: null; connection: FrozenEnhancementConnection; inference: Readonly<Dimensions> } | { status: "skipped"; reason: EnhancementSkipReason } | { status: "rejected"; reason: "native_invalid" })
 >;
@@ -35,21 +41,31 @@ export function imageEnhancementExclusion(input: Pick<EnhancementPlanningInput, 
 
 export function planImageEnhancement(input: EnhancementPlanningInput): EnhancementDecision {
     const source = Object.freeze({ ...input.source });
-    const target = Object.freeze({ ...input.target });
-    const skipped = (reason: EnhancementSkipReason): EnhancementDecision => Object.freeze({ status: "skipped", reason, source, target });
+    const delivery = input.delivery ? structuredClone(input.delivery) : undefined;
+    const background = delivery?.contract.scope === "product_background";
+    const local = delivery?.contract.scope === "local_edit";
+    const inferenceSource = local ? delivery.baseline : source;
+    const requestedTarget = Object.freeze({ ...input.target });
+    const target = Object.freeze(background || local ? { width: inferenceSource.width, height: inferenceSource.height } : { ...input.target });
+    const snapshot = { source, target, ...(delivery ? { delivery, requestedTarget } : {}) };
+    const skipped = (reason: EnhancementSkipReason): EnhancementDecision => Object.freeze({ status: "skipped", reason, ...snapshot });
     const positive = (value: number) => Number.isSafeInteger(value) && value > 0;
-    if (!input.nativeValid || ![source.width, source.height, source.byteLength].every(positive) || !source.url || !/^[a-f0-9]{64}$/.test(source.sha256)) return Object.freeze({ status: "rejected", reason: "native_invalid", source, target });
+    if (!input.nativeValid || ![source.width, source.height, source.byteLength].every(positive) || !source.url || !/^[a-f0-9]{64}$/.test(source.sha256)) return Object.freeze({ status: "rejected", reason: "native_invalid", ...snapshot });
     const exclusion = imageEnhancementExclusion(input);
     if (exclusion) return skipped(exclusion.reason);
-    if (![target.width, target.height].every(positive)) return skipped("unsupported_target");
-    const scale = Math.min(target.width / source.width, target.height / source.height);
-    if (scale <= 1) return skipped("native_sufficient");
+    if (![target.width, target.height, requestedTarget.width, requestedTarget.height].every(positive)) return skipped("unsupported_target");
+    const scale = Math.min(target.width / inferenceSource.width, target.height / inferenceSource.height);
+    if (scale <= 1 && !background && !local) return skipped("native_sufficient");
     if (source.provenance === "ai_enhanced") return skipped("already_enhanced");
-    if (source.hasAlpha) return skipped("unsupported_transparency");
-    if (!["png", "jpeg"].includes(source.format)) return skipped("unsupported_media_type");
+    if (inferenceSource.hasAlpha) return skipped("unsupported_transparency");
+    if (!["png", "jpeg"].includes(inferenceSource.format)) return skipped("unsupported_media_type");
     if (!input.connection) return skipped("provider_unavailable");
     const connection = Object.freeze({ ...input.connection, model: Object.freeze({ ...input.connection.model, allowedTiles: Object.freeze([...input.connection.model.allowedTiles]) }) });
-    const inference = Object.freeze({ width: source.width * connection.model.nativeScale, height: source.height * connection.model.nativeScale });
+    const inference = Object.freeze({ width: inferenceSource.width * connection.model.nativeScale, height: inferenceSource.height * connection.model.nativeScale });
     if (![inference.width, inference.height].every(positive) || scale > connection.model.nativeScale) return skipped("unsupported_target");
-    return Object.freeze({ status: "queued", reason: null, source, target, connection, inference });
+    return Object.freeze({ status: "queued", reason: null, ...snapshot, connection, inference });
+}
+
+export function enhancementInferenceSource(decision: Pick<EnhancementDecision, "source" | "delivery">): Readonly<Omit<EnhancementSource, "provenance">> {
+    return decision.delivery?.contract.scope === "local_edit" ? decision.delivery.baseline : decision.source;
 }

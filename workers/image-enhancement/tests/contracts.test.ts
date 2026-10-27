@@ -13,6 +13,80 @@ import {
 } from "../src/contracts.js";
 import { configInput, planInput } from "./fixtures.js";
 
+describe("M5 TTA frozen strategy", () => {
+  it.each([false, true])("preserves model TTA default %s", (tta) => {
+    const input = configInput();
+    input.models[0]!.tta = tta;
+    const config = createWorkerConfig(input);
+    expect(config.models[0]!.tta).toBe(tta);
+    expect(normalizePlan(planInput(), config).engine.tta).toBe(tta);
+  });
+
+  it.each([undefined, null, 0, 1, "false", "true", [], {}])(
+    "rejects non-boolean configured TTA %#",
+    (tta) => {
+      const input = configInput();
+      Object.assign(input.models[0]!, { tta });
+      expect(() => createWorkerConfig(input)).toThrowError(
+        expect.objectContaining({ code: "configuration_invalid", status: 503 }),
+      );
+    },
+  );
+
+  it.each([false, true])("preserves explicit request TTA %s", (tta) => {
+    expect(parsePlanRequest({ ...planInput(), tta })).toMatchObject({ tta });
+  });
+
+  it.each([undefined, null, 0, 1, "false", "true", [], {}])(
+    "rejects non-boolean request TTA %#",
+    (tta) => {
+      expect(() => parsePlanRequest({ ...planInput(), tta })).toThrowError(
+        expect.objectContaining({ code: "invalid_plan", status: 422 }),
+      );
+    },
+  );
+
+  it.each([false, true])(
+    "lets explicit TTA override model default %s and changes both frozen fingerprints",
+    (tta) => {
+      const input = configInput();
+      input.models[0]!.tta = tta;
+      const config = createWorkerConfig(input);
+      const baseline = normalizePlan(planInput(), config);
+      const changed = normalizePlan({ ...planInput(), tta: !tta }, config);
+      expect(changed.engine.tta).toBe(!tta);
+      expect(changed.strategyFingerprint).not.toBe(baseline.strategyFingerprint);
+      expect(changed.planFingerprint).not.toBe(baseline.planFingerprint);
+      expect(baseline.engine.tta).toBe(tta);
+    },
+  );
+
+  it("distinguishes explicit TTA choices without changing an omitted request identity", () => {
+    const input = planInput();
+    const omitted = parsePlanRequest(input);
+    const enabled = parsePlanRequest({ ...input, tta: true });
+    const disabled = parsePlanRequest({ ...input, tta: false });
+    expect(Object.hasOwn(omitted, "tta")).toBe(false);
+    const previousIdentity = createHash("sha256")
+      .update(JSON.stringify({
+        protocolVersion: input.protocolVersion,
+        scope: input.scope,
+        sourceSha256: input.sourceSha256,
+        target: input.target,
+        modelId: input.modelId,
+        normalizationProfile: input.normalizationProfile,
+        tile: input.tile,
+      }))
+      .digest("hex");
+    expect(requestFingerprint(omitted, 256)).toBe(previousIdentity);
+    expect(new Set([
+      requestFingerprint(omitted, 256),
+      requestFingerprint(enabled, 256),
+      requestFingerprint(disabled, 256),
+    ]).size).toBe(3);
+  });
+});
+
 describe("M2-A frozen enhancement plan", () => {
   it("accepts the exact expected strategy without changing frozen plan identity", () => {
     const config = createWorkerConfig(configInput());

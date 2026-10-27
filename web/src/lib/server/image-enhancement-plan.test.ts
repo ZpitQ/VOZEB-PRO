@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { planImageEnhancement, type EnhancementPlanningInput } from "./image-enhancement-plan";
+import type { EcommerceEnhancementDelivery } from "./image-enhancement-delivery";
 
 function fixture(): EnhancementPlanningInput {
     return {
@@ -21,6 +22,35 @@ function fixture(): EnhancementPlanningInput {
 }
 
 describe("ordinary-image enhancement planning", () => {
+    it("keeps a product background delivery on the original canvas while inferring native 4x", () => {
+        const input = fixture();
+        const contract: EcommerceEnhancementDelivery = {
+            version: "ecommerce-delivery.v2",
+            scope: "product_background",
+            baseline: { url: "/api/reference-assets/product.png", sha256: "a".repeat(64), byteLength: 1000, width: 1254, height: 1254, normalizedSha256: "b".repeat(64) },
+            protection: {
+                version: "product-enhancement.v2",
+                normalization: "srgb-upright-v1",
+                maskDataUrl: "data:image/png;base64,AA==",
+                maskSha256: "c".repeat(64),
+                product: {
+                    compilerVersion: "strict-product.v1",
+                    state: "ready",
+                    productAnchorId: "root",
+                    sourceAssetId: "product",
+                    sourceSize: { width: 1254, height: 1254 },
+                    productCore: [{ x: 1, y: 1, width: 10, height: 10 }],
+                    fusionHalo: [],
+                    editableBackground: [],
+                },
+            },
+        };
+        const delivery = { contract, baseline: { ...input.source, url: "/api/generation-log-assets/product-composite.png" } };
+        const decision = planImageEnhancement({ ...input, delivery } as EnhancementPlanningInput);
+        expect(decision).toMatchObject({ status: "queued", target: { width: 1254, height: 1254 }, requestedTarget: { width: 4096, height: 4096 }, inference: { width: 5016, height: 5016 }, delivery });
+        contract.protection.product.productAnchorId = "new-root";
+        expect(decision).toHaveProperty("delivery.contract.protection.product.productAnchorId", "root");
+    });
     it.each([
         [1254, 1254, 4096, 4096, 5016, 5016],
         [1600, 900, 3840, 2160, 6400, 3600],

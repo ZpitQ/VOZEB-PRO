@@ -16,11 +16,12 @@ test("administrator configures enhancement while disabled and controls readiness
         .png()
         .toBuffer();
     const output = { width: 32, height: 32, byteLength: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), format: "png" };
-    const model = { id: "fixture-model", binaryVersion: "v1", binarySha256: "a".repeat(64), modelVersion: "v1", modelSha256: "b".repeat(64), nativeScale: 4, allowedTiles: [0], defaultTile: 0, tta: false, gpuId: 0 };
+    const model = { id: "fixture-model", binaryVersion: "v1", binarySha256: "a".repeat(64), modelVersion: "v1", modelSha256: "b".repeat(64), nativeScale: 4, allowedTiles: [0], defaultTile: 0, tta: false, ttaModes: [false, true], gpuId: 0 };
     const alternate = { ...model, id: "fixture-alternative", modelVersion: "v2", modelSha256: "c".repeat(64) };
     const serviceId = "31313131-3131-4131-8131-313131313131";
     const jobId = "42424242-4242-4242-8242-424242424242";
     let rejectAccess = false;
+    let supportsTta = true;
     const calls: string[] = [];
     const server = createServer((req, res) => {
         calls.push(`${req.method} ${req.url}`);
@@ -34,7 +35,14 @@ test("administrator configures enhancement while disabled and controls readiness
         }
         const data =
             req.url === "/v1/capabilities"
-                ? { serviceId, protocolVersion: "image-enhancement.v1", normalizationProfile: "srgb-upright-v1", models: [model, alternate], budgets: { ai: { maxBytes: 1_000_000, maxPixels: 1_000_000 } }, ready: true }
+                ? {
+                      serviceId,
+                      protocolVersion: "image-enhancement.v1",
+                      normalizationProfile: "srgb-upright-v1",
+                      models: [model, alternate].map(({ ttaModes, ...entry }) => ({ ...entry, ...(supportsTta ? { ttaModes } : {}) })),
+                      budgets: { ai: { maxBytes: 1_000_000, maxPixels: 1_000_000 } },
+                      ready: true,
+                  }
                 : req.url === "/v1/self-test"
                   ? { bootId: "fixture-boot", assetId: "zeb-enhancement-calibration-v1", phase: "output_verified", qualification: "qualified", jobId, reason: null, output }
                   : { job: { serviceId, jobId, status: "succeeded", source: { width: 8, height: 8 }, engineInput: { width: 8, height: 8 }, result: output, plan: { engine: { ...model, modelId: model.id, tile: model.defaultTile } } } };
@@ -47,7 +55,14 @@ test("administrator configures enhancement while disabled and controls readiness
         await page.goto("/admin?section=imageEnhancement");
         await expect(page.getByRole("heading", { name: "AI 高清增强", level: 3, exact: true })).toBeVisible();
         const toggle = page.getByRole("switch", { name: "启用 AI 高清增强" });
+        const tta = page.getByRole("switch", { name: "精细增强（TTA）", exact: true });
+        const saveConfig = async () => {
+            const [saved] = await Promise.all([page.waitForResponse((response) => response.url().endsWith("/api/admin/image-enhancement") && response.request().method() === "PATCH"), page.getByRole("button", { name: "保存配置", exact: true }).click()]);
+            expect(saved.ok()).toBe(true);
+        };
         await expect(toggle).not.toBeChecked();
+        await expect(tta).not.toBeChecked();
+        await expect(tta).toBeDisabled();
         await expect(toggle).toBeDisabled();
         const contrast = await page.getByText("保存配置后，依次检查连接和样图；通过前无法首次开启。", { exact: true }).evaluate((element) => {
             const root = element.closest(".ant-alert")!;
@@ -79,7 +94,24 @@ test("administrator configures enhancement while disabled and controls readiness
         await page.getByLabel("默认增强模型", { exact: true }).click();
         await expect(page.getByRole("option", { name: "fixture-model · 原生 ×4", exact: true })).toBeAttached();
         await page.getByText("fixture-alternative · 原生 ×4", { exact: true }).click();
-        await page.getByRole("button", { name: "保存配置", exact: true }).click();
+        await saveConfig();
+        await expect(tta).toBeEnabled();
+        await tta.click();
+        await saveConfig();
+        const ttaSaved = (await (await request.get("/api/admin/image-enhancement")).json()).data;
+        expect(ttaSaved).toMatchObject({ modelId: alternate.id, tta: true, ready: false });
+        await expect(tta).toBeChecked();
+        await page.reload();
+        await expect(tta).toBeChecked();
+        await expect(page.getByText("fixture-alternative · 原生 ×4", { exact: true })).toBeVisible();
+        await page.getByLabel("默认增强模型", { exact: true }).click();
+        await page.getByText("fixture-model · 原生 ×4", { exact: true }).click();
+        await expect(tta).toBeChecked();
+        await saveConfig();
+        await page.getByLabel("默认增强模型", { exact: true }).click();
+        await page.getByText("fixture-alternative · 原生 ×4", { exact: true }).click();
+        await saveConfig();
+        await expect(tta).toBeChecked();
         await page.getByRole("button", { name: "样图自检", exact: true }).click();
         await expect(page.getByText("样图已完整下载和解码，当前配置检查通过。", { exact: true })).toBeVisible();
         await expect(toggle).toBeEnabled();
@@ -88,6 +120,12 @@ test("administrator configures enhancement while disabled and controls readiness
         await page.reload();
         await expect(toggle).toBeChecked();
         await expect(page.getByText("fixture-alternative · 原生 ×4", { exact: true })).toBeVisible();
+        await expect(tta).toBeChecked();
+        await tta.click();
+        await saveConfig();
+        expect((await (await request.get("/api/admin/image-enhancement")).json()).data).toMatchObject({ modelId: alternate.id, tta: false, ready: false });
+        await page.reload();
+        await expect(tta).not.toBeChecked();
         rejectAccess = true;
         await page.getByRole("button", { name: "检查连接", exact: true }).click();
         await expect(page.getByText("增强服务拒绝访问密钥，请替换有效密钥。", { exact: true })).toBeVisible();
@@ -97,6 +135,10 @@ test("administrator configures enhancement while disabled and controls readiness
         rejectAccess = false;
         await page.getByRole("button", { name: "样图自检", exact: true }).click();
         await expect(page.getByText("样图已完整下载和解码，当前配置检查通过。", { exact: true })).toBeVisible();
+        supportsTta = false;
+        await page.getByRole("button", { name: "检查连接", exact: true }).click();
+        await expect(tta).toBeDisabled();
+        await expect(page.getByText(/升级 Worker.*TTA/)).toBeVisible();
         const clear = page.getByRole("button", { name: "清除访问密钥", exact: true });
         await clear.click();
         await page.getByRole("button", { name: "确认清除", exact: true }).click();
@@ -106,7 +148,7 @@ test("administrator configures enhancement while disabled and controls readiness
         await expect(page.getByText("尚未配置访问密钥", { exact: false })).toBeVisible();
         const saved = await request.get("/api/admin/image-enhancement");
         const settings = (await saved.json()).data;
-        expect(settings).toMatchObject({ hasToken: false, ready: false, enabled: false });
+        expect(settings).toMatchObject({ hasToken: false, ready: false, enabled: false, tta: false });
         expect(JSON.stringify(settings)).not.toContain(access);
         expect(calls.every((call) => call.startsWith("GET"))).toBe(true);
         const bounds = await page.locator('[data-testid="enhancement-connection-grid"]').evaluate((element) => ({

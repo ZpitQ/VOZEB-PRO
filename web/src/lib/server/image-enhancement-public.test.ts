@@ -43,6 +43,45 @@ function fixture(): ImageEnhancementJob {
     };
 }
 describe("public image enhancement summary", () => {
+    it.each([false, true])("publishes the persisted TTA choice %s without consulting current settings", (tta) => {
+        const job = fixture();
+        if (job.decision.status !== "queued") throw new Error("expected queued fixture");
+        job.decision = { ...job.decision, connection: { ...job.decision.connection, model: { ...job.decision.connection.model, tta } } };
+        expect(publicImageEnhancement(job).model).toMatchObject({ id: "fixture-model", tta });
+    });
+    it("shows the qualified product original and raw native as separate identities without disclosing masks", () => {
+        const job = fixture();
+        const source = job.decision.source;
+        const baseline = { ...source, url: "/api/generation-log-assets/product-base.png", sha256: "d".repeat(64) };
+        job.decision = {
+            ...job.decision,
+            target: { width: 1254, height: 1254 },
+            requestedTarget: { width: 4096, height: 4096 },
+            delivery: {
+                contract: {
+                    version: "ecommerce-delivery.v2",
+                    scope: "product_background",
+                    baseline: { url: "/api/reference-assets/source.png", sha256: "e".repeat(64), width: 1254, height: 1254, byteLength: 1000, normalizedSha256: "f".repeat(64) },
+                    protection: {
+                        version: "product-enhancement.v2",
+                        normalization: "srgb-upright-v1",
+                        maskDataUrl: "private-mask-data",
+                        maskSha256: "b".repeat(64),
+                        product: { compilerVersion: "strict-product.v1", state: "ready", productAnchorId: "root", sourceAssetId: "source", sourceSize: { width: 1254, height: 1254 }, productCore: [], fusionHalo: [], editableBackground: [] },
+                    },
+                },
+                baseline,
+            },
+        };
+        const summary = publicImageEnhancement(job);
+        expect(summary).toMatchObject({
+            native: { url: baseline.url, sha256: baseline.sha256, provenance: "protected_composite" },
+            providerNative: { url: source.url, sha256: source.sha256 },
+            delivery: { version: "ecommerce-delivery.v2", scope: "product_background", requestedTarget: { width: 4096, height: 4096 } },
+        });
+        expect(JSON.stringify(summary)).not.toContain("private-");
+        expect(summary).not.toHaveProperty("delivery.protectedChangedPixels");
+    });
     it("publishes only finite measured timing fields for the current attempt", () => {
         const job = fixture();
         Object.assign(job, { timings: { workerQueueMs: 0, workerExecutionMs: 125.5, deliveryEncodingMs: 2.75, ownerDescriptor: "private-timing-descriptor", path: "private-timing-path" } });

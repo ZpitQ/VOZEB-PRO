@@ -3,9 +3,10 @@ import { isDeepStrictEqual } from "node:util";
 import sharp from "sharp";
 import { Agent, FormData, request } from "undici";
 import type { EnhancementCheck, EnhancementModel, EnhancementSize, ImageEnhancementTimings } from "@/lib/image-enhancement-contract";
-import type { EnhancementDecision, EnhancementSource } from "./image-enhancement-plan";
+import { supportsEnhancementTta } from "@/lib/image-enhancement-contract";
+import { enhancementInferenceSource, type EnhancementDecision, type EnhancementSource } from "./image-enhancement-plan";
 
-type Connection = { endpoint: string; token: string; trust: "system" | "custom_ca"; caPem: string; timeoutMs: number | null; modelId: string; serviceId: string | null };
+type Connection = { endpoint: string; token: string; trust: "system" | "custom_ca"; caPem: string; timeoutMs: number | null; modelId: string; serviceId: string | null; tta?: boolean };
 type Report = { check: Omit<EnhancementCheck, "revision">; models?: EnhancementModel[]; serviceId?: string };
 export class WorkerCheckError extends Error {
     constructor(readonly reason: string) {
@@ -96,12 +97,13 @@ export async function inspectEnhancementWorker(connection: Connection, sample: b
         report.models = capabilities.models.map(parseModel);
         if (new Set(report.models.map((model) => model.id)).size !== report.models.length) fail("invalid_response");
         if (!report.models.length) fail("model_unavailable");
+        const selected = report.models.find((model) => model.id === connection.modelId);
+        if (connection.tta && !supportsEnhancementTta(selected, true)) fail("tta_unavailable");
         if (!sample) {
             report.check = { ...report.check, stage: "engine", state: capabilities.ready === true ? "pending" : "unavailable", reason: capabilities.ready === true ? "sample_required" : "engine_unavailable" };
             return report;
         }
         report.check = { ...report.check, stage: "sample" };
-        const selected = report.models.find((model) => model.id === connection.modelId);
         if (!selected) fail("model_unavailable");
         let selfTest = await json("/v1/self-test");
         // The Worker owns one fixed idempotent self-test per boot. Never submit another job after an unknown result.
@@ -123,7 +125,8 @@ export async function inspectEnhancementWorker(connection: Connection, sample: b
         const calibration = report.models.find((model) => model.id === engine.modelId);
         if (
             !calibration ||
-            ["binaryVersion", "binarySha256", "modelVersion", "modelSha256", "nativeScale", "gpuId", "tta"].some((key) => engine[key] !== calibration[key as keyof EnhancementModel]) ||
+            ["binaryVersion", "binarySha256", "modelVersion", "modelSha256", "nativeScale", "gpuId"].some((key) => engine[key] !== calibration[key as keyof EnhancementModel]) ||
+            engine.tta !== false ||
             !calibration.allowedTiles.includes(engine.tile as number)
         )
             fail("sample_model_mismatch");
@@ -175,12 +178,13 @@ export type FrozenWorkerEnhancementPlan = Readonly<{
     scope: "full_image";
     target: Readonly<EnhancementSize & { format: "png" }>;
     normalizationProfile: "srgb-upright-v1";
-    engine: Readonly<{ modelId: string; binaryVersion: string; binarySha256: string; modelVersion: string; modelSha256: string; nativeScale: 4; tile: number; tta: false; gpuId: number }>;
+    engine: Readonly<{ modelId: string; binaryVersion: string; binarySha256: string; modelVersion: string; modelSha256: string; nativeScale: 4; tile: number; tta: boolean; gpuId: number }>;
     budgets: EnhancementWorkerBudgets;
     sourceSha256: string;
     strategyFingerprint: string;
     planFingerprint: string;
-    source: Readonly<EnhancementSource>;
+    source: Readonly<Omit<EnhancementSource, "provenance">>;
+    requestTta?: boolean;
 }>;
 export type RemoteEnhancementJob = Readonly<{
     jobId: string;
@@ -223,6 +227,7 @@ export function createEnhancementTaskClient(connection: TaskConnection) {
             (expectedId && id !== expectedId) ||
             remotePlan.planFingerprint !== plan.planFingerprint ||
             remotePlan.strategyFingerprint !== plan.strategyFingerprint ||
+            object(remotePlan.engine).tta !== plan.engine.tta ||
             object(data.source).sha256 !== plan.sourceSha256 ||
             engineInput.width !== plan.source.width ||
             engineInput.height !== plan.source.height
@@ -262,14 +267,22 @@ export function createEnhancementTaskClient(connection: TaskConnection) {
                 if (capabilities.ready !== true) fail("engine_unavailable");
                 if (!Array.isArray(capabilities.models)) fail("invalid_response");
                 const selected = capabilities.models.map(parseModel).find((model) => model.id === decision.connection.model.id);
-                if (!selected || !isDeepStrictEqual(selected, decision.connection.model)) fail("model_unavailable");
+                const captured = decision.connection.model;
+                if (
+                    !selected ||
+                    ["id", "binaryVersion", "binarySha256", "modelVersion", "modelSha256", "nativeScale", "gpuId"].some((key) => selected[key as keyof EnhancementModel] !== captured[key as keyof EnhancementModel]) ||
+                    !selected.allowedTiles.includes(captured.defaultTile)
+                )
+                    fail("model_unavailable");
+                if (!supportsEnhancementTta(selected, captured.tta)) fail("tta_unavailable");
                 const raw = object(capabilities.budgets);
                 const budget = (key: string) => Object.freeze({ maxBytes: positive(object(raw[key]).maxBytes), maxPixels: positive(object(raw[key]).maxPixels) });
                 const budgets = Object.freeze({ input: budget("input"), ai: budget("ai"), delivery: budget("delivery") });
+                const source = enhancementInferenceSource(decision);
                 const inferencePixels = BigInt(decision.inference.width) * BigInt(decision.inference.height);
                 if (
-                    decision.source.byteLength > budgets.input.maxBytes ||
-                    BigInt(decision.source.width) * BigInt(decision.source.height) > BigInt(budgets.input.maxPixels) ||
+                    source.byteLength > budgets.input.maxBytes ||
+                    BigInt(source.width) * BigInt(source.height) > BigInt(budgets.input.maxPixels) ||
                     inferencePixels > BigInt(budgets.ai.maxPixels) ||
                     inferencePixels > BigInt(budgets.delivery.maxPixels) ||
                     BigInt(decision.target.width) * BigInt(decision.target.height) > BigInt(budgets.delivery.maxPixels)
@@ -284,23 +297,29 @@ export function createEnhancementTaskClient(connection: TaskConnection) {
                     modelVersion: selected.modelVersion,
                     modelSha256: selected.modelSha256,
                     nativeScale: selected.nativeScale,
-                    tile: selected.defaultTile,
-                    tta: selected.tta,
+                    tile: captured.defaultTile,
+                    tta: captured.tta,
                     gpuId: selected.gpuId,
                 });
                 const strategy = { protocolVersion: "image-enhancement.v1" as const, scope: "full_image" as const, target, normalizationProfile: "srgb-upright-v1" as const, engine, budgets };
                 return Object.freeze({
                     ...strategy,
-                    sourceSha256: decision.source.sha256,
+                    sourceSha256: source.sha256,
                     strategyFingerprint: fingerprint(strategy),
-                    planFingerprint: fingerprint({ sourceSha256: decision.source.sha256, ...strategy }),
-                    source: Object.freeze({ ...decision.source }),
+                    planFingerprint: fingerprint({ sourceSha256: source.sha256, ...strategy }),
+                    source: Object.freeze({ ...source }),
+                    ...(selected.ttaModes ? { requestTta: captured.tta } : {}),
                 });
             }),
         submit: (plan: FrozenWorkerEnhancementPlan, bytes: Buffer, key: string) =>
             safe(async () => {
                 if (bytes.length !== plan.source.byteLength || createHash("sha256").update(bytes).digest("hex") !== plan.sourceSha256) fail("input_digest_mismatch");
-                await identity();
+                const capabilities = await identity();
+                if (!Array.isArray(capabilities.models)) fail("invalid_response");
+                const selected = capabilities.models.map(parseModel).find((model) => model.id === plan.engine.modelId);
+                if (!selected) fail("model_unavailable");
+                if (!supportsEnhancementTta(selected, plan.engine.tta)) fail("tta_unavailable");
+                if ((plan.requestTta ?? false) !== plan.engine.tta) fail("invalid_response");
                 const body = new FormData();
                 body.append(
                     "plan",
@@ -312,6 +331,8 @@ export function createEnhancementTaskClient(connection: TaskConnection) {
                         modelId: plan.engine.modelId,
                         normalizationProfile: plan.normalizationProfile,
                         tile: plan.engine.tile,
+                        // Field presence belongs to the frozen request identity, even after a Worker upgrade.
+                        ...(plan.requestTta !== undefined ? { tta: plan.requestTta } : {}),
                         expectedStrategyFingerprint: plan.strategyFingerprint,
                     }),
                 );
@@ -390,7 +411,10 @@ function parseModel(value: unknown): EnhancementModel {
         !data.allowedTiles.length ||
         !data.allowedTiles.every((tile) => Number.isSafeInteger(tile) && tile >= 0) ||
         !data.allowedTiles.includes(data.defaultTile) ||
-        data.tta !== false ||
+        typeof data.tta !== "boolean" ||
+        (data.ttaModes === undefined
+            ? data.tta !== false
+            : !Array.isArray(data.ttaModes) || !data.ttaModes.length || !data.ttaModes.every((mode) => typeof mode === "boolean") || new Set(data.ttaModes).size !== data.ttaModes.length || !data.ttaModes.includes(data.tta)) ||
         !Number.isSafeInteger(data.gpuId) ||
         Number(data.gpuId) < 0
     )
@@ -404,7 +428,8 @@ function parseModel(value: unknown): EnhancementModel {
         nativeScale: 4,
         allowedTiles: [...data.allowedTiles] as number[],
         defaultTile: data.defaultTile as number,
-        tta: false,
+        tta: data.tta as boolean,
+        ...(data.ttaModes === undefined ? {} : { ttaModes: [...(data.ttaModes as boolean[])] }),
         gpuId: data.gpuId as number,
     };
 }

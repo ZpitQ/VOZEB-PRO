@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { buildSceneEditProtection } from "@/lib/server/ecommerce-product-regions";
 import { EcommerceReferenceDispatchConflict } from "@/lib/server/ecommerce-reference-dispatch";
@@ -52,6 +53,46 @@ import { maxDuration, POST } from "./route";
 import { createCanvasImageLayerGrant } from "@/lib/server/canvas-image-layer-grant";
 
 describe("image task route", () => {
+    it.each([
+        [true, "4k"],
+        [false, "4k"],
+        [true, "2k"],
+    ] as const)("freezes a real protected source only for 4K with a decodable mask through creation (mask=%s, quality=%s)", async (validMask, quality) => {
+        mocks.withGenerationConcurrencyLimit.mockImplementation(async (_userId, _type, _staleMs, _limit, handler) => handler());
+        mocks.getAuthSettings.mockResolvedValue(strictProviderFallbackSettings());
+        mocks.createImageTask.mockImplementation(async (input) => ({ ...input, id: "protected-created", status: "pending" }));
+        const source = await sharp({ create: { width: 1000, height: 800, channels: 3, background: "#876543" } })
+            .png()
+            .toBuffer();
+        const maskPixels = Buffer.alloc(1000 * 800 * 4, 255);
+        for (let x = 0; x < 1000; x++) maskPixels[x * 4 + 3] = 0;
+        const mask = await sharp(maskPixels, { raw: { width: 1000, height: 800, channels: 4 } })
+            .png()
+            .toBuffer();
+        const regions = trustedProductProtectionRegions();
+        regions.editableBackground.mask.reference.dataUrl = validMask ? `data:image/png;base64,${mask.toString("base64")}` : "data:image/png;base64,AA==";
+        const response = await POST(
+            imageRequest({
+                kind: "edit",
+                config: { model: "strict-image", quality },
+                prompt: "替换商品背景",
+                references: [{ id: "product-asset", type: "image/png", dataUrl: `data:image/png;base64,${source.toString("base64")}`, width: 1000, height: 800 }],
+                productProtectionRegions: regions,
+            }),
+        );
+        expect(response.status).toBe(200);
+        const created = mocks.createImageTask.mock.calls[0][0];
+        if (validMask && quality === "4k")
+            expect(created.enhancementDelivery).toMatchObject({
+                version: "ecommerce-delivery.v2",
+                scope: "product_background",
+                baseline: { sha256: createHash("sha256").update(source).digest("hex"), width: 1000, height: 800 },
+                protection: { maskSha256: createHash("sha256").update(mask).digest("hex"), product: { productAnchorId: "product-asset" } },
+            });
+        else expect(created.enhancementDelivery).toBeUndefined();
+        expect(await response.json()).not.toHaveProperty("task.enhancementDelivery");
+        expect(mocks.after).toHaveBeenCalledOnce();
+    });
     it.each(["valid", "invalid_mapping"])("checks v4 product execution through the actual Route (%s)", async (condition) => {
         mocks.withGenerationConcurrencyLimit.mockImplementation(async (_userId, _type, _staleMs, _limit, handler) => handler());
         mocks.getAuthSettings.mockResolvedValue(ecommerceSnapshotSettings());

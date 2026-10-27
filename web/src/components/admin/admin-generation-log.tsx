@@ -262,6 +262,7 @@ function GenerationLogEnhancementSection({ asset }: { asset: GenerationLogAsset 
                 <InfoBox label="模型 ID" value={enhancement?.model?.id || "未取得"} />
                 <InfoBox label="引擎版本" value={enhancement?.model?.binaryVersion || "未取得"} />
                 <InfoBox label="模型版本" value={enhancement?.model?.modelVersion || "未取得"} />
+                <InfoBox label="精细增强（TTA）" value={typeof enhancement?.model?.tta === "boolean" ? (enhancement.model.tta ? "开启" : "关闭") : "未取得"} />
                 <InfoBox label="尝试" value={formatEnhancementAttempt(enhancement?.attempt)} />
                 <InfoBox label="当前阶段" value={enhancement ? enhancementStageLabel(enhancement.phase) : "未取得"} />
                 <InfoBox label="原因" value={reason ? enhancementReasonLabel(reason) : "未取得"} />

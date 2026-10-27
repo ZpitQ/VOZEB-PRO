@@ -206,6 +206,8 @@
 
 ## Mandatory Testing
 
+- 自定义 `NEXT_DIST_DIR` 的桌面回归必须先保存 `web/tsconfig.json` 与 `web/next-env.d.ts` 的原始字节，结束后精确恢复本轮自动生成差异；不得提交临时类型目录。限定单文件或用例时先用 Playwright `--list` 确认实际匹配，文件正则须锚定路径边界，避免后缀误匹配其他创作测试。
+
 - After every code change, run relevant automated checks and affected desktop browser flows before reporting completion. Reuse unchanged evidence and broaden coverage only for shared changes or unresolved failures.
 - 协议回归默认必须使用仓库内本地 TCP fixture、每次运行确认空闲的随机端口和固定测试凭据，禁止读取或调用管理员后台已配置的真实渠道/API；只有用户明确要求真实上游验收时才允许调用，并必须单独报告测试范围。
 - Cover affected desktop workflows, visible actions and actual provider contracts. Run Playwright with `--project=chromium`; mobile projects are outside the default acceptance scope. Do not repeat unrelated workbench, Canvas or media matrices for an isolated change.

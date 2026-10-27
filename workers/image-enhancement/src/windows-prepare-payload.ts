@@ -171,7 +171,7 @@ export function freezeWindowsPrepareRequest(
     if (
       !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(modelId) ||
       nativeScale !== 4 ||
-      sourceEngine.tta !== false
+      typeof sourceEngine.tta !== "boolean"
     )
       invalid();
     const engine = {

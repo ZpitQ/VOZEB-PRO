@@ -29,6 +29,7 @@ import { createSignedReferenceAssetUrl, signReferenceAssetInputUrl } from "@/lib
 import { assertCapabilityConstraints } from "@/lib/server/capability-constraints";
 import { checkGenerationRateLimit, rateLimitHeaders } from "@/lib/server/security";
 import { EcommerceReferenceDispatchConflict } from "@/lib/server/ecommerce-reference-dispatch";
+import { freezeEcommerceEnhancementDelivery } from "@/lib/server/image-enhancement-delivery";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -117,6 +118,7 @@ import {
     toGeminiImagePart,
     buildImageEditFormData,
     imageReferenceToFile,
+    imageReferenceToDataUrl,
     dataUrlToFile,
     readFetchError,
     readPointsRemaining,
@@ -265,6 +267,12 @@ export async function POST(request: Request) {
             productProtection: prepared.productProtection,
             sceneProtection: prepared.sceneProtection,
             ecommerceExecution,
+            enhancementDelivery: prepared.reviewReason
+                ? undefined
+                : await freezeEcommerceEnhancementDelivery(
+                      { kind, config: prepared.config, references, mask: prepared.mask, productProtection: prepared.productProtection, sceneProtection: prepared.sceneProtection, ecommerceExecution },
+                      async (reference) => Buffer.from((await imageReferenceToDataUrl(reference, reference.name || "source.png", resolveInternalOrigin(new URL(request.url).origin), request.headers.get("cookie") || "")).split(",")[1] || "", "base64"),
+                  ),
         });
         if ("executionPhase" in task && task.executionPhase)
             return NextResponse.json({

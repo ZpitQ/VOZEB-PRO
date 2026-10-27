@@ -18,6 +18,14 @@ function renderedText(markup: string) {
 }
 
 describe("creative generation results", () => {
+    it("describes protected enhancement as keeping the original canvas instead of promising 4K", () => {
+        const original = imageOriginal("native-one", "result-one", "enhancement-one");
+        const enhanced = enhancedChild("enhanced-one", original);
+        enhanced.metadata.scope = "product_background";
+        const markup = renderToStaticMarkup(<CreativeMediaResult assets={[original, enhanced]} />);
+        expect(renderedText(markup)).toContain("商品保护增强 · 保持原画幅");
+        expect(renderedText(markup)).not.toContain("4K");
+    });
     it("renders a single portrait image shrink-to-fit without a switcher", () => {
         const markup = renderToStaticMarkup(<CreativeMediaResult assets={[asset("image-one", "image", 720, 1280)]} renderActions={(active) => <div data-active={active.id} />} />);
 

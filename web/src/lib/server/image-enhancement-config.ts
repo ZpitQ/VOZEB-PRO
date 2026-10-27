@@ -1,6 +1,6 @@
 import { randomUUID, X509Certificate } from "node:crypto";
 import type { ImageEnhancementSettings, ImageEnhancementUpdate, EnhancementModel } from "@/lib/image-enhancement-contract";
-import { DEFAULT_ENHANCEMENT_TIMEOUT_MS, ENHANCEMENT_REASONS } from "@/lib/image-enhancement-contract";
+import { DEFAULT_ENHANCEMENT_TIMEOUT_MS, ENHANCEMENT_REASONS, supportsEnhancementTta } from "@/lib/image-enhancement-contract";
 import { mutateImageEnhancementSettings, readImageEnhancementSettings, type StoredImageEnhancementSettings } from "@/lib/server/database/image-enhancement-repository";
 import { decryptSecretValue, encryptSecretValue, isEncryptedSecretValue } from "@/lib/server/secret-crypto";
 import { inspectEnhancementWorker } from "@/lib/server/image-enhancement-worker-client";
@@ -18,11 +18,11 @@ export async function getImageEnhancementSettings() {
 }
 export function saveImageEnhancementSettings(value: unknown) {
     const input = record(value);
-    const allowed = ["revision", "enabled", "mode", "endpoint", "trust", "caPem", "token", "clearToken", "timeoutMs", "modelId"];
+    const allowed = ["revision", "enabled", "tta", "mode", "endpoint", "trust", "caPem", "token", "clearToken", "timeoutMs", "modelId"];
     if (Object.keys(input).some((key) => !allowed.includes(key))) invalid();
     if (input.mode !== undefined && input.mode !== "remote_api") invalid();
     for (const key of ["endpoint", "token", "modelId", "caPem"] as const) if (input[key] !== undefined && typeof input[key] !== "string") invalid();
-    for (const key of ["enabled", "clearToken"] as const) if (input[key] !== undefined && typeof input[key] !== "boolean") invalid();
+    for (const key of ["enabled", "clearToken", "tta"] as const) if (input[key] !== undefined && typeof input[key] !== "boolean") invalid();
     if (input.trust !== undefined && input.trust !== "system" && input.trust !== "custom_ca") invalid();
     if (input.timeoutMs !== undefined && input.timeoutMs !== null && (!Number.isSafeInteger(input.timeoutMs) || Number(input.timeoutMs) <= 0 || Number(input.timeoutMs) > 2 ** 31 - 1)) invalid();
     const patch = input as ImageEnhancementUpdate;
@@ -47,8 +47,21 @@ export function saveImageEnhancementSettings(value: unknown) {
         const connectionChanged = endpoint !== current.endpoint || trust !== current.trust || caPem !== current.caPem;
         const modelId = patch.modelId ?? settings.modelId;
         if (patch.modelId && modelId !== settings.modelId && (connectionChanged || tokenChanged || !settings.models.some((model) => model.id === modelId))) throw new ImageEnhancementConfigError("model_unavailable");
+        const tta = patch.tta ?? settings.tta ?? false;
+        // A new connection must be saved before its capabilities can be discovered.
+        if (
+            !connectionChanged &&
+            !tokenChanged &&
+            tta &&
+            (tta !== (settings.tta ?? false) || modelId !== settings.modelId) &&
+            !supportsEnhancementTta(
+                settings.models.find((model) => model.id === modelId),
+                tta,
+            )
+        )
+            throw new ImageEnhancementConfigError("tta_unavailable");
         const timeoutMs = (patch.timeoutMs === undefined ? settings.timeoutMs : patch.timeoutMs) ?? DEFAULT_ENHANCEMENT_TIMEOUT_MS;
-        const changed = connectionChanged || tokenChanged || modelId !== settings.modelId || timeoutMs !== settings.timeoutMs;
+        const changed = connectionChanged || tokenChanged || modelId !== settings.modelId || timeoutMs !== settings.timeoutMs || tta !== (settings.tta ?? false);
         const intentChanged = patch.enabled !== undefined && patch.enabled !== settings.enabled;
         if (connectionChanged) {
             const id = randomUUID();
@@ -63,6 +76,7 @@ export function saveImageEnhancementSettings(value: unknown) {
         if (connectionChanged || tokenChanged) settings.models = [];
         settings.timeoutMs = timeoutMs;
         settings.modelId = modelId;
+        settings.tta = tta;
         if (changed) settings.check = null;
         if (patch.enabled === true && !settings.enabled && !isReady(settings)) throw new ImageEnhancementConfigError("not_ready", 409);
         if (patch.enabled !== undefined) settings.enabled = patch.enabled;
@@ -85,7 +99,10 @@ export async function checkImageEnhancementSettings(value: unknown) {
         return structuredClone(settings);
     });
     const profile = captured.profiles[captured.profileId]!;
-    const report = await inspectEnhancementWorker({ ...profile, token: profile.tokenCiphertext ? decryptSecretValue(profile.tokenCiphertext) : "", timeoutMs: captured.timeoutMs, modelId: captured.modelId }, input.action === "sample");
+    const report = await inspectEnhancementWorker(
+        { ...profile, token: profile.tokenCiphertext ? decryptSecretValue(profile.tokenCiphertext) : "", timeoutMs: captured.timeoutMs, modelId: captured.modelId, tta: captured.tta ?? false },
+        input.action === "sample",
+    );
     return mutateImageEnhancementSettings((settings) => {
         assertRevision(captured.revision, settings);
         if (settings.checkRunId !== runId) throw new ImageEnhancementConfigError("configuration_changed", 409);
@@ -119,7 +136,7 @@ export async function captureImageEnhancementPolicy(): Promise<FrozenImageEnhanc
         credentialRef: settings.profileId,
         serviceId: settings.profiles[settings.profileId]!.serviceId!,
         timeoutMs: settings.timeoutMs!,
-        model: Object.freeze({ ...model, allowedTiles: Object.freeze([...model.allowedTiles]) }),
+        model: Object.freeze({ ...model, tta: settings.tta ?? false, allowedTiles: Object.freeze([...model.allowedTiles]), ...(model.ttaModes ? { ttaModes: Object.freeze([...model.ttaModes]) } : {}) }),
     });
     return Object.freeze({ revision: settings.revision, enabled: settings.enabled, connection });
 }
@@ -131,13 +148,22 @@ export async function resolveImageEnhancementConnection(snapshot: FrozenEnhancem
     return { endpoint: profile.endpoint, trust: profile.trust, caPem: profile.caPem, token: decryptSecretValue(profile.tokenCiphertext), serviceId: profile.serviceId, timeoutMs: snapshot.timeoutMs };
 }
 function isReady(settings: StoredImageEnhancementSettings) {
-    return settings.check?.state === "ready" && settings.check.revision === settings.revision && !!settings.profiles[settings.profileId]?.tokenCiphertext && settings.models.some((model) => model.id === settings.modelId);
+    return (
+        settings.check?.state === "ready" &&
+        settings.check.revision === settings.revision &&
+        !!settings.profiles[settings.profileId]?.tokenCiphertext &&
+        supportsEnhancementTta(
+            settings.models.find((model) => model.id === settings.modelId),
+            settings.tta ?? false,
+        )
+    );
 }
 function adminSettings(settings: StoredImageEnhancementSettings): ImageEnhancementSettings {
     const profile = settings.profiles[settings.profileId]!;
     return {
         revision: settings.revision,
         enabled: settings.enabled,
+        tta: settings.tta ?? false,
         mode: "remote_api",
         endpoint: profile.endpoint,
         trust: profile.trust,

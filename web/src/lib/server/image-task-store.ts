@@ -13,6 +13,7 @@ import type { EcommerceGenerationTrace } from "@/lib/server/ecommerce-generation
 import type { EcommerceCanvasMediaEvidence, EcommerceCanvasProviderRequest, EcommerceDimensions } from "@/lib/server/ecommerce-edit-plan";
 import type { EnhancementSource } from "@/lib/server/image-enhancement-plan";
 import type { ImageEnhancementSkip } from "@/lib/image-enhancement-contract";
+import type { EcommerceEnhancementDelivery, ProductEnhancementBaselineEvidence } from "./image-enhancement-delivery";
 import { enqueueImageEnhancement } from "@/lib/server/image-enhancement-enqueue";
 
 type ImageTaskKind = "generation" | "edit";
@@ -53,6 +54,7 @@ export type StoredImageTaskMediaResult = {
     resultId?: string;
     nativeSource?: Readonly<EnhancementSource>;
     enhancementId?: string;
+    productEnhancementEvidence?: ProductEnhancementBaselineEvidence;
     enhancementSkip?: ImageEnhancementSkip;
     dataUrl: string;
     remoteUrl?: string;
@@ -107,6 +109,7 @@ export type ImageTask = GenerationTaskContext & {
     attempts?: GenerationAttempt[];
     attemptNo?: number;
     enhancementPolicy?: FrozenImageEnhancementPolicy;
+    enhancementDelivery?: EcommerceEnhancementDelivery;
 };
 
 const TASK_STALE_MS = 3 * 60 * 1000;
