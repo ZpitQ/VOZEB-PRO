@@ -148,7 +148,7 @@ describe("image task route", () => {
             imageRequest({ kind: "edit", prompt: "compiled ecommerce prompt", config: { model: "product-image" }, references: [{ id: "scene", dataUrl: "data:image/png;base64,AA==", ecommerceRole: "scene" }], ecommerceExecution: execution }),
         );
         expect(response.status).toBe(202);
-        expect(await response.json()).toMatchObject({ task: { needsReview: true, executionPhase: "needs_review" }, warning: expect.stringContaining("确认") });
+        expect(await response.json()).toMatchObject({ task: { needsReview: true, executionPhase: "needs_review" }, warning: "请在原图上选择需要修改的区域，并包含必要的周边空间。" });
         expect(mocks.after).not.toHaveBeenCalled();
     });
     beforeEach(() => {

@@ -14,7 +14,7 @@
 
 `patches/@next__eslint-plugin-next@16.3.0.patch` 只针对官方 `@next/eslint-plugin-next@16.3.0` 的 `dist/utils/get-root-dirs.js`。其原始文件 SHA-256 为 `886677432990a735e5ebdfb345ff1cbd40e264f9947a8432eeeb254b3a926bde`。完整插件及其 MIT 许可继续由官方包安装，不复制或删减任何规则。
 
-`pnpm-workspace.yaml` 将该精确包的 `fast-glob` 依赖移除，并为该精确包增加固定的 `glob@13.0.6` 和 `minimatch@10.2.6`。局部源码补丁使用 glob 的公开 `raw` 导出和 minimatch 的 braceExpand，让实际扫描使用锁文件中的外置依赖。扫描以目录后缀限定目录并跟随符号链接；必要的路径规范化保留相对/绝对形式、显式 `./`、Windows 分隔符和输入尾斜杠，并按 brace 分支顺序返回去重结果。没有全局 alias、通用自制扫描器或其他包的 API 替换。pnpm 11 使用 `patchedDependencies` 固定该补丁，补丁未命中或冻结安装不一致都应阻断。
+`pnpm-workspace.yaml` 将该精确包的 `fast-glob` 依赖移除，并为该精确包增加固定的 `glob@14.0.2` 和 `minimatch@11.0.1`。局部源码补丁使用 glob 的公开 `raw` 导出和 minimatch 的 braceExpand，让实际扫描使用锁文件中的外置依赖。扫描以目录后缀限定目录并跟随符号链接；必要的路径规范化保留相对/绝对形式、显式 `./`、Windows 分隔符和输入尾斜杠，并按 brace 分支顺序返回去重结果。没有全局 alias、通用自制扫描器或其他包的 API 替换。pnpm 11 使用 `patchedDependencies` 固定该补丁，补丁未命中或冻结安装不一致都应阻断。
 
 `toolchain-migration.test.mjs` 在独立 Node fixture 中验证当前安装的补丁字节、20 个目录扫描案例和20 个完整 lint 诊断，严格检查40/40及零失败、取消、跳过；目录 fixture 改变工作目录，因此继续隔离运行。完整规则用例直接调用共享 `toolchain-rules-check.mjs`，实际计算项目 ESLint 配置并验证全部 113 个规则的名称/严重级别哈希（其中 Next 为 22 个），保留既有默认测试预算，省去另一层 Node 测试进程与 TAP 包装。独立 `toolchain-rules-fixture.mjs` 仍调用同一校验，支持1/1单独复核。期望来自迁移前官方锁定插件的实际输出，绝对路径只在本次独立 fixture 内动态构造，最终回归不保留 fast-glob 基线依赖。既有 nested App、group/intercepted 案例的零诊断也保持原结果；这次迁移没有改写路由规则。执行依赖树变化后必须重新运行该真实回归，不能用源码静态断言或临时安装树的结果代替。
 
@@ -27,3 +27,9 @@ pnpm audit --registry https://registry.npmjs.org/ --audit-level moderate
 ```
 
 只有实际目录与 lint 兼容性、冻结安装、全量审计、类型、lint、格式、测试、构建和浏览器回归全部通过后，才能发布该工具链变更。
+
+### Minimatch 安全更新
+
+依赖审计要求 `follow-redirects@1.16.2`、`glob@14.0.2` 与 `minimatch@11.0.1`。后三个 ESLint 插件的官方当前版本仍依赖旧的 minimatch 默认函数导出，因此对 `eslint-plugin-import@2.32.0`、`eslint-plugin-react@7.37.5` 和 `eslint-plugin-jsx-a11y@6.10.2` 的实际消费文件使用命名匹配函数；内部路径规则改为 `Minimatch.match`，不重建已移除的正则接口。同时修正 `@eslint/config-array@0.21.2` 和 `@eslint/eslintrc@3.3.6` 的 ESM 默认导入。补丁由 `pnpm patch-commit` 生成并绑定精确版本，保留原规则及 severity。
+
+现有真实目录扫描与 lint 夹具另覆盖旧插件的允许/禁止路径、React 组件忽略、可访问控件和两个 ESM 配置入口；官方包能够直接兼容安全版本时再移除相应补丁。

@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const requireWeb = createRequire(path.join(webRoot, "package.json"));
@@ -132,3 +132,52 @@ for (const [name, code, rootDir, options, expected] of lintCases) {
         assert.equal(result.warningCount, 0);
     });
 }
+
+const requireLegacyPlugin = createRequire(requireWeb.resolve("eslint-config-next"));
+const matchingCases = [
+    ["import allow pattern", "import", "eslint-plugin-import", "no-unassigned-import", { allow: ["**/*.css"] }, 'import "./style.css";', []],
+    ["import allowed internal path", "import", "eslint-plugin-import", "no-internal-modules", { allow: ["**/pages/**"] }, 'import "./apps/web/pages/about.js";', []],
+    ["import forbidden path", "import", "eslint-plugin-import", "no-internal-modules", { forbid: ["**/pages/**"] }, 'import "./apps/web/pages/about.js";', ["import/no-internal-modules"]],
+    ["React ignored component pattern", "react", "eslint-plugin-react", "jsx-pascal-case", { ignore: ["Icon_*"] }, "export const icon = <Icon_widget />;", []],
+    ["accessible custom control pattern", "jsx-a11y", "eslint-plugin-jsx-a11y", "label-has-associated-control", { controlComponents: ["Field*"] }, "export const field = <label>Name<FieldControl /></label>;", []],
+];
+for (const [name, namespace, packageName, rule, options, code, expectedRules] of matchingCases) {
+    test(`installed legacy plugin matching: ${name}`, async () => {
+        const eslint = new ESLint({
+            cwd: tree,
+            overrideConfigFile: true,
+            overrideConfig: [
+                {
+                    files: ["**/*.jsx"],
+                    languageOptions: { parserOptions: { ecmaVersion: "latest", sourceType: "module", ecmaFeatures: { jsx: true } } },
+                    plugins: { [namespace]: requireLegacyPlugin(packageName) },
+                    rules: { [`${namespace}/${rule}`]: ["error", options] },
+                },
+            ],
+        });
+        const [result] = await eslint.lintText(code, { filePath: path.join(tree, "matching-case.jsx") });
+        assert.deepEqual(
+            result.messages.map((message) => message.ruleId),
+            expectedRules,
+        );
+        assert.equal(result.errorCount, expectedRules.length);
+        assert.equal(result.warningCount, 0);
+    });
+}
+
+const requireESLint = createRequire(requireWeb.resolve("eslint"));
+test("installed ESLint ESM configuration matching", async () => {
+    const entry = requireESLint.resolve("@eslint/config-array");
+    const { ConfigArray } = await import(pathToFileURL(path.resolve(path.dirname(entry), "../esm/index.js")).href);
+    const configs = new ConfigArray([{ files: ["**/*.js"] }], { basePath: tree });
+    await configs.normalize();
+    assert.deepEqual(configs.getConfig(path.join(tree, "entry.js")), {});
+    assert.equal(configs.getConfig(path.join(tree, "entry.txt")), undefined);
+});
+test("installed ESLint ESM legacy override matching", async () => {
+    const entry = requireESLint.resolve("@eslint/eslintrc");
+    const { Legacy } = await import(pathToFileURL(path.resolve(path.dirname(entry), "../lib/index.js")).href);
+    const configs = new Legacy.ConfigArrayFactory({ cwd: tree }).create({ overrides: [{ files: ["*.js"], env: { es6: true } }] });
+    assert.equal(configs.extractConfig(path.join(tree, "entry.js")).env.es6, true);
+    assert.equal(configs.extractConfig(path.join(tree, "entry.txt")).env.es6, undefined);
+});
