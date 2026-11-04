@@ -43,13 +43,19 @@ export async function publishImageEnhancement(lease: ImageEnhancementJob, task: 
     };
     const save = async (role: "ai" | "delivered", bytes: Buffer, artifact: Omit<StoredEnhancementArtifact, "url">, deliveryEncodingMs?: number) => {
         await current();
-        const saved = await writeAssetBytes(bytes, `image/${artifact.format}`, "image", {
-            ownerUserId: job.userId,
-            source: task.source,
-            conversationId: task.conversationId,
-            taskId: job.id,
-            originalName: `${role === "ai" ? "完整AI增强" : "AI高清增强"}.${artifact.format === "jpeg" ? "jpg" : "png"}`,
-        }).catch(() => {
+        const saved = await writeAssetBytes(
+            bytes,
+            `image/${artifact.format}`,
+            "image",
+            {
+                ownerUserId: job.userId,
+                source: task.source,
+                conversationId: task.conversationId,
+                taskId: job.id,
+                originalName: `${role === "ai" ? "完整AI增强" : "AI高清增强"}.${artifact.format === "jpeg" ? "jpg" : "png"}`,
+            },
+            plan.budgets[role === "ai" ? "ai" : "delivery"].maxPixels,
+        ).catch(() => {
             throw new ImageEnhancementPublicationError("output_storage_invalid");
         });
         if (!saved.serverUrl?.startsWith("/api/generation-log-assets/") || saved.width !== artifact.width || saved.height !== artifact.height || saved.bytes !== bytes.length) throw new ImageEnhancementPublicationError("output_storage_invalid");

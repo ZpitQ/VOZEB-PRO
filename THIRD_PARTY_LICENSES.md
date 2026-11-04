@@ -282,7 +282,7 @@
 | fflate | 0.8.3 | MIT | [链接](https://101arrowz.github.io/fflate) |
 | file-saver | 2.0.5 | MIT | [链接](https://github.com/eligrey/FileSaver.js#readme) |
 | file-type | 22.0.1 | MIT | [链接](https://github.com/sindresorhus/file-type#readme) |
-| follow-redirects | 1.16.1 | MIT | [链接](https://github.com/follow-redirects/follow-redirects) |
+| follow-redirects | 1.16.2 | MIT | [链接](https://github.com/follow-redirects/follow-redirects) |
 | form-data | 4.0.6 | MIT | [链接](https://github.com/form-data/form-data#readme) |
 | formdata-polyfill | 4.0.10 | MIT | [链接](https://github.com/jimmywarting/FormData#readme) |
 | framer-motion | 12.43.0 | MIT | [链接](https://github.com/motiondivision/motion#readme) |

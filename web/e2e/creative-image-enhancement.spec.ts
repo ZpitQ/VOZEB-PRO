@@ -340,6 +340,20 @@ test("late enhancement keeps submitted B on the original and explicit enhanced r
     expect(JSON.stringify(fixture.generatedRequests[0])).toBe(frozenB);
 });
 
+test("an enhancement budget rejection explains how to retry while keeping the original available", async ({ page }, info) => {
+    const fixture = await mockEnhancementRound(page, { status: "failed", reason: "budget_exceeded", persistentMedia: true, localEdit: true });
+    await openRound(page, fixture.id);
+    const result = page.getByTestId("creative-media-result");
+    await expect(result.getByRole("status")).toContainText("图片超过增强服务的处理额度，请联系管理员调整后重试，原图仍可用");
+    await expect(result.getByRole("button", { name: "AI增强", exact: true })).toBeDisabled();
+    await expect(page.getByLabel("本轮创作操作", { exact: true })).toHaveAttribute("data-active-asset-id", fixture.original.id);
+    const download = await downloadCurrent(page, page.getByLabel("本轮创作操作", { exact: true }));
+    expect(createHash("sha256").update(download.bytes).digest("hex")).toBe(fixture.nativeSha256);
+    await page.screenshot({ path: info.outputPath("enhancement-budget-reason.png") });
+    expect(fixture.controls).toEqual([]);
+    expect(fixture.generatedRequests).toEqual([]);
+});
+
 test("retry and cancel control only the enhancement and disable repeated actions while pending", async ({ page }) => {
     const fixture = await mockEnhancementRound(page, { status: "failed", reason: "private-internal-details" });
     await openRound(page, fixture.id);

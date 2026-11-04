@@ -507,7 +507,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             let task;
             if (planning.plan.operation === "scene_edit") {
                 if (planning.plan.protection?.scope === "local") {
-                    await pauseForReview("scene_selection_required", "请在原图上确认允许编辑的区域，包含新增物体及其接触阴影。", true, ecommerceExecution, {
+                    await pauseForReview("scene_selection_required", "请在原图上选择需要修改的区域，并包含必要的周边空间。", true, ecommerceExecution, {
                         visualAnalysis: analysis,
                         ...(purposeDecision ? { referenceDecision: purposeDecision } : {}),
                         plan: planning.plan,

@@ -11,8 +11,8 @@ type NormalizedGeneratedImage = {
     height?: number;
 };
 
-export async function normalizeGeneratedImageBytes(bytes: Buffer, mimeType: string, targetSize?: string): Promise<NormalizedGeneratedImage> {
-    const image = sharp(bytes, { failOn: "error", limitInputPixels: MAX_INPUT_PIXELS });
+export async function normalizeGeneratedImageBytes(bytes: Buffer, mimeType: string, targetSize?: string, maxInputPixels = MAX_INPUT_PIXELS): Promise<NormalizedGeneratedImage> {
+    const image = sharp(bytes, { failOn: "error", limitInputPixels: maxInputPixels });
     const metadata = await image.metadata();
     const dimensions = orientedDimensions(metadata);
     mimeType = imageMimeType(metadata);
@@ -26,7 +26,7 @@ export async function normalizeGeneratedImageBytes(bytes: Buffer, mimeType: stri
     const pipeline = image.rotate().resize(target.width, target.height, { fit: "inside", withoutEnlargement: true });
     if (metadata.format === "jpeg") pipeline.jpeg({ quality: 95, chromaSubsampling: "4:4:4" });
     const result = await pipeline.toBuffer({ resolveWithObject: true });
-    const outputMetadata = result.info.format === "heif" ? await sharp(result.data, { failOn: "error", limitInputPixels: MAX_INPUT_PIXELS }).metadata() : result.info;
+    const outputMetadata = result.info.format === "heif" ? await sharp(result.data, { failOn: "error", limitInputPixels: maxInputPixels }).metadata() : result.info;
     return {
         bytes: result.data,
         mimeType: imageMimeType(outputMetadata),

@@ -1,0 +1,7 @@
+diff --git a/dist/esm/index.js b/dist/esm/index.js
+index 52db07de381a181a069ba39b648d3a0158ef4bc6..5c3758b7fa83baf568aeb6299ed882e194b002f0 100644
+--- a/dist/esm/index.js
++++ b/dist/esm/index.js
+@@ -4 +4 @@ import * as windowsPath from './std__path/windows.js';
+-import minimatch from 'minimatch';
++import * as minimatch from 'minimatch';

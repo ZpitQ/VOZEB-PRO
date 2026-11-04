@@ -1111,7 +1111,7 @@ for (const provider of ["file", "postgres"] as const) {
             expect(mocks.store).toHaveBeenCalledTimes(2);
             expect(mocks.readSource).toHaveBeenCalledWith({ dataUrl: published!.publication!.ai.url }, "enhancement.png", "http://fixture.local", "fixture-worker-context", plan.budgets.ai.maxBytes);
             expect(mocks.readSource).toHaveBeenCalledWith({ dataUrl: published!.publication!.delivered.url }, "enhancement.jpg", "http://fixture.local", "fixture-worker-context", plan.budgets.delivery.maxBytes);
-            expect(mocks.store).toHaveBeenLastCalledWith(expect.any(Buffer), "image/jpeg", "image", expect.objectContaining({ originalName: "AI高清增强.jpg" }));
+            expect(mocks.store).toHaveBeenLastCalledWith(expect.any(Buffer), "image/jpeg", "image", expect.objectContaining({ originalName: "AI高清增强.jpg" }), 1_000_000);
             expect(mocks.acknowledge).not.toHaveBeenCalled();
             expect((await getImageTask(task.id))?.result).toEqual(task.result);
             const assets = await listCreativeAssets(task.conversationId!, task.userId);
