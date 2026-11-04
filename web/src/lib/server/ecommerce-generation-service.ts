@@ -466,7 +466,7 @@ export async function prepareEcommerceSceneSelectionResume(run: AgentRun, select
     const plan = run.ecommerceSnapshot?.plan;
     const task = ecommerceSceneSelectionTask(run);
     if (!plan || !task?.ecommerceExecution) throw new Error("当前任务不能确认编辑区域");
-    if (!actorUserId?.trim() || !selection || typeof selection !== "object") throw new Error("请在原图上确认允许编辑的区域，包含新增物体及其接触阴影");
+    if (!actorUserId?.trim() || !selection || typeof selection !== "object") throw new Error("请在原图上选择需要修改的区域，并包含必要的周边空间");
     const input = selection as { baselineAssetId?: unknown; region?: ProductProtectionRectangle };
     if (input.baselineAssetId !== plan.source.currentSceneBaselineId || !input.region) throw new Error("选区与任务的原图基线不匹配");
     const ids = task.ecommerceExecution.referenceRoles.map((reference) => reference.assetId);

@@ -10,7 +10,7 @@ vi.mock("@/lib/server/safe-outbound-fetch", () => ({ fetchSafeOutbound: mocks.fe
 vi.mock("@/lib/server/security", () => ({ isSafeOutboundUrl: vi.fn(() => true) }));
 vi.mock("@/lib/server/object-storage-service", () => ({ deleteExternalMediaObject: vi.fn(), persistExternalMediaIfEnabled: mocks.persistExternalMediaIfEnabled }));
 
-import { insertPostgresGenerationLogAssets, mapPostgresGenerationLogAsset, normalizeAssets, normalizeStoredAsset, normalizeStoredLog, readPostgresGenerationLogDb, writeRemoteAsset } from "./generation-log-repository";
+import { insertPostgresGenerationLogAssets, mapPostgresGenerationLogAsset, normalizeAssets, normalizeStoredAsset, normalizeStoredLog, readPostgresGenerationLogDb, writeAssetBytes, writeRemoteAsset } from "./generation-log-repository";
 
 function storedLogWithAssets(count: number) {
     return normalizeStoredLog({
@@ -154,6 +154,15 @@ describe("generation log asset normalization", () => {
         expect(mocks.persistExternalMediaIfEnabled).toHaveBeenCalledTimes(1);
         expect(mocks.fetchSafeOutbound).not.toHaveBeenCalled();
     });
+
+    it("persists complete AI pixels within the authenticated enhancement budget without resizing", async () => {
+        const source = await sharp({ create: { width: 6400, height: 6400, channels: 3, background: "#203040" } })
+            .png()
+            .toBuffer();
+        const asset = await writeAssetBytes(source, "image/png", "image", { ownerUserId: "enhancement-owner", source: "agent" }, 67_108_864);
+        expect(asset).toMatchObject({ mimeType: "image/png", width: 6400, height: 6400, bytes: source.length });
+        expect(mocks.persistExternalMediaIfEnabled.mock.calls[0][0].bytes).toEqual(source);
+    }, 15_000);
 
     it("does not register or persist an invalid image with a larger requested size", async () => {
         await expect(normalizeAssets([{ type: "image", url: `data:image/png;base64,${Buffer.from("not an image").toString("base64")}`, targetSize: "4096x4096" }], { ownerUserId: "user-1", source: "image-workbench" })).rejects.toThrow();

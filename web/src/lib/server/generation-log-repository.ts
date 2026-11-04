@@ -127,8 +127,8 @@ export async function isSafeRemoteAssetUrl(value: string) {
     return isSafeOutboundUrl(value, { allowCredentials: false });
 }
 
-export async function writeAssetBytes(bytes: Buffer, mimeType: string, type: GenerationLogKind, context: GenerationAssetContext): Promise<GenerationLogAsset> {
-    const normalized: { bytes: Buffer; mimeType: string; width?: number; height?: number } = type === "image" ? await normalizeGeneratedImageBytes(bytes, mimeType, context.targetSize) : { bytes, mimeType };
+export async function writeAssetBytes(bytes: Buffer, mimeType: string, type: GenerationLogKind, context: GenerationAssetContext, maxImagePixels?: number): Promise<GenerationLogAsset> {
+    const normalized: { bytes: Buffer; mimeType: string; width?: number; height?: number } = type === "image" ? await normalizeGeneratedImageBytes(bytes, mimeType, context.targetSize, maxImagePixels) : { bytes, mimeType };
     bytes = normalized.bytes;
     mimeType = normalized.mimeType;
     const extension = extensionFromMime(mimeType, type);

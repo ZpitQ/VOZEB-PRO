@@ -227,13 +227,7 @@ export function normalizePlannedEdit(value: unknown, input: EcommerceEditPlannin
             /(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make|relight)[^，,。.;；\n]*(?:光线|光照|灯光|阳光|日光|照明|主光|补光|白平衡|lighting)|(?:光线|光照|灯光|阳光|日光|照明|主光|补光|白平衡|lighting)[^，,。.;；\n]*(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make|relight)|(?:光线|光照|灯光|照明|主光|补光)[^，,。.;；\n]*(?:再|更|调|变(?:得)?)[^，,。.;；\n]*(?:亮|暗)/i.test(
                 requestedChange,
             );
-        const global =
-            (lightingChange ||
-                (compatible.operation === "scene_edit" &&
-                    /(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make|relight)[^，,。.;；\n]*(?:视角|机位|构图|camera|perspective|viewpoint)|(?:视角|机位|构图|camera|perspective|viewpoint)[^，,。.;；\n]*(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make|relight)/i.test(
-                        requestedChange,
-                    ))) &&
-            !/(?:只|仅|only|local).*(?:区域|局部|选区|area|region)/i.test(requestedChange);
+        const global = (lightingChange || (compatible.operation === "scene_edit" && sceneCompositionChange(requestedChange))) && !/(?:只|仅|only|local).*(?:区域|局部|选区|area|region)/i.test(requestedChange);
         // Scope is bound to this user request. Planner rectangles remain unconfirmed hints.
         compatible.protection = {
             scope: global ? "global" : "local",
@@ -273,10 +267,18 @@ function assertReferenceCueEvidence(input: EcommerceEditPlanningRequest, analysi
     if (issues.length) throw new EcommerceEditPlanningError("参考用途缺少可靠视觉线索，不能进入编辑规划", 409, issues);
 }
 
+function sceneCompositionChange(instructions: string) {
+    return (
+        /(?:改(?:为|成)?|换成|调整|改变|变成|切换|生成|拍摄|change|adjust|make|generate|render)[^，,。.;；\n]*(?:视角|机位|构图|camera|perspective|viewpoint)|(?:视角|机位|构图|camera|perspective|viewpoint)[^，,。.;；\n]*(?:改(?:为|成)?|换成|调整|改变|变成|切换|生成|拍摄|change|adjust|make|generate|render)/i.test(
+            instructions,
+        ) || /(?:生成|拍摄)一(?:张|幅)[^，,。.;；\n]*(?:角度|侧面|俯视|仰视|正面)/i.test(instructions)
+    );
+}
+
 function sceneEditChangeInstructions(userRequest: string): string[] {
-    const changeAction = /(?:改(?:变|为|成)?|换成|调整|变成|切换|change|adjust|make|relight|(?:让|使|再|更|调|变(?:得)?)[^，,。.;；\n]*(?:亮|暗))/i;
+    const changeAction = /(?:改(?:变|为|成)?|换成|调整|变成|切换|生成|拍摄|generate|render|change|adjust|make|relight|(?:让|使|再|更|调|变(?:得)?)[^，,。.;；\n]*(?:亮|暗))/i;
     const preservation = /(?:保持|保留|维持|keep|preserve|maintain)/i;
-    const prohibition = /(?:不要|不得|禁止|严禁|不|别|do not|don't|never).*(?:改(?:变|为|成)?|换成|调整|变成|切换|change|adjust|make|relight|(?:让|使|再|更|调|变(?:得)?)[^，,。.;；\n]*(?:亮|暗))/i;
+    const prohibition = /(?:不要|不得|禁止|严禁|不|别|do not|don't|never).*(?:改(?:变|为|成)?|换成|调整|变成|切换|生成|拍摄|generate|render|change|adjust|make|relight|(?:让|使|再|更|调|变(?:得)?)[^，,。.;；\n]*(?:亮|暗))/i;
     return userRequest
         .split(/[，,。.;；\n]/)
         .flatMap((clause) => {
@@ -520,10 +522,7 @@ function boundPhotographyTargets(plan: EcommerceEditPlan, analysis: EcommercePla
             contactShadow: plan.protection.scope === "local" ? `仅在允许区域匹配原有光线并融合本轮目标的接触阴影；保留区域外${facts.lighting.contactShadow}` : `保留原有${facts.lighting.contactShadow}`,
         };
     }
-    const compositionChange =
-        /(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make)[^，,。.;；\n]*(?:视角|机位|构图|camera|perspective|viewpoint)|(?:视角|机位|构图|camera|perspective|viewpoint)[^，,。.;；\n]*(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make)/i.test(
-            sceneEditChangeInstructions(userRequest).join("\n"),
-        );
+    const compositionChange = sceneCompositionChange(sceneEditChangeInstructions(userRequest).join("\n"));
     if (plan.protection && (plan.protection.scope === "local" || !compositionChange || plan.canvas?.allowReframe === false)) {
         if (!baseline?.photographyFacts) throw new EcommerceEditPlanningError("缺少可信的主基线摄影事实，不能确认原有构图");
         plan.photography.composition = structuredClone(baseline.photographyFacts.composition);
