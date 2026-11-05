@@ -7,6 +7,8 @@ description: 使用 Docker Compose、PostgreSQL 和发布镜像部署 VOZEB PRO
 
 主 Compose 会启动 Web、独立生成 Worker 和 PostgreSQL 16。正式部署前先复制并修改 `.env`。
 
+图像 Worker 发布时，Web与生成Worker应消费同一已校验的固定镜像。内存、CPU、堆及图像预算沿 `.env` 配置，副本通过 `--scale generation-worker=N` 调整。按实际加载顺序渲染全部Compose文件并核对最终值；后置覆盖文件若固定整个 `environment` 或清空 `mem_limit` 等字段，会覆盖资源配置。保留已部署环境的数据卷、服务令牌和既有只读凭据挂载。
+
 ## 安装
 
 ```bash
