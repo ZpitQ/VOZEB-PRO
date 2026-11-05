@@ -181,6 +181,8 @@ function imageEnhancementStatus(task: PublicImageEnhancement | undefined, hasEnh
                 case "authentication_failed":
                 case "timeout":
                     return `AI增强失败，${ENHANCEMENT_REASONS[task.reason]}原图仍可用`;
+                case "budget_exceeded":
+                    return "AI增强失败，图片超过增强服务的处理额度，请联系管理员调整后重试，原图仍可用";
                 case "engine_failed":
                     return "AI增强失败，增强引擎执行失败，原图仍可用";
                 case "output_invalid":

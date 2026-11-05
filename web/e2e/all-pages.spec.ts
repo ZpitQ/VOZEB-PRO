@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { expect, test, type APIRequestContext, type Page, type Response } from "@playwright/test";
 
@@ -17,6 +18,15 @@ const FILE_PROVIDER_LIMITATIONS = new Map([
 
 type RouteCase = { path: string; expectedPath?: RegExp; expectedStatus?: number; readyHeading?: string; readyText?: string };
 type ApiFailure = { path: string; status: number; body: string };
+
+test.beforeEach(async ({ page }) => {
+    await mockReleaseFiles(page);
+});
+
+async function mockReleaseFiles(page: Page) {
+    await page.route("https://raw.githubusercontent.com/csyqlz/VOZEB-PRO/main/VERSION", (route) => route.fulfill({ contentType: "text/plain", body: readFileSync(new URL("../../VERSION", import.meta.url), "utf8") }));
+    await page.route("https://raw.githubusercontent.com/csyqlz/VOZEB-PRO/main/CHANGELOG.md", (route) => route.fulfill({ contentType: "text/plain", body: readFileSync(new URL("../../CHANGELOG.md", import.meta.url), "utf8") }));
+}
 
 test("all authenticated pages reach their real routes and stay usable", async ({ page, request }, testInfo) => {
     test.setTimeout(360_000);
@@ -76,6 +86,7 @@ test("signed-out, legal, installation and invalid public detail routes fail safe
     test.setTimeout(180_000);
     const context = await browser.newContext({ baseURL: BASE_URL, viewport: testInfo.project.use.viewport || undefined, storageState: { cookies: [], origins: [] } });
     const page = await context.newPage();
+    await mockReleaseFiles(page);
     try {
         const theme = testInfo.project.name === "mobile-430" ? "dark" : "light";
         await page.addInitScript((nextTheme) => localStorage.setItem("vozeb-pro:theme_store", JSON.stringify({ state: { theme: nextTheme }, version: 0 })), theme);

@@ -12,7 +12,6 @@ import { compositeSceneEnhancementBytes } from "./scene-enhancement.ts";
 
 type Request = Extract<ImageProcessingRequest, { operation: "process_enhancement" }>;
 type Budget = ImageProcessingEnhancementOptions["budgets"]["ai"];
-const permanentPixels = 40_000_000;
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 
 export async function processEnhancement(request: Request, sampleMemory: () => void): Promise<Omit<ImageProcessingResult, "metrics">> {
@@ -62,7 +61,7 @@ async function process(request: Request, sampleMemory: () => void): Promise<Omit
             format = staged.expected.format;
         } else {
             const started = performance.now();
-            const encoded = await sharp(ai, { failOn: "warning", limitInputPixels: Math.min(permanentPixels, options.budgets.ai.maxPixels) })
+            const encoded = await sharp(ai, { failOn: "warning", limitInputPixels: options.budgets.ai.maxPixels })
                 .resize(options.targetSize.width, options.targetSize.height, { fit: "inside", withoutEnlargement: true })
                 .jpeg({ quality: 95, chromaSubsampling: "4:4:4" })
                 .toBuffer({ resolveWithObject: true });
@@ -143,8 +142,7 @@ function inputBudget(options: ImageProcessingEnhancementOptions, index: number):
     if (index === options.aiInputIndex) budgets.push(options.budgets.ai);
     if (options.stagedDelivered?.inputIndex === index || (options.scope !== "full_image" && options.baselineInputIndex === index)) budgets.push(options.budgets.delivery);
     if (options.scope !== "full_image" && [options.sourceInputIndex, options.nativeInputIndex, options.maskInputIndex].includes(index)) budgets.push(options.budgets.input);
-    const permanent = index === options.aiInputIndex || options.stagedDelivered?.inputIndex === index || (options.scope !== "full_image" && options.baselineInputIndex === index);
-    return { maxBytes: Math.min(...budgets.map((budget) => budget.maxBytes)), maxPixels: Math.min(...budgets.map((budget) => budget.maxPixels), permanent ? permanentPixels : Number.MAX_SAFE_INTEGER) };
+    return { maxBytes: Math.min(...budgets.map((budget) => budget.maxBytes)), maxPixels: Math.min(...budgets.map((budget) => budget.maxPixels)) };
 }
 
 async function validate<Format extends "png" | "jpeg">(
@@ -155,8 +153,7 @@ async function validate<Format extends "png" | "jpeg">(
     permanent = true,
 ): Promise<ImageProcessingEnhancementArtifact & { format: Format }> {
     if (bytes.length !== expected.byteLength || bytes.length > budget.maxBytes || digest(bytes) !== expected.sha256) reject("Enhancement artifact bytes changed or exceed their budget");
-    const maxPixels = permanent ? Math.min(permanentPixels, budget.maxPixels) : budget.maxPixels;
-    const image = sharp(bytes, { failOn: "warning", limitInputPixels: maxPixels });
+    const image = sharp(bytes, { failOn: "warning", limitInputPixels: budget.maxPixels });
     const metadata = await image.metadata();
     const stats = await image.stats();
     sampleMemory();
@@ -169,7 +166,7 @@ async function validate<Format extends "png" | "jpeg">(
         (metadata.pageHeight !== undefined && metadata.pageHeight !== metadata.height) ||
         (permanent && metadata.orientation !== undefined && metadata.orientation !== 1) ||
         (permanent && !stats.isOpaque) ||
-        BigInt(observedSize.width) * BigInt(observedSize.height) > BigInt(maxPixels)
+        BigInt(observedSize.width) * BigInt(observedSize.height) > BigInt(budget.maxPixels)
     )
         reject("Enhancement artifact pixels are invalid");
     return { ...observedSize, format: expected.format, sha256: digest(bytes), byteLength: bytes.length };

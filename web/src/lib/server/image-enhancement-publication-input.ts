@@ -117,8 +117,8 @@ export async function prepareEnhancementPublication(parent: ImageEnhancementJob,
         }
     };
     const plan = binding.remotePlan;
-    const aiBudget = { ...plan.budgets.ai, maxPixels: Math.min(40_000_000, plan.budgets.ai.maxPixels) };
-    const deliveryBudget = { ...plan.budgets.delivery, maxPixels: Math.min(40_000_000, plan.budgets.delivery.maxPixels) };
+    const aiBudget = plan.budgets.ai;
+    const deliveryBudget = plan.budgets.delivery;
     if (parent.staged?.ai) {
         const { url: _url, ...stagedAi } = parent.staged.ai;
         if (!isDeepStrictEqual(stagedAi, binding.remoteResult)) conflict("Enhancement staged AI descriptor differs from its remote result");

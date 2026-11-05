@@ -55,7 +55,7 @@ describe("permanent enhancement file promotion from a closed CPU receipt", () =>
         const resize = vi.spyOn(sharp.prototype, "resize");
         const toBuffer = vi.spyOn(sharp.prototype, "toBuffer");
         const toFile = vi.spyOn(sharp.prototype, "toFile");
-        const saved = await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, target);
+        const saved = await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, target, 40_000_000);
         expect({ raw: raw.mock.calls.length, stats: stats.mock.calls.length, resize: resize.mock.calls.length, toBuffer: toBuffer.mock.calls.length, toFile: toFile.mock.calls.length }).toEqual({ raw: 0, stats: 0, resize: 0, toBuffer: 0, toFile: 0 });
         expect(saved).toMatchObject({ type: "image", serverUrl: `/api/generation-log-assets/${target.storageKey}`, width: 32, height: 19, mimeType: `image/${format}` });
         expect(await readFile(join(directory, "generation-assets", target.storageKey))).toEqual(input.bytes);
@@ -74,9 +74,9 @@ describe("permanent enhancement file promotion from a closed CPU receipt", () =>
 
     it("reuses the same permanent local artifact when the closed temporary source has gone", async () => {
         const input = await source("png");
-        const first = await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context);
+        const first = await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context, 40_000_000);
         await unlink(input.sourcePath);
-        const resumed = await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context);
+        const resumed = await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context, 40_000_000);
         expect(resumed).toEqual(first);
         expect(await readFile(join(directory, "generation-assets", context.storageKey))).toEqual(input.bytes);
     });
@@ -84,12 +84,12 @@ describe("permanent enhancement file promotion from a closed CPU receipt", () =>
     it("writes and reads the actual S3 file stream and retains its provider after new object writes are disabled", async () => {
         const input = await source("png");
         settings.config.mockResolvedValue(fixture.config);
-        const first = await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context);
+        const first = await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context, 40_000_000);
         await expect(readFile(join(directory, "generation-assets", context.storageKey))).rejects.toMatchObject({ code: "ENOENT" });
         expect(await registry.getLocalMediaRegistration(context.storageKey)).toMatchObject({ storageProvider: "object", externalStorageId: "default", externalObjectKey: "fixture/media/generation/permanent/fixture/images/enhancement.png" });
         await unlink(input.sourcePath);
         settings.config.mockResolvedValue({ ...fixture.config, enabled: false });
-        expect(await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context)).toEqual(first);
+        expect(await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context, 40_000_000)).toEqual(first);
         expect(fixture.requests).toEqual([
             { method: "PUT", key: "fixture/media/generation/permanent/fixture/images/enhancement.png" },
             { method: "GET", key: "fixture/media/generation/permanent/fixture/images/enhancement.png" },
@@ -99,34 +99,34 @@ describe("permanent enhancement file promotion from a closed CPU receipt", () =>
 
     it("rejects a corrupted registered local artifact without overwriting it from the temporary source", async () => {
         const input = await source("png");
-        await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context);
+        await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context, 40_000_000);
         const target = join(directory, "generation-assets", context.storageKey);
         const corrupt = Buffer.alloc(input.bytes.length, 0);
         await writeFile(target, corrupt);
-        await expect(repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context)).rejects.toThrow("Enhancement artifact bytes/hash do not match CPU receipt");
+        await expect(repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context, 40_000_000)).rejects.toThrow("Enhancement artifact bytes/hash do not match CPU receipt");
         expect(await readFile(target)).toEqual(corrupt);
     });
 
     it("rejects a corrupted actual object readback without a second writer upload", async () => {
         const input = await source("png");
         settings.config.mockResolvedValue(fixture.config);
-        await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context);
+        await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context, 40_000_000);
         await putObjectBytes(fixture.config, { key: "fixture/media/generation/permanent/fixture/images/enhancement.png", bytes: Buffer.alloc(input.bytes.length, 0), contentType: "image/png" });
-        await expect(repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context)).rejects.toThrow("Enhancement artifact bytes/hash do not match CPU receipt");
+        await expect(repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context, 40_000_000)).rejects.toThrow("Enhancement artifact bytes/hash do not match CPU receipt");
         expect(fixture.requests.map((request) => request.method)).toEqual(["PUT", "GET", "PUT", "GET"]);
     });
 
     it("rejects a source hash mismatch before registering a permanent asset", async () => {
         const input = await source("png");
-        await expect(repository.writeEnhancementArtifactFile(input.sourcePath, { ...input.artifact, sha256: "f".repeat(64) }, context)).rejects.toThrow("Enhancement artifact bytes/hash do not match CPU receipt");
+        await expect(repository.writeEnhancementArtifactFile(input.sourcePath, { ...input.artifact, sha256: "f".repeat(64) }, context, 40_000_000)).rejects.toThrow("Enhancement artifact bytes/hash do not match CPU receipt");
         expect(await registry.getLocalMediaRegistration(context.storageKey)).toBeNull();
         expect(fixture.requests).toEqual([]);
     });
 
     it("does not take over another owner's registered target", async () => {
         const input = await source("png");
-        await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context);
-        await expect(repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, { ...context, ownerUserId: "another-fixture-owner" })).rejects.toThrow("Enhancement permanent artifact registration changed");
+        await repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, context, 40_000_000);
+        await expect(repository.writeEnhancementArtifactFile(input.sourcePath, input.artifact, { ...context, ownerUserId: "another-fixture-owner" }, 40_000_000)).rejects.toThrow("Enhancement permanent artifact registration changed");
         expect(await registry.getLocalMediaRegistration(context.storageKey)).toMatchObject({ ownerUserId: "fixture-enhancement-owner" });
     });
 });

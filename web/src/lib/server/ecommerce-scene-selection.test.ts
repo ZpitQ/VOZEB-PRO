@@ -229,7 +229,7 @@ describe("authenticated scene selection receipt rules", () => {
         },
     );
     it("requires a nonempty authenticated actor", async () => {
-        await expect(confirm(pausedRun().run, selection, " ")).rejects.toThrow("允许编辑");
+        await expect(confirm(pausedRun().run, selection, " ")).rejects.toThrow("选择需要修改");
         expect(mocks.mutate).not.toHaveBeenCalled();
     });
     it("rejects another user's baseline", async () => {

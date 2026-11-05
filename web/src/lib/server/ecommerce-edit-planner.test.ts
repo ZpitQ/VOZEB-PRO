@@ -628,6 +628,10 @@ describe("ecommerce edit planner", () => {
     it.each([
         ["只加柜面花瓶，不改变机位和光照", "local"],
         ["只加柜面花瓶，保持灯光不变", "local"],
+        ["只调整柜面花瓶的角度，其他保持不变", "local"],
+        ["只在柜面生成一个正面朝向的花瓶，其他保持不变", "local"],
+        ["只加柜面花瓶，不要生成侧面的角度", "local"],
+        ["只加柜面花瓶，保持侧面角度不变", "local"],
         ["只加柜面花瓶，保持整体光照不变", "local"],
         ["只加柜面花瓶，保持全图机位和构图不变", "local"],
         ["只加柜面花瓶，禁止改变整体光照", "local"],
@@ -689,6 +693,38 @@ describe("ecommerce edit planner", () => {
             expect(compiled.mask).toBeUndefined();
             expect(compiled.prompt).toContain("不承诺选区外像素");
         }
+    });
+    it.each(["这张图，同样的场景，生成一张微微侧面的角度，其他全部保持不变", "图片1 生成一张微微侧面的角度，其他全部保持不变"])("plans a requested side angle without a local selection: %s", (userRequest) => {
+        const input = scenePlanningRequest();
+        input.planningInput = { ...input.planningInput, userRequest };
+        const analysis = sceneVisualAnalysis();
+        analysis.references[0].photographyFacts = photographyFacts();
+        const composition = { focalSubject: "微微侧面的柜子", depth: "保留场景纵深", negativeSpace: "保持留白" };
+        const output = validPlan({
+            planVersion: "ecommerce-edit.v5",
+            operation: "scene_edit",
+            source: { productAnchorId: null, currentSceneBaselineId: "scene", sceneReferenceIds: [] },
+            baseline: { productFacts: null, sceneFacts: analysis.references[0].sceneFacts! },
+            preserve: { productCore: [], sceneElements: ["cabinet"] },
+            strategy: "integrated_scene",
+            photography: { ...photographyFacts(), composition },
+        });
+        const plan = normalizePlannedEdit(output, input, analysis, "planner-model")!;
+        expect(plan.protection).toMatchObject({ scope: "global", preserveOutsideMask: false, allowLightingChange: false });
+        expect(plan.photography?.composition).toEqual(composition);
+        const profile = resolveEcommerceImageProviderProfile({
+            logicalRole: "image_generation",
+            capability: "image",
+            logicalModelId: "image-generation",
+            channelId: "fixture",
+            upstreamModel: "gpt-image-2.5-flare",
+            apiFormat: "openai",
+            imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
+        })!;
+        const compiled = compileEcommerceImageRequest(plan, profile);
+        expect(compiled.state).toBe("ready");
+        expect(compiled.mask).toBeUndefined();
+        expect(compiled.prompt).toContain("微微侧面的柜子");
     });
     it("canonicalizes canvas from the current request and decoded baseline ahead of planner claims", () => {
         const input = { ...scenePlanningRequest(), canvasInput: { userRequest: { mode: "preserve" as const }, explicitSize: { width: 3000, height: 2000 }, baselineSize: { width: 3840, height: 2160 } } };

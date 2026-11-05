@@ -20,8 +20,7 @@ export function enhancementInputBudget(options: ImageProcessingEnhancementOption
     if (inputIndex === options.aiInputIndex) budgets.push(options.budgets.ai);
     if (options.stagedDelivered?.inputIndex === inputIndex || (options.scope !== "full_image" && options.baselineInputIndex === inputIndex)) budgets.push(options.budgets.delivery);
     if (options.scope !== "full_image" && [options.sourceInputIndex, options.nativeInputIndex, options.maskInputIndex].includes(inputIndex)) budgets.push(options.budgets.input);
-    const permanent = inputIndex === options.aiInputIndex || options.stagedDelivered?.inputIndex === inputIndex || (options.scope !== "full_image" && options.baselineInputIndex === inputIndex);
-    return { maxBytes: Math.min(...budgets.map((budget) => budget.maxBytes)), maxPixels: Math.min(...budgets.map((budget) => budget.maxPixels), permanent ? 40_000_000 : Number.MAX_SAFE_INTEGER) };
+    return { maxBytes: Math.min(...budgets.map((budget) => budget.maxBytes)), maxPixels: Math.min(...budgets.map((budget) => budget.maxPixels)) };
 }
 
 export async function enhancementRegisteredStream(registration: LocalMediaRegistration, signal?: AbortSignal) {
@@ -113,7 +112,7 @@ export async function readVerifiedEnhancementArtifact(child: EnhancementProcessi
     const filePath = join(directory, "closed-artifact");
     try {
         await copyVerified(registration, artifact, filePath, child.payload.options.budgets.delivery.maxBytes);
-        const metadata = await sharp(filePath, { failOn: "warning", limitInputPixels: Math.min(40_000_000, child.payload.options.budgets.delivery.maxPixels) }).metadata();
+        const metadata = await sharp(filePath, { failOn: "warning", limitInputPixels: child.payload.options.budgets.delivery.maxPixels }).metadata();
         const size = orientedDimensions(metadata);
         if (
             size.width !== artifact.width ||

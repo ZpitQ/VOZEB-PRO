@@ -48,7 +48,7 @@ export async function resumeEcommerceSceneSelection(input: { run: AgentRun; sele
     const processing = run.ecommerceSnapshot?.processing;
     const selection = parseSceneSelection(input.selection);
     if (!task || !plan || !execution || !processing) throw new Error("当前任务不能确认编辑区域");
-    if (!actorUserId.trim() || !selection) throw new Error("请在原图上确认允许编辑的区域，包含新增物体及其接触阴影");
+    if (!actorUserId.trim() || !selection) throw new Error("请在原图上选择需要修改的区域，并包含必要的周边空间");
     if (selection.baselineAssetId !== plan.source.currentSceneBaselineId) throw new Error("选区与任务的原图基线不匹配");
     const ids = execution.referenceRoles.map((reference) => reference.assetId);
     const assets = await getCreativeAssetsByIds(ids, run.userId);

@@ -1,0 +1,14 @@
+diff --git a/lib/util/mayContainChildComponent.js b/lib/util/mayContainChildComponent.js
+index 9c12846d93a699b3870fcc682b70318d549a9b11..20fc6c3a448824c09637011d50d215acf04f087e 100644
+--- a/lib/util/mayContainChildComponent.js
++++ b/lib/util/mayContainChildComponent.js
+@@ -8 +8 @@ var _jsxAstUtils = require("jsx-ast-utils");
+-var _minimatch = _interopRequireDefault(require("minimatch"));
++var _minimatch = _interopRequireDefault(require("minimatch").minimatch);
+diff --git a/lib/util/mayHaveAccessibleLabel.js b/lib/util/mayHaveAccessibleLabel.js
+index 07eb76610957454796da190d118f1b1061bbad20..2dcf2327a6cb4f2fa313c660f9c73f066d9ff153 100644
+--- a/lib/util/mayHaveAccessibleLabel.js
++++ b/lib/util/mayHaveAccessibleLabel.js
+@@ -9 +9 @@ var _jsxAstUtils = require("jsx-ast-utils");
+-var _minimatch = _interopRequireDefault(require("minimatch"));
++var _minimatch = _interopRequireDefault(require("minimatch").minimatch);

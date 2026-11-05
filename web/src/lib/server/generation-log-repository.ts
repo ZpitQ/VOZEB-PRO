@@ -130,8 +130,8 @@ export async function isSafeRemoteAssetUrl(value: string) {
     return isSafeOutboundUrl(value, { allowCredentials: false });
 }
 
-export async function writeAssetBytes(bytes: Buffer, mimeType: string, type: GenerationLogKind, context: GenerationAssetContext): Promise<GenerationLogAsset> {
-    const normalized: { bytes: Buffer; mimeType: string; width?: number; height?: number } = type === "image" ? await normalizeGeneratedImageBytes(bytes, mimeType, context.targetSize) : { bytes, mimeType };
+export async function writeAssetBytes(bytes: Buffer, mimeType: string, type: GenerationLogKind, context: GenerationAssetContext, maxImagePixels?: number): Promise<GenerationLogAsset> {
+    const normalized: { bytes: Buffer; mimeType: string; width?: number; height?: number } = type === "image" ? await normalizeGeneratedImageBytes(bytes, mimeType, context.targetSize, maxImagePixels) : { bytes, mimeType };
     bytes = normalized.bytes;
     mimeType = normalized.mimeType;
     const extension = extensionFromMime(mimeType, type);
@@ -169,6 +169,7 @@ export async function writeEnhancementArtifactFile(
     sourcePath: string,
     artifact: Omit<StoredEnhancementArtifact, "url">,
     context: Omit<GenerationAssetContext, "targetSize" | "taskId"> & { taskId: string; storageKey: string },
+    limitInputPixels: number,
 ): Promise<GenerationLogAsset> {
     const { storageKey } = context;
     const filePath = resolve(ASSET_ROOT, storageKey);
@@ -196,14 +197,14 @@ export async function writeEnhancementArtifactFile(
     }
     const source = await stat(sourcePath);
     if (!source.isFile() || source.size !== artifact.byteLength) throw new Error("Enhancement source file does not match CPU receipt");
-    const metadata = await sharp(sourcePath, { limitInputPixels: 40_000_000, failOn: "warning" }).metadata();
+    const metadata = await sharp(sourcePath, { limitInputPixels, failOn: "warning" }).metadata();
     if (
         metadata.format !== artifact.format ||
         metadata.width !== artifact.width ||
         metadata.height !== artifact.height ||
         (metadata.pages !== undefined && metadata.pages !== 1) ||
         (metadata.orientation !== undefined && metadata.orientation !== 1) ||
-        BigInt(artifact.width) * BigInt(artifact.height) > BigInt(40_000_000)
+        BigInt(artifact.width) * BigInt(artifact.height) > BigInt(limitInputPixels)
     )
         throw new Error("Enhancement source metadata does not match CPU receipt");
     await verifyEnhancementArtifactStream(createReadStream(sourcePath), artifact);

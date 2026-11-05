@@ -47,7 +47,7 @@ describe("reproducible toolchain migration", () => {
         const workspace = parse(source("pnpm-workspace.yaml"));
         expect(workspace.patchedDependencies?.[exactPlugin]).toBe("patches/@next__eslint-plugin-next@16.3.0.patch");
         expect(workspace.overrides[`${exactPlugin}>fast-glob`]).toBe("-");
-        expect(workspace.packageExtensions?.[exactPlugin]?.dependencies).toEqual({ glob: "13.0.6", minimatch: "10.2.6" });
+        expect(workspace.packageExtensions?.[exactPlugin]?.dependencies).toEqual({ glob: "14.0.2", minimatch: "11.0.1" });
         expect(workspace.allowUnusedPatches).not.toBe(true);
     });
 
@@ -61,7 +61,7 @@ describe("reproducible toolchain migration", () => {
     });
 
     it("runs actual installed directory scanning and lint diagnostics", () => {
-        expectFixture("toolchain-migration-fixture.mjs", 40);
+        expectFixture("toolchain-migration-fixture.mjs", 47);
     });
 
     it("retains the complete installed project rule names and severities", async () => {

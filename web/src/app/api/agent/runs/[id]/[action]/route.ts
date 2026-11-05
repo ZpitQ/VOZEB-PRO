@@ -77,7 +77,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (action === "resume" && REFERENCE_CHECKPOINT_REASONS.has(run.ecommerceSnapshot?.fallback?.reason || "") && run.tasks.every((task) => !task.attempts && !task.taskId && !task.taskIds?.length && !task.childTasks?.length))
         return NextResponse.json({ code: 409, data: null, msg: run.ecommerceSnapshot?.referenceCheckpoint ? "请使用本轮参考用途确认或重新分析入口" : "这条历史任务无法直接继续，请重新选择原图片开始创作。" }, { status: 409 });
     if (body?.sceneSelection !== undefined || (action === "resume" && run.ecommerceSnapshot?.fallback?.reason === "scene_selection_required" && !run.ecommerceSnapshot.processing?.sceneSelection && !run.tasks.some((task) => task.sceneProtection))) {
-        if (action !== "resume" || !body?.sceneSelection) return NextResponse.json({ code: 409, data: null, msg: "请在原图上确认允许编辑的区域，包含新增物体及其接触阴影" }, { status: 409 });
+        if (action !== "resume" || !body?.sceneSelection) return NextResponse.json({ code: 409, data: null, msg: "请在原图上选择需要修改的区域，并包含必要的周边空间" }, { status: 409 });
         const origin = resolveInternalOrigin(new URL(request.url).origin);
         const cookie = request.headers.get("cookie") || "";
         const limit = (await getAuthSettings()).generationConcurrency.agent;

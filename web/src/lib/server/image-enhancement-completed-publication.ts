@@ -83,14 +83,19 @@ export async function publishCompletedEnhancement(lease: ImageEnhancementJob) {
         try {
             const save = async (role: "ai" | "delivered", filePath: string, artifact: Omit<StoredEnhancementArtifact, "url">, storageKey: string): Promise<StoredEnhancementArtifact> => {
                 // Keep byte and metadata verification in the existing original-file writer; no Web pixel processing.
-                const saved = await writeEnhancementArtifactFile(filePath, artifact, {
-                    storageKey,
-                    ownerUserId: lease.userId,
-                    source: prepared.task.source,
-                    conversationId: prepared.task.conversationId,
-                    taskId: lease.id,
-                    originalName: `${role === "ai" ? "完整AI增强" : "AI高清增强"}.${artifact.format === "jpeg" ? "jpg" : "png"}`,
-                }).catch((cause) => {
+                const saved = await writeEnhancementArtifactFile(
+                    filePath,
+                    artifact,
+                    {
+                        storageKey,
+                        ownerUserId: lease.userId,
+                        source: prepared.task.source,
+                        conversationId: prepared.task.conversationId,
+                        taskId: lease.id,
+                        originalName: `${role === "ai" ? "完整AI增强" : "AI高清增强"}.${artifact.format === "jpeg" ? "jpg" : "png"}`,
+                    },
+                    prepared.child.payload.options.budgets[role === "ai" ? "ai" : "delivery"].maxPixels,
+                ).catch((cause) => {
                     throw new ImageEnhancementPublicationError("output_storage_invalid", { cause });
                 });
                 return { ...artifact, url: saved.serverUrl! };

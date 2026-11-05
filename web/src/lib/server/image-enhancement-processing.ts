@@ -75,7 +75,7 @@ export function assertEnhancementProcessingManifest(child: EnhancementProcessing
         artifact.height !== size.height ||
         artifact.mimeType !== "image/" + format ||
         artifact.bytes > options.budgets.delivery.maxBytes ||
-        artifact.width * artifact.height > Math.min(40_000_000, options.budgets.delivery.maxPixels) ||
+        artifact.width * artifact.height > options.budgets.delivery.maxPixels ||
         !isDeepStrictEqual(manifest.geometry, { sourceSize: geometry }) ||
         result?.version !== "enhancement-processing-result.v1" ||
         result.bindingDigest !== options.bindingDigest ||
@@ -339,7 +339,7 @@ export async function writeEnhancementProcessingOutput(
             },
         });
         await pipeline(Readable.fromWeb(input.stream as NodeReadableStream<Uint8Array>), meter, createWriteStream(filename, { flags: "wx" }), { signal: input.signal });
-        const metadata = await sharp(filename, { failOn: "warning", limitInputPixels: Math.min(40_000_000, options.budgets.delivery.maxPixels) }).metadata();
+        const metadata = await sharp(filename, { failOn: "warning", limitInputPixels: options.budgets.delivery.maxPixels }).metadata();
         const size = orientedDimensions(metadata);
         if (
             imageMimeType(metadata) !== input.mimeType ||

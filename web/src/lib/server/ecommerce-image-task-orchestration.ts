@@ -68,7 +68,7 @@ export function prepareEcommerceImageTask(input: {
         )
             throw new EcommerceImageTaskPreparationError("局部场景执行快照无效");
         if (!resolveImageEditProtocol(baseConfig).supportsIndependentMask || input.ecommerceExecution.modelSnapshot.imageEdit?.supportsIndependentMask === false) reviewReason = "当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。";
-        else if (!input.sceneProtection) reviewReason = "请在原图上确认允许编辑的区域，包含新增物体及其接触阴影。";
+        else if (!input.sceneProtection) reviewReason = "请在原图上选择需要修改的区域，并包含必要的周边空间。";
         if (input.sceneProtection) {
             sceneProtection = structuredClone(input.sceneProtection);
             if (sceneProtection.sourceAssetId !== input.references[0].id || sceneProtection.selectionSource !== "user_selection") throw new EcommerceImageTaskPreparationError("场景选区与原图基线不匹配");

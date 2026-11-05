@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join, relative } from "node:path";
+import sharp from "sharp";
 import type { EnhancementModel } from "@/lib/image-enhancement-contract";
 import type { ImageEnhancementJob } from "./database/image-enhancement-job-repository";
 import type { EnhancementArtifact, EnhancementWorkerBudgets, RemoteEnhancementJob } from "./image-enhancement-worker-client";
@@ -33,6 +34,8 @@ export async function openRetainedEnhancementWorker(input: WorkerInput) {
     const statePath = join(input.controlDirectory, "remote-state.json");
     let state: RetainedWorkerState;
     if (input.create) {
+        const metadata = await sharp(input.create.ai).metadata();
+        assert.ok(metadata.width && metadata.height);
         await writeFile(join(input.controlDirectory, "worker-ai.png"), input.create.ai, { flag: "wx" });
         state = {
             endpoint: "",
@@ -40,7 +43,7 @@ export async function openRetainedEnhancementWorker(input: WorkerInput) {
             model: input.create.model,
             budgets: input.create.budgets,
             sourceSha256: retainedDigest(input.create.source),
-            output: { width: 128, height: 128, format: "png", sha256: retainedDigest(input.create.ai), byteLength: input.create.ai.length },
+            output: { width: metadata.width, height: metadata.height, format: "png", sha256: retainedDigest(input.create.ai), byteLength: input.create.ai.length },
             job: null,
             acceptedRequest: null,
             requests: [],
@@ -103,7 +106,7 @@ export async function openRetainedEnhancementWorker(input: WorkerInput) {
                     protocolVersion: "image-enhancement.v1",
                     scope: "full_image",
                     sourceSha256: state.sourceSha256,
-                    target: { width: 128, height: 128, format: "png" },
+                    target: { width: state.output.width, height: state.output.height, format: "png" },
                     modelId: state.model.id,
                     normalizationProfile: "srgb-upright-v1",
                     tile: 0,
@@ -115,7 +118,7 @@ export async function openRetainedEnhancementWorker(input: WorkerInput) {
                     serviceId: state.serviceId,
                     plan: { planFingerprint: parent.remotePlan.planFingerprint, strategyFingerprint: parent.remotePlan.strategyFingerprint, engine: { tta: false } },
                     source: { sha256: state.sourceSha256 },
-                    engineInput: { width: 32, height: 32 },
+                    engineInput: { width: parent.remotePlan.source.width, height: parent.remotePlan.source.height },
                     status: "queued",
                     reason: null,
                     result: null,
