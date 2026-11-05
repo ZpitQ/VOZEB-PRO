@@ -17,27 +17,14 @@ import { filterAgentPlannerModels } from "@/lib/server/agent-run-planning-profil
 import { buildAgentRunPlannerAudit } from "@/lib/server/agent-run-audit";
 import { agentRequestDigest, buildAgentRequest, serializeAgentRequest } from "@/lib/server/agent-prompt-json";
 import { orderCreativeAssetsByIds } from "@/lib/creative-asset-references";
-import { originalImageSourceUrl } from "@/lib/media-image-url";
 import { withDirectAgentExecutionContext } from "./agent-run-direct-context";
 import { buildEcommercePlanningInput, legacyPlanFallback, recordEcommerceGenerationSnapshot } from "./ecommerce-generation-snapshot";
-import {
-    buildLocalEditProductProtection,
-    buildWhiteBackgroundProductProtection,
-    createEcommerceLocalEditTask,
-    createEcommerceProductSceneTask,
-    createEcommerceSceneEditTask,
-    decodeEcommerceCanvasSize,
-    ecommerceCanvasInputFromRequest,
-    ecommerceGenerationEnabled,
-    ecommerceRolloutStage,
-    isEcommerceImageRequest,
-    isEcommerceNoAttachmentContinuation,
-    loadEcommercePlanningImage,
-    publicEcommerceProgress,
-} from "./ecommerce-generation-service";
+import { createEcommerceSceneEditTask, ecommerceCanvasInputFromRequest, ecommerceGenerationEnabled, ecommerceRolloutStage, isEcommerceImageRequest, isEcommerceNoAttachmentContinuation, publicEcommerceProgress } from "./ecommerce-generation-service";
+import { prepareEcommerceReferences, verifyPreparedEcommerceReferenceSource, type PreparedEcommerceReference } from "./ecommerce-reference-preparation";
+import { prepareEcommerceProtectionTask, prepareEcommerceSceneProtectionTask } from "./ecommerce-protection-preparation";
 import { planEcommerceEdit, resolveLocalEditTarget, unsupportedEcommerceProductEditMessage } from "./ecommerce-edit-planner";
 import { ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_VERSION, resolveEcommerceCanvasConstraint } from "./ecommerce-edit-plan";
-import { classifyReferenceRoles, resolveDualBaseline, resolveSourcesFromEcommerceReferenceDecision, type EcommerceSources } from "./ecommerce-reference-roles";
+import { classifyReferenceRoles, resolveDualBaseline, resolveSourcesFromEcommerceReferenceDecision, toLegacyEcommerceVisualAnalysis, type EcommerceSources } from "./ecommerce-reference-roles";
 import { analyzeEcommerceReferences, EcommerceVisualAnalysisError, type EcommerceVisualAnalysis, type EcommerceVisualAnalysisV4 } from "./ecommerce-visual-analysis";
 import { ecommerceReferenceReviewMessage, resolveEcommerceReferenceDecision } from "./ecommerce-reference-purpose";
 import { compileEcommerceImageCandidates, type EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
@@ -69,11 +56,36 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
     try {
         const claimed = await updateAgentRunById(
             run.id,
-            { status: "running", executionId, timings: { ...(run.timings || { requestAcceptedAt: run.createdAt }), ...(run.tasks.length ? {} : { planningStartedAt: Date.now() }) } },
-            { type: run.tasks.length ? "run.resumed" : "run.planning" },
+            { status: "running", executionId, timings: { ...(run.timings || { requestAcceptedAt: run.createdAt }), ...(run.tasks.length || run.ecommerceSnapshot?.plan ? {} : { planningStartedAt: Date.now() }) } },
+            { type: run.tasks.length || run.ecommerceSnapshot?.plan ? "run.resumed" : "run.planning" },
             ["planning", "running"],
         );
         if (!claimed) return;
+        const frozenPlan = claimed.ecommerceSnapshot;
+        if (frozenPlan?.processing?.waitingFor) return;
+        if (frozenPlan?.processing?.sceneSelection && claimed.tasks.every((task) => !task.sceneProtection)) {
+            failureStage = "task_execution";
+            const task = await prepareEcommerceSceneProtectionTask(claimed, executionId, origin, cookie);
+            if (!task) return;
+            if (
+                !(await updateAgentRunById(
+                    claimed.id,
+                    { tasks: [task], ecommerceSnapshot: { ...frozenPlan, fallback: undefined } },
+                    { type: "ecommerce.progress", data: { stage: "generating_image", text: publicEcommerceProgress("generating_image") } },
+                    ["running"],
+                    executionId,
+                    claimed.tasks,
+                ))
+            )
+                return;
+            await executeTasks(claimed.id, origin, cookie, executionId, await getAuthSettings());
+            return;
+        }
+        if (!claimed.tasks.length && frozenPlan?.mode === "active" && frozenPlan.plan && !frozenPlan.fallback && (frozenPlan.plan.operation === "product_to_scene" || frozenPlan.plan.operation === "local_edit")) {
+            failureStage = "task_execution";
+            await executeEcommerceProtection(claimed, executionId, origin, cookie, await getAuthSettings());
+            return;
+        }
         if (claimed.tasks.length) {
             if (isUnresolvedEcommerceCheckpoint(claimed.ecommerceSnapshot?.fallback?.reason) && claimed.tasks.every((task) => !task.taskId && !task.taskIds?.length && !task.childTasks?.length && !task.sceneProtection)) {
                 const reviewTask = claimed.tasks[0];
@@ -157,6 +169,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             let planningAssets = referenceContinuation ? referenceContinuation.assets.map((item) => item.asset) : [...ecommerceAssets];
             let planningInput = referenceContinuation ? structuredClone(referenceContinuation.planningInput) : buildEcommercePlanningInput(claimed, planningAssets, conversationContext);
             let referenceCheckpoint: EcommerceReferenceCheckpoint | undefined = referenceContinuation;
+            const processing = claimed.ecommerceSnapshot?.processing;
             let snapshotInput = ecommerceSnapshotInput(planningInput);
             const visionCandidates = resolveEcommerceRoleCandidates(settings, "vision_analysis", "text");
             const editPlanningCandidates = resolveEcommerceRoleCandidates(settings, "edit_planning", "text");
@@ -213,6 +226,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                     modelRouteSnapshots: { image_generation: imageGenerationRole.snapshot },
                     ...planningEvidence,
                     ...(referenceCheckpoint ? { referenceCheckpoint } : {}),
+                    processing,
                     compilerVersion: ecommerceExecution?.compilerVersion || (planningEvidence.plan?.operation === "scene_edit" ? "scene-edit-needs-review.v1" : "strict-product.v1"),
                     fallback: { reason },
                     createdAt: Date.now(),
@@ -277,31 +291,28 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
 
             referenceCheckpoint ||= createEcommerceReferenceCheckpoint(claimed, planningInput, planningAssets);
 
-            if (
-                !(await updateAgentRunById(
-                    run.id,
-                    { ecommerceSnapshot: recordEcommerceGenerationSnapshot(claimed, { version: "ecommerce-generation.v1", mode: "active", input: snapshotInput, referenceCheckpoint, createdAt: Date.now() }) },
-                    {
-                        type: "ecommerce.progress",
-                        data: { stage: "identifying_product", text: publicEcommerceProgress("identifying_product") },
-                    },
-                    ["running"],
-                    executionId,
-                ))
-            )
-                return;
+            const referenceRun = await updateAgentRunById(
+                run.id,
+                { ecommerceSnapshot: recordEcommerceGenerationSnapshot(claimed, { version: "ecommerce-generation.v1", mode: "active", input: snapshotInput, referenceCheckpoint, processing, createdAt: Date.now() }) },
+                {
+                    type: "ecommerce.progress",
+                    data: { stage: "identifying_product", text: publicEcommerceProgress("identifying_product") },
+                },
+                ["running"],
+                executionId,
+            );
+            if (!referenceRun) return;
             let analysis: EcommerceVisualAnalysis | EcommerceVisualAnalysisV4;
             let reusedCompletedAnalysis = false;
-            const frozenSourceBytes = new Map<string, Buffer>();
+            let preparedReferences: PreparedEcommerceReference[];
             try {
+                const prepared = await prepareEcommerceReferences(referenceRun, executionId);
+                if (!prepared) return;
+                preparedReferences = prepared;
                 if (referenceCheckpoint.analysis?.analysisVersion === "ecommerce-visual-analysis.v4" && referenceCheckpoint.analysisStage.state === "completed") {
                     const analyzedIds = new Set(referenceCheckpoint.analysis.references.map((reference) => reference.assetId));
                     if (analyzedIds.size !== referenceCheckpoint.assets.length || referenceCheckpoint.assets.some((item) => !analyzedIds.has(item.asset.id))) throw new EcommerceReferenceSourceChangedError();
-                    for (const item of referenceCheckpoint.assets) {
-                        const source = planningInput.assetCandidates.find((asset) => asset.id === item.asset.id)?.url;
-                        if (!source || !item.contentSha256) throw new EcommerceReferenceSourceChangedError();
-                        frozenSourceBytes.set(item.asset.id, await loadEcommercePlanningImage(originalImageSourceUrl(source), origin, cookie, item.contentSha256));
-                    }
+                    for (const reference of preparedReferences) await verifyPreparedEcommerceReferenceSource(reference, origin, cookie);
                     analysis = referenceCheckpoint.analysis;
                     reusedCompletedAnalysis = true;
                 } else {
@@ -312,6 +323,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                             userId: claimed.userId,
                             requestId: referenceCheckpoint.analysisStage.requestId,
                             planningInput,
+                            preparedReferences,
                             analysisVersion: "ecommerce-visual-analysis.v4",
                             onSourcesLoaded: async (sources) => {
                                 const current = await getAgentRun(run.id);
@@ -378,7 +390,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             if (
                 !(await updateAgentRunById(
                     run.id,
-                    { ecommerceSnapshot: recordEcommerceGenerationSnapshot(claimed, { version: "ecommerce-generation.v1", mode: "active", qualityPolicy, input: snapshotInput, ...planningEvidence(), createdAt: Date.now() }) },
+                    { ecommerceSnapshot: recordEcommerceGenerationSnapshot(claimed, { version: "ecommerce-generation.v1", mode: "active", qualityPolicy, input: snapshotInput, ...planningEvidence(), processing, createdAt: Date.now() }) },
                     undefined,
                     ["running"],
                     executionId,
@@ -432,13 +444,14 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             referenceCheckpoint = { ...referenceCheckpoint, continuity: branchContinuity };
             const baselineId = sources.currentSceneBaselineId || sources.productAnchorId;
             const baselineUrl = planningAssets.find((asset) => asset.id === baselineId)?.serverUrl || planningInput.assetCandidates.find((asset) => asset.id === baselineId)?.url;
-            let baselineBytes: Buffer;
             let canvasInput;
+            let baseline: PreparedEcommerceReference;
             try {
                 if (!baselineUrl) throw new Error("主基线图片不可用");
-                const frozenBaseline = referenceCheckpoint.assets.find((item) => item.asset.id === baselineId);
-                baselineBytes = frozenSourceBytes.get(baselineId!) || (await loadEcommercePlanningImage(originalImageSourceUrl(baselineUrl), origin, cookie, frozenBaseline?.contentSha256));
-                const baselineSize = await decodeEcommerceCanvasSize(baselineBytes);
+                const preparedBaseline = preparedReferences.find((reference) => reference.assetId === baselineId);
+                if (!preparedBaseline) throw new EcommerceReferenceSourceChangedError();
+                baseline = preparedBaseline;
+                const baselineSize = baseline.sourceSize;
                 canvasInput = ecommerceCanvasInputFromRequest(claimed.prompt, claimed.generationPreferences?.image?.size, baselineSize);
             } catch (error) {
                 const sourceChanged = error instanceof EcommerceReferenceSourceChangedError;
@@ -524,17 +537,6 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                     await pauseForReview(target.reason, target.clarificationQuestion, true, undefined, { ...planningEvidence(), plan: planning.plan });
                     return;
                 }
-                const sceneUrl = planningInput.assetCandidates.find((asset) => asset.id === sources?.currentSceneBaselineId)?.url;
-                if (!sceneUrl) throw new Error("当前场景基线不可用");
-                const sceneBytes = baselineBytes;
-                const productProtectionRegions = await buildLocalEditProductProtection(sceneBytes, legacyAnalysis, sources.currentSceneBaselineId, sources.productAnchorId!, target.target);
-                task = createEcommerceLocalEditTask(claimed, planning.plan, planningAssets, productProtectionRegions, ecommerceExecution);
-            } else {
-                const productUrl = planningInput.assetCandidates.find((asset) => asset.id === sources?.productAnchorId)?.url;
-                if (!productUrl) throw new Error("商品锚点图片不可用");
-                const productBytes = baselineBytes;
-                const productProtectionRegions = await buildWhiteBackgroundProductProtection(productBytes, legacyAnalysis, sources.productAnchorId!);
-                task = createEcommerceProductSceneTask(claimed, planning.plan, planningAssets, productProtectionRegions, ecommerceExecution);
             }
             const ecommerceSnapshot = recordEcommerceGenerationSnapshot(claimed, {
                 version: "ecommerce-generation.v1",
@@ -544,6 +546,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 continuity: branchContinuity,
                 visualAnalysis: analysis,
                 referenceCheckpoint,
+                processing,
                 plan: planning.plan,
                 modelRoles: {
                     visionAnalysis: analysis.modelRole.logicalModelId,
@@ -562,23 +565,22 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 stageTimings: { analysisCompletedAt, planningCompletedAt },
                 createdAt: Date.now(),
             });
-            if (
-                !(await updateAgentRunById(
-                    run.id,
-                    {
-                        tasks: [task],
-                        reviewed: qualityPolicy === "disabled",
-                        ecommerceSnapshot,
-                        timings: { ...(claimed.timings || { requestAcceptedAt: claimed.createdAt }), planningCompletedAt: Date.now() },
-                    },
-                    { type: "ecommerce.progress", data: { stage: "generating_image", text: publicEcommerceProgress("generating_image") } },
-                    ["running"],
-                    executionId,
-                ))
-            )
-                return;
+            const planned = await updateAgentRunById(
+                run.id,
+                {
+                    ...(task ? { tasks: [task] } : {}),
+                    reviewed: qualityPolicy === "disabled",
+                    ecommerceSnapshot,
+                    timings: { ...(claimed.timings || { requestAcceptedAt: claimed.createdAt }), planningCompletedAt },
+                },
+                task ? { type: "ecommerce.progress", data: { stage: "generating_image", text: publicEcommerceProgress("generating_image") } } : undefined,
+                ["running"],
+                executionId,
+            );
+            if (!planned) return;
             failureStage = "task_execution";
-            await executeTasks(run.id, origin, cookie, executionId, settings);
+            if (task) await executeTasks(run.id, origin, cookie, executionId, settings);
+            else await executeEcommerceProtection(planned, executionId, origin, cookie, settings);
             return;
         }
         if (directModelSelection) {
@@ -769,16 +771,13 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
     }
 }
 
-function toLegacyEcommerceVisualAnalysis(analysis: EcommerceVisualAnalysis | EcommerceVisualAnalysisV4): EcommerceVisualAnalysis {
-    if (analysis.analysisVersion !== "ecommerce-visual-analysis.v4") return analysis;
-    return {
-        ...analysis,
-        analysisVersion: "ecommerce-visual-analysis.v3",
-        references: analysis.references.map((reference) => ({
-            ...reference,
-            role: reference.contentType === "isolated_product" || reference.contentType === "product_detail" ? "product" : reference.contentType === "interior_scene" ? "scene" : "unknown",
-        })),
-    };
+async function executeEcommerceProtection(run: AgentRun, executionId: string, origin: string, cookie: string, settings: Awaited<ReturnType<typeof getAuthSettings>>) {
+    const analysis = run.ecommerceSnapshot?.visualAnalysis;
+    if (!analysis) throw new Error("已保存的商品保护计划缺少视觉事实");
+    const task = await prepareEcommerceProtectionTask(run, executionId, toLegacyEcommerceVisualAnalysis(analysis));
+    if (!task) return;
+    if (!(await updateAgentRunById(run.id, { tasks: [task] }, { type: "ecommerce.progress", data: { stage: "generating_image", text: publicEcommerceProgress("generating_image") } }, ["running"], executionId))) return;
+    await executeTasks(run.id, origin, cookie, executionId, settings);
 }
 
 function executedEcommerceRouteSnapshot(candidates: EcommerceRoleCandidate[], actual: { logicalRole: string; logicalModelId: string; channelId: string; upstreamModel: string }) {

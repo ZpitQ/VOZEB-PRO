@@ -1,6 +1,6 @@
 export type LocalMediaClass = "temporary" | "permanent";
-export type LocalMediaType = "image" | "video" | "audio";
-export type ManagedMediaType = LocalMediaType | "attachment";
+export type LocalMediaType = "image" | "video" | "audio" | "attachment";
+export type ManagedMediaType = LocalMediaType;
 
 export type LocalMediaAsset = {
     id: string;

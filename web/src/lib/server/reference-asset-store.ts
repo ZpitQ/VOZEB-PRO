@@ -60,11 +60,17 @@ async function writeMediaDataUrl(dataUrl: string, expectedType: "image" | "video
     return { token, bytes: parsed.bytes.length, mimeType: parsed.mimeType, storage: "local" };
 }
 
-export async function writeReferenceMediaFile(sourcePath: string, expectedType: "video" | "audio", mimeType: string, persistent: boolean, context: ReferenceMediaWriteContext): Promise<StoredReferenceAsset> {
-    if (!mimeType.startsWith(`${expectedType}/`)) throw new Error("媒体文件格式不正确");
+export async function writeReferenceMediaFile(sourcePath: string, expectedType: "image" | "video" | "audio" | "attachment", mimeType: string, persistent: boolean, context: ReferenceMediaWriteContext): Promise<StoredReferenceAsset> {
+    if (expectedType === "attachment" ? !persistent || mimeType !== "application/octet-stream" : !mimeType.startsWith(`${expectedType}/`)) throw new Error("媒体文件格式不正确");
+    if (expectedType === "image" && (!Number.isSafeInteger(context.maxBytes) || Number(context.maxBytes) <= 0 || !["image/png", "image/jpeg", "image/webp", "image/gif", "image/tiff", "image/avif"].includes(mimeType)))
+        throw new Error("内部图像文件缺少操作字节政策或格式无效");
     const sourceStat = await stat(sourcePath);
-    if (!sourceStat.isFile() || sourceStat.size <= 0 || sourceStat.size > Math.min(context.maxBytes || MAX_REFERENCE_BYTES[expectedType], MAX_REFERENCE_BYTES[expectedType]))
-        throw new Error(`生成${expectedType === "video" ? "视频" : "音频"}文件为空或过大`);
+    if (expectedType === "attachment") {
+        if (!sourceStat.isFile() || sourceStat.size <= 0) throw new Error("生成附件文件为空或无效");
+    } else {
+        const maxBytes = expectedType === "image" ? Number(context.maxBytes) : Math.min(context.maxBytes || MAX_REFERENCE_BYTES[expectedType], MAX_REFERENCE_BYTES[expectedType]);
+        if (!sourceStat.isFile() || sourceStat.size <= 0 || sourceStat.size > maxBytes) throw new Error(`生成${expectedType === "image" ? "图像" : expectedType === "video" ? "视频" : "音频"}文件为空或过大`);
+    }
     const token = createDatedMediaPath(persistent ? "permanent" : "temporary", expectedType, extensionFromMime(mimeType));
     const registration = referenceRegistration(token, persistent, expectedType, mimeType, sourceStat.size, context);
     const external = await persistExternalMediaIfEnabled({ registration, filePath: sourcePath });
@@ -97,7 +103,7 @@ export async function readReferenceAsset(token: string) {
     }
 }
 
-function referenceRegistration(token: string, persistent: boolean, type: "image" | "video" | "audio", mimeType: string, bytes: number, context: ReferenceMediaWriteContext) {
+function referenceRegistration(token: string, persistent: boolean, type: "image" | "video" | "audio" | "attachment", mimeType: string, bytes: number, context: ReferenceMediaWriteContext) {
     if (!context.ownerUserId.trim()) throw new Error("媒体文件缺少用户归属");
     const createdAt = new Date().toISOString();
     return {
@@ -136,9 +142,12 @@ function normalizeMimeType(value: string) {
 }
 
 function extensionFromMime(mimeType: string) {
+    if (mimeType === "application/octet-stream") return ".bin";
     if (mimeType === "image/jpeg") return ".jpg";
     if (mimeType === "image/webp") return ".webp";
     if (mimeType === "image/gif") return ".gif";
+    if (mimeType === "image/tiff") return ".tiff";
+    if (mimeType === "image/avif") return ".avif";
     if (mimeType === "video/webm") return ".webm";
     if (mimeType === "video/quicktime") return ".mov";
     if (mimeType.startsWith("video/")) return ".mp4";
@@ -155,6 +164,8 @@ function mimeTypeFromToken(token: string) {
     if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
     if (lower.endsWith(".webp")) return "image/webp";
     if (lower.endsWith(".gif")) return "image/gif";
+    if (lower.endsWith(".tiff")) return "image/tiff";
+    if (lower.endsWith(".avif")) return "image/avif";
     if (lower.endsWith(".webm")) return "video/webm";
     if (lower.endsWith(".mov")) return "video/quicktime";
     if (lower.endsWith(".mp4")) return "video/mp4";
@@ -167,5 +178,5 @@ function mimeTypeFromToken(token: string) {
 }
 
 export function isReferenceAssetPath(value: string) {
-    return /^(?:temporary|permanent)\/\d{4}\/\d{2}\/\d{2}\/(?:images|videos|audio)\/\d{8}-\d{6}-[0-9a-f-]{36}\.(?:png|jpg|jpeg|webp|gif|mp4|webm|mov|mp3|wav|ogg|aac|flac)$/i.test(value);
+    return /^(?:temporary|permanent)\/\d{4}\/\d{2}\/\d{2}\/(?:images|videos|audio)\/\d{8}-\d{6}-[0-9a-f-]{36}\.(?:png|jpg|jpeg|webp|gif|tiff|avif|mp4|webm|mov|mp3|wav|ogg|aac|flac)$/i.test(value);
 }

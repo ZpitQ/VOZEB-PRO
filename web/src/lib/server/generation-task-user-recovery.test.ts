@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/server/generation-task-recovery-service", () => ({ runGenerationTaskRecoveryBatch: mocks.runRecovery }));
-vi.mock("@/lib/server/generation-task-scheduler", () => ({ scheduleGenerationTask: mocks.schedule }));
+vi.mock("@/lib/server/generation-task-scheduler", () => ({ scheduleGenerationTask: mocks.schedule, rearmImageTaskForUser: mocks.schedule, markImageTaskUserCheckPending: mocks.schedule }));
 vi.mock("@/lib/server/generation-task-store", () => ({ getStoredGenerationTaskRecord: mocks.getRecord }));
 
 import { recoverGenerationTaskFromUpstream } from "@/lib/server/generation-task-user-recovery";
@@ -15,7 +15,7 @@ import { recoverGenerationTaskFromUpstream } from "@/lib/server/generation-task-
 describe("user generation task recovery", () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        mocks.schedule.mockResolvedValue({ id: "video-one" });
+        mocks.schedule.mockResolvedValue({ id: "video-one", executionPhase: "polling" });
         mocks.runRecovery.mockResolvedValue({ claimed: 1 });
     });
 

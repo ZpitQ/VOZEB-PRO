@@ -610,6 +610,7 @@ export default function CreatePage() {
                                 onConfirmSceneSelection={agent.confirmSceneSelection}
                                 onRecoverReference={agent.recoverReference}
                                 onCheckStatus={agent.checkStatus}
+                                onResumeImageProcessing={agent.resumeImageProcessing}
                                 onEnhancementComplete={agent.refreshAssets}
                                 selectedAssetIds={selectedImageAssetIds}
                                 onToggleAsset={toggleReferencedAsset}

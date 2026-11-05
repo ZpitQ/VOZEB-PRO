@@ -94,6 +94,10 @@ describe("创作会话素材上传", () => {
         });
 
         expect(assets[0]).toMatchObject({ type: "image", serverUrl: "/api/generation-log-assets/user/file.png", storageKind: "local" });
-        expect(mocks.registerCreativeAssets).toHaveBeenCalledWith([expect.objectContaining({ conversationId: "conversation-one", sourceRunId: "run-one", sourceTaskId: "task-one", metadata: { surface: "chat", projectId: undefined } })]);
+        expect(mocks.registerCreativeAssets).toHaveBeenCalledWith(
+            [expect.objectContaining({ conversationId: "conversation-one", sourceRunId: "run-one", sourceTaskId: "task-one", metadata: { surface: "chat", projectId: undefined } })],
+            undefined,
+            undefined,
+        );
     });
 });

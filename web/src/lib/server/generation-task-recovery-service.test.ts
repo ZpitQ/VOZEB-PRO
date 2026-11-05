@@ -152,22 +152,22 @@ describe("generation task recovery service", () => {
             tasks: [{ id: "agent-task", type: "image", status: "running", taskId: "child-one", taskIds: ["child-one"], childTasks: [{ id: "child-one", status: "pending", attempt: 1 }] }],
             createdAt: 1_000,
         };
-        mocks.claim.mockResolvedValueOnce([lease()]).mockResolvedValueOnce([{ ...lease(), id: "child-one", type: "image", status: "running" }]);
+        mocks.claim.mockResolvedValueOnce([lease()]).mockResolvedValueOnce([{ ...imageLease(), id: "child-one", type: "image", status: "running" }]);
         mocks.getAgentRun.mockResolvedValueOnce(run).mockResolvedValueOnce({ ...run, status: "completed" });
         mocks.getImageTask.mockResolvedValue({ id: "child-one", userId: "user-one", status: "success" });
 
         const result = await runGenerationTaskRecoveryBatch({ origin: "http://internal", workerId: "worker-one" });
 
         expect(mocks.claim).toHaveBeenNthCalledWith(2, expect.objectContaining({ workerId: "worker-one:children", taskIds: ["child-one"], limit: 1 }));
-        expect(mocks.release).toHaveBeenCalledWith("image", "child-one", "worker-one:children", expect.objectContaining({ executionPhase: "completed", nextPollAt: undefined }));
+        expect(mocks.release).toHaveBeenCalledWith("image", "child-one", "worker-one:children", expect.objectContaining({ executionPhase: "completed", nextPollAt: undefined }), { executionId: "held-image-execution" });
         expect(mocks.release.mock.invocationCallOrder.find((order) => order < mocks.executeAgentRun.mock.invocationCallOrder[0]!)).toBeTruthy();
         expect(mocks.executeAgentRun).toHaveBeenCalledTimes(1);
         expect(result).toMatchObject({ claimed: 1, completed: 1 });
     });
 
     it("persists a ready image without querying the upstream a second time", async () => {
-        const task = { id: "image-ready", userId: "user-one", status: "running", config: {} };
-        mocks.claim.mockResolvedValue([{ ...lease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "persisting", resultPayload: { url: "https://cdn.example.com/result.png" } }]);
+        const task = { id: "image-ready", userId: "user-one", status: "running", config: {}, executionId: "held-image-execution" };
+        mocks.claim.mockResolvedValue([{ ...imageLease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "persisting", resultPayload: { url: "https://cdn.example.com/result.png" } }]);
         mocks.getImageTask.mockResolvedValue(task);
         mocks.persistImageTaskResult.mockResolvedValue({ status: "success" });
 
@@ -175,7 +175,32 @@ describe("generation task recovery service", () => {
 
         expect(mocks.persistImageTaskResult).toHaveBeenCalledWith(task, "http://internal", "https://cdn.example.com/result.png", "", task.userId);
         expect(mocks.queryImageTaskUpstreamStep).not.toHaveBeenCalled();
+        expect(mocks.release).toHaveBeenCalledWith("image", task.id, "worker-one", expect.objectContaining({ executionPhase: "completed", lastUpstreamStatus: "persisted" }), { executionId: "held-image-execution" });
         expect(result).toMatchObject({ claimed: 1, completed: 1, deferred: 0 });
+    });
+
+    it("renews the original image claim while a task read is still in flight", async () => {
+        vi.useFakeTimers();
+        try {
+            const held = { ...imageLease(), id: "image-heartbeat" };
+            const task = { id: held.id, userId: "user-one", status: "success", executionId: "newer-image-execution" };
+            mocks.claim.mockResolvedValue([held]);
+            mocks.getImageTask.mockImplementationOnce(async () => {
+                await new Promise((resolve) => setTimeout(resolve, 50_000));
+                return task;
+            });
+
+            const recovery = runGenerationTaskRecoveryBatch({ origin: "http://internal", workerId: "worker-one" });
+            await vi.advanceTimersByTimeAsync(25_000);
+
+            expect(mocks.renew).toHaveBeenCalledWith("worker-one", [held], 90_000);
+
+            await vi.advanceTimersByTimeAsync(25_000);
+            await expect(recovery).resolves.toMatchObject({ claimed: 1, completed: 1 });
+            expect(mocks.release).toHaveBeenCalledWith("image", task.id, "worker-one", expect.objectContaining({ executionPhase: "completed" }), { executionId: "held-image-execution" });
+        } finally {
+            vi.useRealTimers();
+        }
     });
 
     it("recovers every Agent child task in configured batches", async () => {
@@ -312,10 +337,11 @@ describe("generation task recovery service", () => {
             id: "image-one",
             userId: "user-one",
             status: "running",
+            executionId: "held-image-execution",
             upstream: { id: "upstream-one" },
             config: { channelId: "channel-one", apiFormat: "openai", advancedConfig: { protocol: "openai", queryPath: "" } },
         };
-        mocks.claim.mockResolvedValue([{ ...lease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "polling", upstreamTaskId: task.upstream.id }]);
+        mocks.claim.mockResolvedValue([{ ...imageLease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "polling", upstreamTaskId: task.upstream.id }]);
         mocks.getImageTask.mockResolvedValue(task);
         mocks.queryImageTaskUpstreamStep.mockResolvedValue({ state: "needs_review", status: "query_contract_invalid", reason: "图片任务查询路径返回了网页内容" });
 
@@ -332,6 +358,7 @@ describe("generation task recovery service", () => {
                 lastUpstreamStatus: expect.stringContaining("query_contract_invalid"),
                 resultPayload: { reviewReason: "图片任务查询路径返回了网页内容" },
             }),
+            { executionId: "held-image-execution" },
         );
         expect(result).toMatchObject({ claimed: 1, needsReview: 1 });
         expect(mocks.refundImageTask).not.toHaveBeenCalled();
@@ -342,12 +369,13 @@ describe("generation task recovery service", () => {
             id: "image-retry",
             userId: "user-one",
             status: "running",
+            executionId: "held-image-execution",
             attemptNo: 1,
             upstream: { id: "upstream-failed" },
             config: { channelId: "channel-one", apiFormat: "openai", advancedConfig: { protocol: "openai" } },
         };
         const retry = { ...task, upstream: undefined, config: { channelId: "channel-two", apiFormat: "gemini", advancedConfig: { protocol: "gemini" } } };
-        mocks.claim.mockResolvedValue([{ ...lease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "polling", upstreamTaskId: task.upstream.id }]);
+        mocks.claim.mockResolvedValue([{ ...imageLease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "polling", upstreamTaskId: task.upstream.id }]);
         mocks.getImageTask.mockResolvedValue(task);
         mocks.queryImageTaskUpstreamStep.mockResolvedValue({ state: "failed", status: "failed", error: "上游生成失败", retryReason: "upstream_failed" });
         mocks.prepareImageTaskAutomaticRetry.mockResolvedValue(retry);
@@ -360,15 +388,23 @@ describe("generation task recovery service", () => {
             task.id,
             "worker-one",
             expect.objectContaining({ executionPhase: "created", channelId: "channel-two", nextPollAt: expect.any(Number), lastUpstreamStatus: "automatic_retry_after_upstream_failure" }),
-            { resetUpstreamIdentity: true },
+            { resetUpstreamIdentity: true, executionId: "held-image-execution" },
         );
         expect(mocks.markImageTaskFailed).not.toHaveBeenCalled();
         expect(result).toMatchObject({ claimed: 1, pending: 1, failed: 0 });
     });
 
     it("stops after the second explicit upstream image failure", async () => {
-        const task = { id: "image-retry-exhausted", userId: "user-one", status: "running", attemptNo: 2, upstream: { id: "upstream-failed-again" }, config: { channelId: "channel-one", apiFormat: "openai", advancedConfig: { protocol: "openai" } } };
-        mocks.claim.mockResolvedValue([{ ...lease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "polling", upstreamTaskId: task.upstream.id }]);
+        const task = {
+            id: "image-retry-exhausted",
+            userId: "user-one",
+            status: "running",
+            executionId: "held-image-execution",
+            attemptNo: 2,
+            upstream: { id: "upstream-failed-again" },
+            config: { channelId: "channel-one", apiFormat: "openai", advancedConfig: { protocol: "openai" } },
+        };
+        mocks.claim.mockResolvedValue([{ ...imageLease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "polling", upstreamTaskId: task.upstream.id }]);
         mocks.getImageTask.mockResolvedValue(task);
         mocks.queryImageTaskUpstreamStep.mockResolvedValue({ state: "failed", status: "failed", error: "再次失败", retryReason: "upstream_failed" });
         mocks.prepareImageTaskAutomaticRetry.mockResolvedValue(null);
@@ -376,7 +412,7 @@ describe("generation task recovery service", () => {
         const result = await runGenerationTaskRecoveryBatch({ origin: "http://internal", workerId: "worker-one" });
 
         expect(mocks.markImageTaskFailed).toHaveBeenCalledWith(task, "再次失败");
-        expect(mocks.release).toHaveBeenCalledWith("image", task.id, "worker-one", expect.objectContaining({ executionPhase: "completed", nextPollAt: undefined }));
+        expect(mocks.release).toHaveBeenCalledWith("image", task.id, "worker-one", expect.objectContaining({ executionPhase: "completed", nextPollAt: undefined }), { executionId: "held-image-execution" });
         expect(result).toMatchObject({ claimed: 1, pending: 0, failed: 1 });
     });
 
@@ -385,10 +421,11 @@ describe("generation task recovery service", () => {
             id: "image-one",
             userId: "user-one",
             status: "running",
+            executionId: "held-image-execution",
             upstream: { id: "upstream-one", explicitPollUrl: "/images/upstream-one" },
             config: { channelId: "channel-one", apiFormat: "openai", advancedConfig: { protocol: "openai", queryPath: "/images/:task_id" } },
         };
-        mocks.claim.mockResolvedValue([{ ...lease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "submitting", upstreamTaskId: undefined }]);
+        mocks.claim.mockResolvedValue([{ ...imageLease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "submitting", upstreamTaskId: undefined }]);
         mocks.getImageTask.mockResolvedValue(task);
 
         const result = await runGenerationTaskRecoveryBatch({ origin: "http://internal", workerId: "worker-one" });
@@ -399,6 +436,7 @@ describe("generation task recovery service", () => {
             task.id,
             "worker-one",
             expect.objectContaining({ executionPhase: "submitted", upstreamTaskId: "upstream-one", channelId: "channel-one", queryPath: "/images/upstream-one", lastUpstreamStatus: "recovered_submitted" }),
+            { executionId: "held-image-execution" },
         );
         expect(result).toMatchObject({ claimed: 1, pending: 1, needsReview: 0 });
     });
@@ -408,6 +446,7 @@ describe("generation task recovery service", () => {
             id: "image-one",
             userId: "user-one",
             status: "running",
+            executionId: "held-image-execution",
             config: { baseUrl: "/api/ai/system/channel-one", channelId: "channel-one", apiFormat: "openai", advancedConfig: { protocol: "openai" } },
         };
         const restored = {
@@ -421,7 +460,7 @@ describe("generation task recovery service", () => {
         };
         mocks.claim.mockResolvedValue([
             {
-                ...lease(),
+                ...imageLease(),
                 id: task.id,
                 userId: task.userId,
                 type: "image",
@@ -448,9 +487,10 @@ describe("generation task recovery service", () => {
             id: "image-interrupted",
             userId: "user-one",
             status: "running",
+            executionId: "held-image-execution",
             config: { channelId: "channel-one", apiFormat: "openai", advancedConfig: { protocol: "openai", queryPath: "" } },
         };
-        mocks.claim.mockResolvedValue([{ ...lease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "submitting", resultPayload: { trace: "kept" } }]);
+        mocks.claim.mockResolvedValue([{ ...imageLease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "submitting", resultPayload: { trace: "kept" } }]);
         mocks.getImageTask.mockResolvedValue(task);
 
         const result = await runGenerationTaskRecoveryBatch({ origin: "http://internal", workerId: "worker-one" });
@@ -463,6 +503,7 @@ describe("generation task recovery service", () => {
                 executionPhase: "needs_review",
                 resultPayload: { trace: "kept", reviewReason: "图片任务在提交阶段中断，未取得上游任务 ID" },
             }),
+            { executionId: "held-image-execution" },
         );
         expect(result).toMatchObject({ claimed: 1, needsReview: 1 });
     });
@@ -472,13 +513,14 @@ describe("generation task recovery service", () => {
             id: "image-query-timeout",
             userId: "user-one",
             status: "running",
+            executionId: "held-image-execution",
             upstream: { id: "upstream-image" },
             config: { capabilityProfile: { timeoutMs: 30_000 }, advancedConfig: {} },
             createdAt: Date.now() - 200_000,
         };
         mocks.claim.mockResolvedValue([
             {
-                ...lease(),
+                ...imageLease(),
                 id: task.id,
                 userId: task.userId,
                 type: "image",
@@ -504,16 +546,17 @@ describe("generation task recovery service", () => {
                 nextPollAt: undefined,
                 lastUpstreamStatus: "query_window_elapsed:error",
             }),
+            { executionId: "held-image-execution" },
         );
         expect(result).toMatchObject({ claimed: 1, needsReview: 1, deferred: 0 });
     });
 
     it("bounds repeated image result persistence by the configured model deadline", async () => {
         const now = Date.now();
-        const task = { id: "image-persist-timeout", userId: "user-one", status: "running", config: { capabilityProfile: { timeoutMs: 30_000 } }, createdAt: now - 200_000 };
+        const task = { id: "image-persist-timeout", userId: "user-one", status: "running", executionId: "held-image-execution", config: { capabilityProfile: { timeoutMs: 30_000 } }, createdAt: now - 200_000 };
         mocks.claim.mockResolvedValue([
             {
-                ...lease(),
+                ...imageLease(),
                 id: task.id,
                 userId: task.userId,
                 type: "image",
@@ -537,6 +580,7 @@ describe("generation task recovery service", () => {
                 lastUpstreamStatus: "persist_window_elapsed",
                 resultPayload: expect.objectContaining({ url: "https://cdn.example.com/result.png", persistenceStartedAt: now - 180_001, reviewReason: expect.stringContaining("原结果") }),
             }),
+            { executionId: "held-image-execution" },
         );
         expect(result).toMatchObject({ claimed: 1, needsReview: 1, deferred: 0 });
     });
@@ -587,17 +631,37 @@ describe("generation task recovery service", () => {
             id: "image-one",
             userId: "user-one",
             status: "cancelled",
+            executionId: "newer-image-execution",
             upstream: { id: "upstream-one" },
             config: { baseUrl: "https://provider.example", apiKey: "key", apiFormat: "openai", model: "image-model" },
         };
-        mocks.claim.mockResolvedValue([{ ...lease(), id: task.id, userId: task.userId, type: "image", status: "cancelled", executionPhase: "cancel_requested", upstreamTaskId: "upstream-one", resultPayload: { cancellationRequestedAt: 1_000 } }]);
+        mocks.claim.mockResolvedValue([{ ...imageLease(), id: task.id, userId: task.userId, type: "image", status: "cancelled", executionPhase: "cancel_requested", upstreamTaskId: "upstream-one", resultPayload: { cancellationRequestedAt: 1_000 } }]);
         mocks.getImageTask.mockResolvedValue(task);
         mocks.requestCancellation.mockResolvedValue("accepted");
 
         const result = await runGenerationTaskRecoveryBatch({ origin: "http://internal", workerId: "worker-one" });
 
-        expect(mocks.release).toHaveBeenCalledWith("image", task.id, "worker-one", expect.objectContaining({ executionPhase: "cancel_polling", lastUpstreamStatus: "cancel_accepted_polling" }), { cancellation: true });
+        expect(mocks.release).toHaveBeenCalledWith("image", task.id, "worker-one", expect.objectContaining({ executionPhase: "cancel_polling", lastUpstreamStatus: "cancel_accepted_polling" }), { cancellation: true, executionId: "held-image-execution" });
         expect(result).toMatchObject({ claimed: 1, pending: 1, completed: 0 });
+    });
+
+    it("defers an active image from a newer execution without querying, persisting or failing that owner's task", async () => {
+        const task = { id: "image-stale-claim", userId: "user-one", status: "running", executionId: "newer-image-execution", upstream: { id: "upstream-stale-claim" }, config: {} };
+        mocks.claim.mockResolvedValue([{ ...imageLease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "polling", upstreamTaskId: task.upstream.id }]);
+        mocks.getImageTask.mockResolvedValue(task);
+        mocks.queryImageTaskUpstreamStep.mockResolvedValue({ state: "pending", status: "processing" });
+
+        const result = await runGenerationTaskRecoveryBatch({ origin: "http://internal", workerId: "worker-one" });
+
+        expect(result).toEqual({ claimed: 1, pending: 0, resultReady: 0, completed: 0, failed: 0, needsReview: 0, deferred: 1 });
+        expect(mocks.queryImageTaskUpstreamStep).not.toHaveBeenCalled();
+        expect(mocks.persistImageTaskResult).not.toHaveBeenCalled();
+        expect(mocks.markImageTaskFailed).not.toHaveBeenCalled();
+        expect(mocks.createImageTaskUpstreamStep).not.toHaveBeenCalled();
+        expect(mocks.prepareImageTaskAutomaticRetry).not.toHaveBeenCalled();
+        expect(mocks.updateImageTask).not.toHaveBeenCalled();
+        expect(mocks.schedule).not.toHaveBeenCalled();
+        expect(mocks.release).not.toHaveBeenCalled();
     });
 });
 
@@ -614,4 +678,8 @@ function lease() {
         updatedAt: 1_000,
         expiresAt: 60_000,
     };
+}
+
+function imageLease() {
+    return { ...lease(), type: "image", executionId: "held-image-execution", payload: { executionId: "held-image-execution" } };
 }

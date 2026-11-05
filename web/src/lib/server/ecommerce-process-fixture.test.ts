@@ -1,11 +1,21 @@
+import assert from "node:assert/strict";
+import { createWriteStream } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { expect, it, vi } from "vitest";
+import { runImageProcessing } from "../../../scripts/image-processing-supervisor.mjs";
+import type { ImageProcessingOperation } from "../image-processing/contracts";
+import type { StoredImageProcessingArtifact } from "./image-processing-service";
+import type { RuntimeFileDatabase } from "./creative-runtime-repository";
 
 // Only Next request-lifetime plumbing is supplied by this test host. Auth,
 // stores, transactions, scheduling, execution and transport remain real.
 const input = vi.hoisted(
     () =>
         JSON.parse(process.env.VOZEB_PRO_ECOMMERCE_PROCESS_INPUT || "null") as {
-            command: "confirm" | "recover" | "read" | "create_image" | "late_release" | "execute";
+            command: "confirm" | "recover" | "read" | "create_image" | "late_release" | "execute" | "native" | "project_result_copy" | "public_read";
+            jobId?: string;
             origin: string;
             cookie: string;
             resultKey: string;
@@ -20,6 +30,7 @@ const input = vi.hoisted(
             gatePhases?: string[];
             failRuntimeWrite?: boolean;
             crashAfterCommit?: boolean;
+            logicalTaskId?: string;
             workerId?: string;
         } | null,
 );
@@ -50,6 +61,14 @@ vi.mock("./data-adapter", async (original) => {
             return pending;
         },
         writeJsonDataFile: async (file: string, value: unknown) => {
+            if (file === "creative-runtime.json" && input?.command === "project_result_copy") {
+                const nextRuntime = value as RuntimeFileDatabase;
+                expect(nextRuntime.events.at(-1)).toMatchObject({ runId: input.runId, type: "task.needs_review", data: { taskId: input.logicalTaskId } });
+                await writeFile(join(input.fixtureDirectory!, `r03-${input.resultKey}-boundary.json`), JSON.stringify({ pid: process.pid, nextRuntime }));
+                // Exit before the real runtime rename; the parent checks the actual task file.
+                process.kill(process.pid, "SIGKILL");
+                await new Promise<never>(() => {});
+            }
             await actual.writeJsonDataFile(file, value);
             if (file === "creative-runtime.json" && observation.referenceMutation && input?.failRuntimeWrite && !observation.failedWrite) {
                 observation.failedWrite = true;
@@ -89,7 +108,7 @@ vi.mock("./creative-runtime-store", async (original) => {
     return {
         ...actual,
         mutateCreativeRun: async (...args: Parameters<typeof actual.mutateCreativeRun>) => {
-            if (!args[5]?.referenceRecovery) return actual.mutateCreativeRun(...args);
+            if (!args[5]?.resumeWithChildren) return actual.mutateCreativeRun(...args);
             await stage("preflight_complete");
             observation.referenceMutation = true;
             try {
@@ -117,6 +136,60 @@ vi.mock("./generation-task-scheduler", async (original) => {
     };
 });
 
+async function completeNativeStage(runId: string, jobId: string, fixtureDirectory: string) {
+    const service = await import("./image-processing-service");
+    const tasks = await import("./generation-task-store");
+    const { getAgentRun } = await import("./agent-run-store");
+    const { imageProcessingResourceConfig } = await import("../image-processing/resource-config");
+    const run = await getAgentRun(runId);
+    const pending = await tasks.getStoredGenerationTaskRecord("image_processing", jobId);
+    assert(run && pending);
+    expect(pending).toMatchObject({ id: jobId, runId, userId: run.userId, status: "pending", executionPhase: "created" });
+    expect(run.ecommerceSnapshot?.processing?.waitingFor).toMatchObject({ jobId, inputDigest: pending.payload.inputDigest });
+    const configuration = imageProcessingResourceConfig(process.env);
+    const workerId = "fixture-native:" + process.pid;
+    const claimed = await service.claimImageProcessingTasks({ workerId, profileVersion: configuration.profileVersion, availableMemoryBytes: configuration.budgetBytes, slots: 1 });
+    expect(claimed.tasks).toHaveLength(1);
+    const task = claimed.tasks[0];
+    expect(task.id).toBe(jobId);
+    const payload = task.payload;
+    if (payload.operation !== "prepare_reference" && payload.operation !== "build_protection") throw new Error("Reference actor only drives its prepare or build dependency");
+    const operation: ImageProcessingOperation = payload.operation === "prepare_reference" ? { operation: "prepare_reference", options: {} } : { operation: "build_protection", options: payload.options };
+    const identity = { workerId, executionId: task.executionId };
+    const taskDirectory = await mkdtemp(join(fixtureDirectory, "native-stage-"));
+    try {
+        const inputs = await Promise.all(
+            payload.inputs.map(async (source, index) => {
+                const inputPath = join(taskDirectory, "source-" + index + ".bin");
+                const registered = await service.readImageProcessingInput(jobId, source.assetId, identity);
+                await pipeline(registered.stream, createWriteStream(inputPath, { flags: "wx" }));
+                return { ...source, path: inputPath };
+            }),
+        );
+        const outputDirectory = join(taskDirectory, "outputs");
+        await mkdir(outputDirectory);
+        const outcome = await runImageProcessing({ ...operation, version: "image-processing.v1", jobId, executionId: task.executionId, inputs, outputDirectory }, { taskDirectory, maxHeapMiB: payload.resource.configuration.processHeapMb });
+        expect(outcome).toMatchObject({ status: "completed", jobId, executionId: task.executionId, exitCode: 0, signal: null });
+        expect(outcome.pid).toBeGreaterThan(0);
+        expect(outcome.pid).not.toBe(process.pid);
+        assert(outcome.status === "completed");
+        const { artifacts, metrics, ...manifest } = outcome.result;
+        const storedArtifacts: StoredImageProcessingArtifact[] = [];
+        for (const artifact of artifacts) {
+            const body = new Response(new Uint8Array(await readFile(artifact.path))).body;
+            assert(body);
+            const stored = await service.writeImageProcessingOutput(jobId, artifact.kind, identity, { stream: body, mimeType: artifact.mimeType });
+            expect(stored).toMatchObject({ kind: artifact.kind, sha256: artifact.sha256, bytes: artifact.bytes, width: artifact.width, height: artifact.height });
+            storedArtifacts.push(stored);
+        }
+        const completion = await service.completeImageProcessingTask(jobId, { ...identity, manifest: { ...manifest, artifacts: storedArtifacts }, metrics });
+        expect(completion).toMatchObject({ jobId, inputDigest: payload.inputDigest, executionId: task.executionId, parentRescheduled: true });
+        return { jobId, operation: payload.operation, actorPid: process.pid, nativePid: outcome.pid, exitCode: outcome.exitCode, completion };
+    } finally {
+        await rm(taskDirectory, { recursive: true, force: true });
+    }
+}
+
 const processIt = input ? it : it.skip;
 // A fresh Vitest process does not inherit the outer PostgreSQL test timeout.
 // Use the same integration limit for imports, real transactions and the gate.
@@ -132,13 +205,25 @@ processIt(
                 process.env.VOZEB_PRO_DATABASE_PROVIDER !== "file" ||
                 directory !== path.resolve(process.env.VOZEB_PRO_DATA_DIR || "") ||
                 path.dirname(directory) !== path.resolve(os.tmpdir()) ||
-                !path.basename(directory).startsWith("vozeb-reference-process-")
+                !path.basename(directory).startsWith(input.command === "project_result_copy" || input.command === "public_read" ? "vozeb-run-copy-file-" : "vozeb-reference-process-")
             )
                 throw new Error("Exact isolated file fixture directory is required");
         } else if (process.env.VOZEB_PRO_RUN_ECOMMERCE_POSTGRES_INTEGRATION !== "1" || process.env.VOZEB_PRO_ECOMMERCE_ISOLATED_DATABASE !== "1") throw new Error("Isolated ecommerce PostgreSQL fixture is required");
         const { getAgentRun } = await import("./agent-run-store");
         let outcome: unknown;
-        if (input.command === "confirm") {
+        let nativeEvidence: Awaited<ReturnType<typeof completeNativeStage>> | undefined;
+        if (input.command === "project_result_copy") {
+            const { runTaskWithRetry } = await import("./agent-run-execution");
+            const run = await getAgentRun(input.runId);
+            assert.ok(run?.executionId);
+            const task = run.tasks.find((item) => item.id === input.logicalTaskId);
+            assert.ok(task);
+            outcome = await runTaskWithRetry(run.id, task, input.origin, `vozeb_pro_session=${input.cookie}`, run.executionId);
+        } else if (input.command === "public_read") {
+            const { GET } = await import("@/app/api/agent/runs/[id]/route");
+            const response = await GET(new Request(`${input.origin}/api/agent/runs/${input.runId}`, { headers: { cookie: `vozeb_pro_session=${input.cookie}` } }), { params: Promise.resolve({ id: input.runId }) });
+            outcome = { status: response.status, body: await response.json() };
+        } else if (input.command === "confirm") {
             const { POST } = await import("@/app/api/agent/runs/[id]/[action]/route");
             const response = await POST(
                 new Request(`${input.origin}/api/agent/runs/${input.runId}/resume`, {
@@ -159,6 +244,9 @@ processIt(
         } else if (input.command === "late_release") {
             const { releaseGenerationTaskLease } = await import("./generation-task-scheduler");
             outcome = await releaseGenerationTaskLease("agent", input.runId, input.workerId || "old-owner", { executionPhase: "completed", nextPollAt: undefined });
+        } else if (input.command === "native") {
+            if (!input.jobId || !input.fixtureDirectory) throw new Error("Native reference job and fixture directory are required");
+            nativeEvidence = await completeNativeStage(input.runId, input.jobId, input.fixtureDirectory);
         } else if (input.command === "execute") {
             const { executeAgentRun } = await import("./agent-run-executor");
             const run = await getAgentRun(input.runId);
@@ -169,15 +257,22 @@ processIt(
         const tasks = await import("./generation-task-store");
         const { publicAgentRunForRequest } = await import("./agent-run-public-selection");
         const run = await getAgentRun(input.runId);
+        const events = await runtime.listCreativeRunEvents(input.runId);
         const result = {
             pid: process.pid,
             outcome,
+            nativeEvidence,
             run,
             messages: await runtime.listCreativeMessages(input.conversationId, 0, 20),
-            events: await runtime.listCreativeRunEvents(input.runId),
+            events,
             parent: await tasks.getStoredGenerationTaskRecord("agent", input.runId),
             publicRun: run ? await publicAgentRunForRequest(run, new Request(input.origin)) : null,
         };
+        if (input.command === "project_result_copy" || input.command === "public_read") {
+            const { publicAgentRunEvent } = await import("./agent-run-public");
+            await writeFile(join(input.fixtureDirectory!, `r03-${input.resultKey}.json`), JSON.stringify({ ...result, publicEvents: events.map(publicAgentRunEvent) }));
+            return;
+        }
         const response = await fetch(`${input.origin}/_process-result/${input.resultKey}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(result) });
         expect(response.status).toBe(200);
     },

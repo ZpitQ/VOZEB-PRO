@@ -9,7 +9,8 @@ const mocks = vi.hoisted(() => ({
     setAgentRunStatus: vi.fn(),
     updateAgentRunById: vi.fn(),
     fetchInternalApi: vi.fn(),
-    prepareSceneSelection: vi.fn(),
+    resumeSceneSelection: vi.fn(),
+    replaySceneSelection: vi.fn(),
 }));
 
 vi.mock("next/server", async (importOriginal) => {
@@ -19,18 +20,23 @@ vi.mock("next/server", async (importOriginal) => {
 vi.mock("@/lib/auth/session", () => ({ getCurrentUser: vi.fn(async () => ({ id: "user" })) }));
 vi.mock("@/lib/auth/store", () => ({ getAuthSettings: mocks.getAuthSettings }));
 vi.mock("@/lib/server/agent-run-executor", () => ({ abortAgentRun: vi.fn() }));
-vi.mock("@/lib/server/agent-run-store", () => ({ getAgentRun: mocks.getAgentRun, setAgentRunStatus: mocks.setAgentRunStatus, updateAgentRunById: mocks.updateAgentRunById }));
+vi.mock("@/lib/server/agent-run-store", () => ({ getAgentRun: mocks.getAgentRun, reconcileAgentRunImageProcessingFacts: async (run: unknown) => run, setAgentRunStatus: mocks.setAgentRunStatus, updateAgentRunById: mocks.updateAgentRunById }));
 vi.mock("@/lib/server/generation-task-recovery-service", () => ({ runGenerationTaskRecoveryBatch: mocks.runGenerationTaskRecoveryBatch }));
 vi.mock("@/lib/server/generation-task-scheduler", () => ({ scheduleGenerationTask: mocks.scheduleGenerationTask }));
-vi.mock("@/lib/server/generation-task-store", () => ({ withGenerationConcurrencyLimit: vi.fn(async (_userId, _type, _staleMs, limit, handler, excludeTaskId) => ((await mocks.countActive(excludeTaskId)) >= limit ? null : handler())) }));
+vi.mock("@/lib/server/generation-task-store", () => ({
+    listStoredGenerationTaskRecordsByRunIds: vi.fn(async () => []),
+    withGenerationConcurrencyLimit: vi.fn(async (_userId, _type, _staleMs, limit, handler, excludeTaskId) => ((await mocks.countActive(excludeTaskId)) >= limit ? null : handler())),
+}));
 vi.mock("@/lib/server/internal-origin", () => ({ fetchInternalApi: mocks.fetchInternalApi, resolveInternalOrigin: vi.fn(() => "http://localhost") }));
-vi.mock("@/lib/server/ecommerce-generation-service", () => ({ prepareEcommerceSceneSelectionResume: mocks.prepareSceneSelection }));
+vi.mock("@/lib/server/ecommerce-scene-selection-service", () => ({ resumeEcommerceSceneSelection: mocks.resumeSceneSelection, replayEcommerceSceneSelection: mocks.replaySceneSelection }));
 
 import { POST } from "./route";
 
 describe("Agent Run resume concurrency", () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.resumeSceneSelection.mockReset();
+        mocks.replaySceneSelection.mockReset();
         const run = { id: "run", userId: "user", status: "paused", tasks: [] };
         mocks.getAgentRun.mockResolvedValue(run);
         mocks.setAgentRunStatus.mockResolvedValue({ ...run, status: "running" });
@@ -100,25 +106,38 @@ describe("Agent Run resume concurrency", () => {
         },
     );
 
-    it("accepts selection only once under competing resumes without replacing the plan", async () => {
+    // Handler boundary tests; the service/File tests own receipt and native evidence.
+    it("returns a conflict when a different competing selection loses the atomic confirmation", async () => {
         const run = { id: "run", userId: "user", conversationId: "conversation", status: "paused", tasks: [{ id: "scene-task" }], ecommerceSnapshot: { fallback: { reason: "scene_selection_required" }, plan: { planVersion: "ecommerce-edit.v3" } } };
         mocks.getAgentRun.mockResolvedValue(run);
         mocks.getAuthSettings.mockReset().mockResolvedValue({ generationConcurrency: { agent: 2 } });
         mocks.countActive.mockResolvedValue(0);
-        const tasks = [{ id: "scene-task", status: "ready", sceneProtection: { selectionSource: "user_selection" } }];
-        mocks.prepareSceneSelection.mockResolvedValue(tasks);
-        let accepted = false;
-        mocks.updateAgentRunById.mockImplementation(async (_id, patch) => {
-            if (accepted) return null;
-            accepted = true;
-            return { ...run, ...patch };
-        });
+        mocks.resumeSceneSelection.mockResolvedValueOnce({ run: { ...run, status: "running" }, replayed: false }).mockResolvedValueOnce(null);
         const selection = { baselineAssetId: "scene", region: { x: 2, y: 1, width: 2, height: 2 } };
-        const send = () => POST(new Request("http://localhost/api/agent/runs/run/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sceneSelection: selection }) }), context());
-        const results = await Promise.all([send(), send()]);
+        const otherSelection = { ...selection, region: { x: 1, y: 1, width: 2, height: 2 } };
+        const send = (sceneSelection: typeof selection) => POST(new Request("http://localhost/api/agent/runs/run/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sceneSelection }) }), context());
+        const results = await Promise.all([send(selection), send(otherSelection)]);
         expect(results.map((result) => result.status).sort()).toEqual([200, 409]);
         expect(mocks.runGenerationTaskRecoveryBatch).toHaveBeenCalledOnce();
-        expect(mocks.updateAgentRunById).toHaveBeenCalledWith("run", { status: "running", executionId: undefined, tasks }, { type: "run.resumed" }, ["paused"], undefined, run.tasks);
+        expect(mocks.resumeSceneSelection).toHaveBeenCalledWith(expect.objectContaining({ run, selection, actorUserId: "user" }));
+        expect(mocks.updateAgentRunById).not.toHaveBeenCalled();
+        expect(mocks.scheduleGenerationTask).not.toHaveBeenCalled();
+    });
+
+    it("returns an identical receipt replay without admission, scheduling or recovery", async () => {
+        const run = { id: "run", userId: "user", conversationId: "conversation", status: "running", tasks: [], ecommerceSnapshot: { processing: { sceneSelection: { version: "scene-selection-receipt.v1" } } } };
+        const selection = { baselineAssetId: "scene", region: { x: 2, y: 1, width: 2, height: 2 } };
+        mocks.getAgentRun.mockResolvedValue(run);
+        mocks.replaySceneSelection.mockReturnValue(run);
+        const response = await POST(new Request("http://localhost/api/agent/runs/run/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sceneSelection: selection }) }), context());
+        expect(response.status).toBe(200);
+        expect(mocks.replaySceneSelection).toHaveBeenCalledWith(run, selection, "user");
+        expect(mocks.getAuthSettings).not.toHaveBeenCalled();
+        expect(mocks.countActive).not.toHaveBeenCalled();
+        expect(mocks.resumeSceneSelection).not.toHaveBeenCalled();
+        expect(mocks.updateAgentRunById).not.toHaveBeenCalled();
+        expect(mocks.scheduleGenerationTask).not.toHaveBeenCalled();
+        expect(mocks.runGenerationTaskRecoveryBatch).not.toHaveBeenCalled();
     });
 
     it("retries a planning failure in the same run and replaces its assistant state", async () => {

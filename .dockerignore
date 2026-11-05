@@ -2,6 +2,7 @@
 .idea
 .agents
 .codex
+**/.codex-*
 .codegraph
 .tmp
 .trellis
@@ -17,6 +18,7 @@ web/.e2e-data
 web/.e2e-artifacts
 web/.tmp
 web/node_modules
+**/.image-processing-runtime
 web/out
 web/playwright-report
 workers/**/node_modules

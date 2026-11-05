@@ -5,7 +5,7 @@ description: 使用 Docker Compose、PostgreSQL 和发布镜像部署 VOZEB PRO
 
 # Docker 部署
 
-主 Compose 会启动 VOZEB PRO 和 PostgreSQL 16。正式部署前先复制并修改 `.env`。
+主 Compose 会启动 Web、独立生成 Worker 和 PostgreSQL 16。正式部署前先复制并修改 `.env`。
 
 ## 安装
 
@@ -21,7 +21,12 @@ cp .env.example .env
 NEXT_PUBLIC_SITE_URL=https://vozeb-pro.example.com
 POSTGRES_PASSWORD=replace-with-a-strong-database-password
 VOZEB_PRO_ENCRYPTION_KEY=填写 openssl rand -hex 32 的输出
+VOZEB_PRO_INSTALL_TOKEN=至少32位的一次性安装令牌
+VOZEB_PRO_MAINTENANCE_TOKEN=至少32位的独立维护令牌
+VOZEB_PRO_WORKER_TOKEN=至少32位且不同于维护令牌的Worker令牌
 ```
+
+还须按下文资源说明显式填写 Worker 总内存、图像预算、CPU 和停止窗口；示例中的留空必填项不能直接用于启动。
 
 启动：
 
@@ -38,6 +43,7 @@ docker compose ps
 ```text
 postgres -> PostgreSQL 16，数据卷 vozeb-pro-postgres
 app      -> VOZEB PRO standalone，数据卷 vozeb-pro-data
+generation-worker -> 独立 Worker，经鉴权 HTTP 接口读写媒体
 ```
 
 应用通过容器网络连接：
@@ -48,9 +54,52 @@ postgres://用户:密码@postgres:5432/数据库
 
 不要把 Docker 内数据库 Host 写成 localhost。
 
+## 图像 Worker 资源与准入
+
+以下配置适用于默认、外部 PostgreSQL、本地镜像和 lowmem 四份 Compose；宝塔路径不在本轮 S5 接线资格范围内。升级镜像须同时包含当前 Web 启动校验、已编译图像 runtime 和 Worker 入口；Web 与 Worker 应固定使用同一份已核镜像，本地模板两服务使用同一 local 镜像。
+
+所有 `_MB` 字段均为 MiB（`1 MiB = 1024 × 1024` 字节），必须为正整数。`VOZEB_PRO_WEB_MEMORY_LIMIT` 使用 Compose 内存单位，如 `384m`；普通模板默认 `0` 保留未设置总限额的语义。CPU 必须为显式正值，停止窗口使用合法 Compose 时长。必填项缺失或配置非法会使 Compose 校验或服务启动失败，错误保留原原因。
+
+| 变量                                    | 默认或要求                  | 生效位置                                            |
+| --------------------------------------- | --------------------------- | --------------------------------------------------- |
+| `VOZEB_PRO_WEB_HEAP_MB`                 | 默认 `384`                  | Web 的 V8 old-space 堆                              |
+| `VOZEB_PRO_WEB_MEMORY_LIMIT`            | 普通模板 `0`；lowmem `512m` | Web 容器总内存                                      |
+| `VOZEB_PRO_GENERATION_WORKER_HEAP_MB`   | 普通模板 `384`；lowmem `64` | Worker 监督进程堆                                   |
+| `VOZEB_PRO_GENERATION_WORKER_MEMORY_MB` | 显式必填正整数              | 每个 Worker 容器总 MiB，包含其全部 child 和原生分配 |
+| `VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB`     | 显式必填正整数              | 单副本所有活动图像任务的预留预算总和                |
+| `VOZEB_PRO_IMAGE_PROCESS_HEAP_MB`       | 默认 `384`                  | 独立图像 child 的堆                                 |
+| `VOZEB_PRO_IMAGE_PROCESS_CONCURRENCY`   | 默认 `1`                    | 图像计算槽，独立于 HTTP lanes                       |
+| `VOZEB_PRO_GENERATION_WORKER_CPUS`      | 显式必填正值                | Worker 容器 CPU 配额                                |
+| `VOZEB_PRO_WORKER_STOP_GRACE_PERIOD`    | 显式必填合法时长            | Worker 更新或缩容的排空窗口                         |
+
+Compose 先按其规则从 shell、指定环境文件或 `.env` 插值；服务 `environment` 中的显式值再覆盖 `env_file` 和镜像 `ENV`。三层堆分别通过对应变量设置，图像 child 使用独立参数。`.env.example` 中 Web 总限额和监督堆留空，是为了使用各模板自身默认值；本地源码或 Standalone 启动需要单独确认其环境来源与编译产物。
+
+Web 侧传入的 Worker 资源参数与各 Worker 一致，包括 Worker 总量、监督堆、图像预算、child 堆与图像槽位；预算、child 堆和槽位参与相同资源 profile 的匹配。至少满足 `图像预算 + 监督堆 < Worker 总内存`，差额还须容纳已测原生分配和运行余量。Worker 的内存与内存加 swap 总限额使用同一总量，因此没有额外 swap 预算；宿主机 swap 不能扩大图像预算。Web 的总内存与堆也须为原生分配保留空间。
+
+可承载任务遇到槽位忙、可用预算暂不足或 Worker 暂离线时保持持久 `pending`；需求超过单副本总预算时，以 `exceeds_total_budget` 资源不足原因暂停。超预算的该处理阶段不领取、不启动子进程；前置 prepare 可能已实际解码。调整资源配置前先受控排空并重建；修改 profile 不会自动恢复已暂停阶段，恢复须使用当前已支持且满足条件的入口。
+
+Worker 无固定 `container_name` 和宿主端口，沿容器网络与独立 Worker Token 调用 Web 的鉴权媒体接口；数据库连接和 Web 业务数据卷保留在 Web 一侧，数据库凭据、安装/管理密钥不复制给 Worker。确认资源总额后，可通过 Compose 选择副本数：
+
+```bash
+docker compose up -d --scale generation-worker=1
+```
+
+将副本数设为本部署已验证的数量，并核算 `各副本容器总量之和 + Web + 数据库及其他服务 + 系统余量`。每个副本都有自己的硬限额；调整资源或副本数后读回容器限额、实际进程参数和自然排空结果。
+
+### 本轮实测范围与阶段边界
+
+| 隔离档位 | Worker 总内存 | 单副本图像预算 | Worker CPU |
+| -------- | ------------- | -------------- | ---------- |
+| S        | `960 MiB`     | `704 MiB`      | `0.5`      |
+| L        | `1920 MiB`    | `1536 MiB`     | `1`        |
+
+两档本轮使用 Web/监督/child 堆 `192/64/384 MiB`、每副本一个图像槽和 `180s` 排空窗口。这些是当前隔离 profile 的实测取值，不是模板通用默认、最低硬件或任意图片处理能力的承诺。已验证 S/L 代表场景与 B02 资源不足语义，不能据此推及全部操作、图片规格或部署入口。
+
+其余 Compose 实际入口的 C01 仍在验收，C04 实际生成来源仍未知，S5 尚未完成。S6 多用户与长稳尚未验收，不承诺支持人数或持续吞吐；上述结果也不代表公开镜像已发布或生产发布资格。
+
 ## 外部数据库与宝塔
 
-外部 PostgreSQL 只启动应用，端口绑定在宿主机回环地址：
+外部 PostgreSQL 模板启动 Web 与 Worker，不创建项目 PostgreSQL 容器；Web 端口绑定在宿主机回环地址：
 
 ```bash
 docker compose -f docker-compose.external-db.yml up -d
@@ -66,7 +115,7 @@ DATABASE_URL=postgres://用户:密码@127.0.0.1:5432/数据库
 docker compose -f docker-compose.baota.yml up -d
 ```
 
-宝塔 Compose 使用 host 网络，只启动 `app`，不创建项目 PostgreSQL 容器。默认 Compose 和外部数据库 Compose 的 3000 端口也只绑定 `127.0.0.1`，由 Nginx 或宝塔反向代理对外提供 HTTPS。
+宝塔 Compose 使用 host 网络，数据库由宿主机提供，不创建项目 PostgreSQL 容器。默认 Compose 和外部数据库 Compose 的 3000 端口也只绑定 `127.0.0.1`，由 Nginx 或宝塔反向代理对外提供 HTTPS。
 
 宝塔单层 Nginx 反向代理默认使用 `VOZEB_PRO_TRUSTED_PROXY_HOPS=1`，用于登录、生成和媒体访问的真实 IP 限流。接入 CDN 或额外代理时按可信代理层数调整；只有客户端直接访问应用时才设置为 `0`。
 
@@ -82,6 +131,7 @@ docker compose -f docker-compose.local.yml up -d --build
 
 ```bash
 docker compose logs -f app
+docker compose logs -f generation-worker
 docker compose logs -f postgres
 docker compose exec postgres pg_isready -U vozeb_pro -d vozeb_pro
 ```

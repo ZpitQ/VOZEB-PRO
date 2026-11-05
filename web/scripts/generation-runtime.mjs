@@ -51,6 +51,33 @@ export async function waitForHttpReady({ origin, fetcher = fetch, sleep = retryS
 }
 
 export function superviseGenerationRuntime({ app, workerScript, environment }) {
+    const workerEnvironment = {};
+    for (const key of [
+        "PATH",
+        "SystemRoot",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "NODE_ENV",
+        "VOZEB_PRO_WORKER_API_ORIGIN",
+        "VOZEB_PRO_WORKER_TOKEN",
+        "VOZEB_PRO_GENERATION_WORKER_ID",
+        "VOZEB_PRO_GENERATION_WORKER_INTERVAL_MS",
+        "VOZEB_PRO_GENERATION_WORKER_LANES",
+        "VOZEB_PRO_GENERATION_WORKER_HEARTBEAT_MS",
+        "VOZEB_PRO_GENERATION_WORKER_MEMORY_MB",
+        "VOZEB_PRO_GENERATION_WORKER_HEAP_MB",
+        "VOZEB_PRO_GENERATION_WORKER_CPUS",
+        "VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB",
+        "VOZEB_PRO_IMAGE_PROCESS_HEAP_MB",
+        "VOZEB_PRO_IMAGE_PROCESS_CONCURRENCY",
+    ]) {
+        if (environment[key] !== undefined) workerEnvironment[key] = environment[key];
+    }
     const children = [];
     const readinessAbort = new AbortController();
     let workerStarted = false;
@@ -59,34 +86,33 @@ export function superviseGenerationRuntime({ app, workerScript, environment }) {
         let closed = 0;
         let stopping = false;
         let requestedExitCode = 0;
-        let forceTimer;
 
         const cleanup = () => {
             process.off("SIGINT", stopForSignal);
             process.off("SIGTERM", stopForSignal);
-            if (forceTimer) clearTimeout(forceTimer);
             readinessAbort.abort();
+        };
+        const drain = () => {
+            const worker = children.find((child) => child.name === "generation-worker");
+            const targets = worker && !worker.closed ? [worker] : children.filter((child) => child.name === "web");
+            for (const child of targets) {
+                if (child.process.exitCode === null && child.process.signalCode === null) child.process.kill("SIGTERM");
+            }
         };
         const stop = (exitCode) => {
             if (stopping) return;
             stopping = true;
             requestedExitCode = exitCode;
-            for (const child of children) {
-                if (child.process.exitCode === null && child.process.signalCode === null) child.process.kill("SIGTERM");
-            }
-            forceTimer = setTimeout(() => {
-                for (const child of children) {
-                    if (child.process.exitCode === null && child.process.signalCode === null) child.process.kill("SIGKILL");
-                }
-            }, 5_000);
-            forceTimer.unref();
+            readinessAbort.abort();
+            drain();
         };
         const stopForSignal = () => stop(0);
 
         const registerChild = (definition) => {
             const child = {
                 ...definition,
-                process: spawn(definition.command, definition.args, { cwd: definition.cwd, env: environment, stdio: "inherit" }),
+                closed: false,
+                process: spawn(definition.command, definition.args, { cwd: definition.cwd, env: definition.environment, stdio: "inherit" }),
             };
             children.push(child);
             child.process.once("error", (error) => {
@@ -94,11 +120,14 @@ export function superviseGenerationRuntime({ app, workerScript, environment }) {
                 stop(1);
             });
             child.process.once("close", (code) => {
+                child.closed = true;
                 closed += 1;
                 if (!stopping) {
                     console.error(`${child.name} process stopped unexpectedly with code ${code ?? "unknown"}`);
                     stop(code && code > 0 ? code : 1);
                 }
+                if (stopping && code && code > 0) requestedExitCode ||= code;
+                if (stopping) drain();
                 if (closed === children.length) {
                     cleanup();
                     resolve(requestedExitCode);
@@ -107,14 +136,20 @@ export function superviseGenerationRuntime({ app, workerScript, environment }) {
             return child;
         };
 
-        process.once("SIGINT", stopForSignal);
-        process.once("SIGTERM", stopForSignal);
-        const web = registerChild({ name: "web", command: app.command, args: app.args, cwd: app.cwd });
+        process.on("SIGINT", stopForSignal);
+        process.on("SIGTERM", stopForSignal);
+        const web = registerChild({ name: "web", command: app.command, args: app.args, cwd: app.cwd, environment });
         void waitForHttpReady({ origin: environment.VOZEB_PRO_WORKER_API_ORIGIN, signal: readinessAbort.signal })
             .then(() => {
                 if (stopping || workerStarted || web.process.exitCode !== null || web.process.signalCode !== null) return;
                 workerStarted = true;
-                registerChild({ name: "generation-worker", command: process.execPath, args: [workerScript], cwd: app.cwd });
+                registerChild({
+                    name: "generation-worker",
+                    command: process.execPath,
+                    args: [`--max-old-space-size=${environment.VOZEB_PRO_GENERATION_WORKER_HEAP_MB || 384}`, workerScript],
+                    cwd: app.cwd,
+                    environment: workerEnvironment,
+                });
             })
             .catch((error) => {
                 if (!stopping && !(error instanceof DOMException && error.name === "AbortError")) {

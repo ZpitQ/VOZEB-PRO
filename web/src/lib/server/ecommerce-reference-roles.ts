@@ -1,6 +1,7 @@
 import type { CreativeAsset } from "@/lib/creative-runtime-contract";
 import type { AgentRun } from "./agent-run-store";
 import type { EcommerceReferenceDecision, EcommerceReferencePurpose } from "./ecommerce-reference-purpose";
+import type { EcommerceVisualAnalysis, EcommerceVisualAnalysisV4 } from "./ecommerce-visual-analysis";
 
 export type EcommerceReferenceRole = "product" | "scene" | "unknown";
 export type EcommerceReferenceDecisionStatus = "resolved" | "needs_clarification" | "rejected";
@@ -46,6 +47,18 @@ export type EcommerceSources = {
     ambiguityReason: EcommerceReferenceAmbiguity | null;
     clarificationQuestion: string | null;
 };
+
+export function toLegacyEcommerceVisualAnalysis(analysis: EcommerceVisualAnalysis | EcommerceVisualAnalysisV4): EcommerceVisualAnalysis {
+    if (analysis.analysisVersion !== "ecommerce-visual-analysis.v4") return analysis;
+    return {
+        ...analysis,
+        analysisVersion: "ecommerce-visual-analysis.v3",
+        references: analysis.references.map((reference) => ({
+            ...reference,
+            role: reference.contentType === "isolated_product" || reference.contentType === "product_detail" ? "product" : reference.contentType === "interior_scene" ? "scene" : "unknown",
+        })),
+    };
+}
 
 export function classifyReferenceRoles(assets: CreativeAsset[], visualHints: EcommerceReferenceVisualHint[]): ReferenceRoleDecision {
     const imageAssets = uniqueReadyImages(assets);

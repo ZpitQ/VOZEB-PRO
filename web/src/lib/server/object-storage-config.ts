@@ -1,6 +1,7 @@
 import { DEFAULT_OBJECT_STORAGE_CDN_BASE_URL, type ObjectStorageSettings, type ObjectStorageSettingsUpdate } from "@/lib/object-storage-contract";
 import { readObjectStorageSettings, writeObjectStorageSettings, type StoredObjectStorageSettings } from "@/lib/server/database/object-storage-repository";
 import { decryptSecretValue, encryptSecretValue } from "@/lib/server/secret-crypto";
+import type { QueryExecutor } from "./database/postgres";
 
 export type ObjectStorageRuntimeConfig = {
     id: "default";
@@ -20,7 +21,8 @@ let runtimeCache: { value: ObjectStorageRuntimeConfig; expiresAt: number } | und
 let runtimePromise: Promise<ObjectStorageRuntimeConfig> | undefined;
 let runtimeRevision = 0;
 
-export async function getObjectStorageRuntimeConfig() {
+export async function getObjectStorageRuntimeConfig(executor?: QueryExecutor) {
+    if (executor) return toRuntimeConfig(await readObjectStorageSettings(executor));
     if (runtimeCache && runtimeCache.expiresAt > Date.now()) return runtimeCache.value;
     if (runtimePromise) return runtimePromise;
     const revision = runtimeRevision;

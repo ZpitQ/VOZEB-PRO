@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { extname } from "node:path";
@@ -13,6 +14,7 @@ import type { AdminGenerationTask } from "../src/lib/admin-generation-operations
 
 import { expectNoHorizontalOverflow } from "./responsive-helpers";
 import { E2E_PROTOCOL_ORIGIN, e2eSettingsPatch, protocolFixtureState, resetProtocolFixture } from "./support";
+import { observeResidentF02 } from "./resident-f02-observation";
 
 type GoldenCase = {
     caseId?: string;
@@ -1103,6 +1105,115 @@ test("large-reference:四千八百万像素参考图完成真实创作并刷新�
     await expect(page.getByTestId("creative-reference-review")).toHaveCount(0);
 });
 
+test("large-product-reference:四千二百多万像素商品完成原尺寸保护并刷新恢复", async ({ page, request }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "大商品原尺寸保护回归只在桌面 Chromium 执行");
+    const goldenCase = cases[5];
+    const userRequest = goldenCase.userRequest + " 输出图片尺寸1024x1024。";
+    const product = {
+        name: goldenCase.productFileName,
+        mimeType: "image/png",
+        buffer: await sharp({ create: { width: 7997, height: 5334, channels: 4, background: "#ffffff" } })
+            .composite([{ input: { create: { width: 3200, height: 2800, channels: 4, background: "#252525" } }, left: 2400, top: 1200 }])
+            .png()
+            .toBuffer(),
+    };
+    const scene = {
+        name: "small-style-reference.png",
+        mimeType: "image/png",
+        buffer: await sharp({ create: { width: 64, height: 48, channels: 3, background: "#203040" } })
+            .png()
+            .toBuffer(),
+    };
+    await page.goto("/create", { waitUntil: "domcontentloaded" });
+    await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
+    await selectImageMode(page);
+    await page.locator('input[type="file"][multiple]').setInputFiles([product, scene]);
+    await expect(page.getByLabel(`已上传图片 ${product.name}`)).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByLabel(`已上传图片 ${scene.name}`)).toBeVisible({ timeout: 30_000 });
+
+    const created = await submitPrompt(page, userRequest, { reusePage: true });
+    await testInfo.attach("resident-f02-source.json", {
+        body: JSON.stringify(
+            {
+                source: { width: 7997, height: 5334, bytes: product.buffer.length, sha256: createHash("sha256").update(product.buffer).digest("hex") },
+                style: { width: 64, height: 48, bytes: scene.buffer.length, sha256: createHash("sha256").update(scene.buffer).digest("hex") },
+            },
+            null,
+            2,
+        ),
+        contentType: "application/json",
+    });
+    const activity = await observeResidentF02(request, new URL(page.url()).origin, created.runId);
+    try {
+        const run = await waitForRun(request, created.runId, "completed");
+        expect(run.ecommerceReferenceReview).toBeFalsy();
+        expect(run.assetIds).toHaveLength(1);
+        let trace: EcommerceTrace | undefined;
+        await expect
+            .poll(
+                async () => {
+                    const response = await request.get("/api/admin/generation-logs?page=1&pageSize=100");
+                    expect(response.ok()).toBe(true);
+                    const payload: { logs: Array<{ ecommerceTrace?: EcommerceTrace }> } = await response.json();
+                    trace = payload.logs.find((log) => log.ecommerceTrace?.runId === run.id)?.ecommerceTrace;
+                    return trace?.stages.find((stage) => stage.key === "quality_check")?.status;
+                },
+                { timeout: 30_000 },
+            )
+            .toBe("passed");
+        assert.ok(trace);
+        expect(trace).toMatchObject({ runId: run.id, finalStatus: "completed" });
+        expectTraceRoutes(trace);
+        expectLatestTraceVersions(trace);
+        expect(trace.imageTaskIds).toHaveLength(1);
+        expect(traceStage(trace, "edit_planning").output).toMatchObject({ operation: "product_to_scene", canvas: { mode: "exact", source: "user_text", size: { width: 1024, height: 1024 } } });
+        expect(traceStage(trace, "image_generation").output).toMatchObject({
+            mask: { mode: "independent", required: true },
+            protection: { sourceSize: { width: 7997, height: 5334 }, productCore: [{ x: 2400, y: 1200, width: 3200, height: 2800 }], maskProvider: "white-background-flood-fill.v1", maskTrust: "trusted" },
+        });
+        expect((await protocolFixtureState(request)).requests.filter((item) => item.method === "POST" && item.path.endsWith("/images/edits"))).toHaveLength(1);
+        await testInfo.attach("large-product-protection.json", { body: JSON.stringify(traceStage(trace, "image_generation").output.protection, null, 2), contentType: "application/json" });
+        const assetsResponse = await request.get(`/api/creative/conversations/${run.conversationId}/assets`);
+        expect(assetsResponse.ok()).toBe(true);
+        const assetsPayload: { data: { assets: Array<{ id: string; sourceRunId?: string; serverUrl?: string }> } } = await assetsResponse.json();
+        const deliveredAsset = assetsPayload.data.assets.find((asset) => asset.id === run.assetIds?.[0]);
+        assert.ok(deliveredAsset?.serverUrl);
+        expect(deliveredAsset.sourceRunId).toBe(run.id);
+        const expectedSource = new URL(deliveredAsset.serverUrl, page.url());
+        const resultImage = page.getByTestId("creative-media-result").last().getByTestId("creative-primary-result").getByRole("img");
+        await expect(resultImage).toBeVisible({ timeout: 30_000 });
+        await expect
+            .poll(async () => {
+                const source = await resultImage.getAttribute("src");
+                assert.ok(source);
+                const preview = new URL(source, page.url());
+                return { origin: preview.origin, pathname: preview.pathname };
+            })
+            .toEqual({ origin: expectedSource.origin, pathname: expectedSource.pathname });
+        const resultSource = await resultImage.getAttribute("src");
+        assert.ok(resultSource);
+
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
+        await expect(resultImage).toHaveAttribute("src", resultSource);
+        await expect(page.getByTestId("creative-reference-review")).toHaveCount(0);
+        const restored = await request.get(`/api/agent/runs/${created.runId}`);
+        expect(restored.ok()).toBe(true);
+        expect((await restored.json()).data.run).toMatchObject({ id: created.runId, status: "completed", assetIds: run.assetIds, ecommerceQualityStatus: "passed" });
+        await activity.terminal;
+    } finally {
+        const evidence = await activity.close();
+        await testInfo.attach("resident-f02-http-sse.json", { body: JSON.stringify(evidence, null, 2), contentType: "application/json" });
+        expect.soft(evidence.failures).toEqual([]);
+        expect.soft(evidence.health.length).toBeGreaterThan(0);
+        expect.soft(evidence.task.length).toBeGreaterThan(0);
+        expect.soft(evidence.sse.status).toBe(200);
+        expect.soft(evidence.sse.contentType).toContain("text/event-stream");
+        expect.soft(evidence.sse.naturalClose).toBe(true);
+        expect.soft(evidence.sse.frames.map((frame) => frame.event)).toEqual(expect.arrayContaining(["run.snapshot", "run.completed"]));
+    }
+});
+
 test("historical-branch:连续编辑默认继承最近结果并可从较早结果建立分支", async ({ page, request }, testInfo) => {
     test.skip(testInfo.project.name !== "chromium", "连续性回归只在桌面 Chromium 执行");
     const first = await submitProductScene(page, cases[0]);
@@ -1465,6 +1576,143 @@ for (const theme of ["light", "dark"] as const) {
     });
 }
 
+const RESOURCE_BLOCKED_MESSAGE = "图像处理因资源不足暂停，进度已保存。当前资源配置仍无法执行原图像阶段，请联系管理员检查。调整后请刷新页面。";
+const RESOURCE_READY_MESSAGE = "图像处理因资源不足暂停，进度已保存。资源已调整，可以继续原任务。";
+const RESOURCE_RESUME_ERROR = "原图像阶段状态已变化，请刷新后重试。";
+
+for (const theme of ["light", "dark"] as const) {
+    test(`resource-resume-ui:资源说明刷新后同一Run单次继续-${theme}`, async ({ page }, testInfo) => {
+        test.skip(testInfo.project.name !== "chromium", "桌面资源暂停专项；API/SSE为受控UI夹具");
+        await page.setViewportSize({ width: 1440, height: 900 });
+        await page.addInitScript((value) => localStorage.setItem("vozeb-pro:theme_store", JSON.stringify({ state: { theme: value }, version: 0 })), theme);
+        const fixture = await mockPublicEcommerceRound(page, "resource");
+        await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
+        const panel = page.getByTestId("creative-generation-waiting");
+        await expect(panel).toHaveCount(1);
+        await expect(panel).toBeVisible();
+        await expect(panel).toContainText(RESOURCE_BLOCKED_MESSAGE);
+        await expect(page.getByRole("button", { name: "继续图像处理", exact: true })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "检查状态", exact: true })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-generation-elapsed")).toHaveCount(0);
+        await expect.poll(() => page.locator("html").evaluate((element) => element.classList.contains("dark"))).toBe(theme === "dark");
+        await expectNoHorizontalOverflow(page, `resource blocked ${theme}`);
+        await testInfo.attach(`resource-blocked-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect(panel).toContainText(RESOURCE_BLOCKED_MESSAGE);
+        await expect(panel.getByRole("button")).toHaveCount(0);
+        expect(fixture.controls).toHaveLength(0);
+        expect(fixture.createdRuns()).toBe(0);
+        expect(fixture.eventSnapshots).not.toContainEqual(expect.objectContaining({ status: "running" }));
+
+        // This models a newly readable public projection after configuration changes; no admin mutation is claimed.
+        fixture.run.imageProcessingRecovery = { reason: "resource_failure", canResume: true, message: RESOURCE_READY_MESSAGE };
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect(panel).toContainText(RESOURCE_READY_MESSAGE);
+        const resume = panel.getByRole("button");
+        await expect(resume).toHaveCount(1);
+        await expect(resume).toHaveAccessibleName("继续图像处理");
+        await expect(resume).toBeEnabled();
+        await expect(page.getByRole("button", { name: "检查状态", exact: true })).toHaveCount(0);
+        const responsePromise = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/agent/runs/${fixture.runId}/resume`);
+        await resume.dblclick();
+        await expect(resume).toBeDisabled();
+        await expect(resume).toHaveText("正在继续");
+        await expect.poll(() => fixture.controls.length).toBe(1);
+        expect(fixture.controls).toEqual([{ conversationId: fixture.conversationId }]);
+        await expect(page.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-generation-elapsed")).toHaveCount(0);
+        expect(fixture.eventSnapshots).not.toContainEqual(expect.objectContaining({ status: "running" }));
+        fixture.releaseResume();
+        const response = await responsePromise;
+        expect(response.ok()).toBe(true);
+        expect((await response.json()).data.run).toMatchObject({ id: fixture.runId, conversationId: fixture.conversationId, inputMessageId: "task16-input", assistantMessageId: "task16-assistant", status: "running" });
+        await expect(panel.getByRole("button")).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "停止生成", exact: true })).toBeVisible();
+        await expect(page.getByTestId("creative-generation-elapsed")).toBeVisible();
+        await expect(page.getByTestId("creative-round-request")).toHaveCount(1);
+        await expect(page).toHaveURL(new RegExp(`[?&]conversationId=${fixture.conversationId}(?:&|$)`));
+        expect(fixture.controls).toEqual([{ conversationId: fixture.conversationId }]);
+        expect(fixture.createdRuns()).toBe(0);
+        await expectNoHorizontalOverflow(page, `resource resumed ${theme}`);
+        await testInfo.attach(`resource-resumed-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+    });
+}
+
+for (const scenario of [
+    { outcome: "error", responseStatus: 409, message: RESOURCE_RESUME_ERROR, remainingButtons: 1 },
+    { outcome: "paused", responseStatus: 200, message: RESOURCE_BLOCKED_MESSAGE, remainingButtons: 0 },
+] as const) {
+    test(`resource-resume-ui:失败或仍暂停响应不伪造运行-${scenario.outcome}`, async ({ page }, testInfo) => {
+        test.skip(testInfo.project.name !== "chromium", "桌面资源恢复响应专项；API/SSE为受控UI夹具");
+        const fixture = await mockPublicEcommerceRound(page, "resource", false, scenario.outcome);
+        fixture.run.imageProcessingRecovery = { reason: "resource_failure", canResume: true, message: RESOURCE_READY_MESSAGE };
+        await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
+        const panel = page.getByTestId("creative-generation-waiting");
+        await expect(panel).toContainText(RESOURCE_READY_MESSAGE);
+        const resume = panel.getByRole("button");
+        await expect(resume).toHaveAccessibleName("继续图像处理");
+        const responsePromise = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/agent/runs/${fixture.runId}/resume`);
+        await resume.dblclick();
+        await expect(resume).toBeDisabled();
+        await expect(resume).toHaveText("正在继续");
+        await expect.poll(() => fixture.controls.length).toBe(1);
+        fixture.releaseResume();
+        expect((await responsePromise).status()).toBe(scenario.responseStatus);
+        await expect(panel.getByRole("alert")).toContainText(scenario.message);
+        await expect(panel.getByRole("button")).toHaveCount(scenario.remainingButtons);
+        await expect(page.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "检查状态", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-generation-elapsed")).toHaveCount(0);
+        expect(fixture.eventSnapshots).not.toContainEqual(expect.objectContaining({ status: "running" }));
+        expect(fixture.run.status).toBe("paused");
+        expect(fixture.controls).toEqual([{ conversationId: fixture.conversationId }]);
+        expect(fixture.createdRuns()).toBe(0);
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect(panel).toBeVisible();
+        await expect(page.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-generation-elapsed")).toHaveCount(0);
+        await expect(page.getByTestId("creative-round-request")).toHaveCount(1);
+    });
+}
+
+test("resource-resume-ui:成功后刷新按原Run运行态恢复且保留旧助手消息", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "桌面资源恢复刷新专项；API/SSE为受控UI夹具");
+    const fixture = await mockPublicEcommerceRound(page, "resource");
+    fixture.run.imageProcessingRecovery = { reason: "resource_failure", canResume: true, message: RESOURCE_READY_MESSAGE };
+    await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("creative-generation-waiting");
+    await expect(panel).toContainText(RESOURCE_READY_MESSAGE);
+    const responsePromise = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/agent/runs/${fixture.runId}/resume`);
+    await panel.getByRole("button", { name: "继续图像处理", exact: true }).click();
+    await expect.poll(() => fixture.controls.length).toBe(1);
+    fixture.releaseResume();
+    const response = await responsePromise;
+    expect(response.ok()).toBe(true);
+    expect((await response.json()).data.run).toMatchObject({ id: fixture.runId, conversationId: fixture.conversationId, status: "running" });
+    await expect(page.getByTestId("creative-generation-elapsed")).toBeVisible();
+    const eventsBeforeReload = fixture.eventSnapshots.length;
+    const restoredRun = page.waitForResponse((value) => value.request().method() === "GET" && new URL(value.url()).pathname === `/api/agent/runs/${fixture.runId}`);
+    const restoredMessages = page.waitForResponse((value) => value.request().method() === "GET" && new URL(value.url()).pathname === `/api/creative/conversations/${fixture.conversationId}/messages`);
+    const restoredStream = page.waitForRequest((value) => value.method() === "GET" && new URL(value.url()).pathname === `/api/agent/runs/${fixture.runId}/events`);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    expect((await (await restoredRun).json()).data.run).toMatchObject({ id: fixture.runId, conversationId: fixture.conversationId, status: "running" });
+    expect((await (await restoredMessages).json()).data.messages).toMatchObject([
+        { id: "task16-input", status: "completed" },
+        { id: "task16-assistant", runId: fixture.runId, status: "completed" },
+    ]);
+    await expect(panel).toBeVisible();
+    await expect(page.getByTestId("creative-generation-elapsed")).toBeVisible();
+    await expect(page.getByRole("button", { name: "停止生成", exact: true })).toBeVisible();
+    expect((await restoredStream).method()).toBe("GET");
+    await expect.poll(() => fixture.eventSnapshots.length).toBeGreaterThan(eventsBeforeReload);
+    expect(fixture.eventSnapshots.at(-1)).toEqual({ id: fixture.runId, conversationId: fixture.conversationId, status: "running" });
+    await expect(page.getByTestId("creative-round-request")).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "继续图像处理", exact: true })).toHaveCount(0);
+    expect(fixture.controls).toEqual([{ conversationId: fixture.conversationId }]);
+    expect(fixture.createdRuns()).toBe(0);
+});
+
 async function sceneSelectionImageGeometry(page: Page) {
     const image = page.getByRole("img", { name: "选择修改位置的原图", exact: true });
     await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(418);
@@ -1495,7 +1743,7 @@ async function dragSceneSelection(page: Page) {
     await page.mouse.up();
 }
 
-async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" | "hard" | "unavailable", runningMessage = false) {
+async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" | "hard" | "unavailable" | "resource", runningMessage = false, resourceResumeResult: "running" | "paused" | "error" = "running") {
     const conversationId = `task16-${state}`;
     const otherConversationId = `${conversationId}-other`;
     const timestamp = Date.now();
@@ -1525,20 +1773,23 @@ async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" 
         updatedAt: timestamp,
         assetIds: state === "soft" ? ["task16-preview"] : [],
         tasks: [{ id: "task16-task", title: "生成图片", type: "image", model: "fixture-image", status: state === "soft" ? "completed" : "needs_review" }],
-        ...(state === "selection"
-            ? { ecommerceSceneSelection: { action: "confirm_scene_selection", baselineAssetId: "task16-baseline", url: "/api/reference-assets/task16-baseline.png", width: 1254, height: 627 } }
-            : {
-                  ecommerceQualityStatus: state === "soft" ? "needs_adjustment" : "needs_review",
-                  ecommerceQualityReview: {
-                      kind: state === "soft" ? "needs_adjustment" : state === "hard" ? "hard_failure" : "check_unavailable",
-                      failureKeys: state === "hard" ? ["canvas_geometry"] : state === "soft" ? ["composition_lighting"] : [],
-                      ...(state === "hard" ? { message: "画幅与要求不一致：要求 1024×1024，上游原图 1254×1254。" } : {}),
-                  },
-              }),
+        ...(state === "resource"
+            ? { imageProcessingRecovery: { reason: "resource_failure", canResume: false, message: RESOURCE_BLOCKED_MESSAGE }, canCheckStatus: false }
+            : state === "selection"
+              ? { ecommerceSceneSelection: { action: "confirm_scene_selection", baselineAssetId: "task16-baseline", url: "/api/reference-assets/task16-baseline.png", width: 1254, height: 627 } }
+              : {
+                    ecommerceQualityStatus: state === "soft" ? "needs_adjustment" : "needs_review",
+                    ecommerceQualityReview: {
+                        kind: state === "soft" ? "needs_adjustment" : state === "hard" ? "hard_failure" : "check_unavailable",
+                        failureKeys: state === "hard" ? ["canvas_geometry"] : state === "soft" ? ["composition_lighting"] : [],
+                        ...(state === "hard" ? { message: "画幅与要求不一致：要求 1024×1024，上游原图 1254×1254。" } : {}),
+                    },
+                }),
     };
     const controls: Array<{ conversationId: string; sceneSelection?: CreativeSceneSelection }> = [];
     let created = 0;
     let statusReads = 0;
+    const eventSnapshots: Array<Pick<CreativeAgentRun, "id" | "conversationId" | "status">> = [];
     let releaseResume = () => {};
     const resumeRelease = new Promise<void>((resolve) => {
         releaseResume = resolve;
@@ -1613,12 +1864,22 @@ async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" 
     await page.route(new RegExp(`/api/agent/runs/${run.id}/resume$`), async (route) => {
         controls.push(route.request().postDataJSON());
         await resumeRelease;
+        if (state === "resource" && resourceResumeResult === "error") return route.fulfill({ status: 409, json: { code: 409, data: null, msg: RESOURCE_RESUME_ERROR } });
+        if (state === "resource" && resourceResumeResult === "paused") {
+            run.imageProcessingRecovery = { reason: "resource_failure", canResume: false, message: RESOURCE_BLOCKED_MESSAGE };
+            return route.fulfill({ json: { code: 0, data: { run }, msg: "OK" } });
+        }
         run.status = "running";
         delete run.ecommerceSceneSelection;
+        if (state === "resource") delete run.imageProcessingRecovery;
         await route.fulfill({ json: { code: 0, data: { run }, msg: "OK" } });
     });
-    await page.route(new RegExp(`/api/agent/runs/${run.id}/events$`), (route) => route.fulfill({ contentType: "text/event-stream", body: `event: run.snapshot\ndata: ${JSON.stringify({ ...run, status: "running" })}\n\n` }));
-    return { conversationId, otherConversationId, runId: run.id, run, controls, releaseResume: () => releaseResume(), createdRuns: () => created, statusReads: () => statusReads };
+    await page.route(new RegExp(`/api/agent/runs/${run.id}/events$`), (route) => {
+        const snapshot = state === "resource" ? run : { ...run, status: "running" as const };
+        eventSnapshots.push({ id: snapshot.id, conversationId: snapshot.conversationId, status: snapshot.status });
+        return route.fulfill({ contentType: "text/event-stream", body: `event: run.snapshot\ndata: ${JSON.stringify(snapshot)}\n\n` });
+    });
+    return { conversationId, otherConversationId, runId: run.id, run, controls, eventSnapshots, releaseResume: () => releaseResume(), createdRuns: () => created, statusReads: () => statusReads };
 }
 
 async function submitProductScene(page: Page, goldenCase: GoldenCase, options: { sceneReference?: boolean } = {}) {

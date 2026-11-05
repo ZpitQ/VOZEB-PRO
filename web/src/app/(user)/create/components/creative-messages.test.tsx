@@ -691,6 +691,55 @@ describe("CreativeMessages", () => {
         }
     });
 
+    it("shows cancellation instead of success for a cancelled image round", () => {
+        const userMessage: CreativeMessage = {
+            id: "cancel-user",
+            conversationId: "conversation-one",
+            runId: "cancel-run",
+            sequence: 1,
+            role: "user",
+            status: "completed",
+            content: "生成一张商品图",
+            metadata: {},
+            createdAt: 1,
+            updatedAt: 1,
+        };
+        const assistantMessage: CreativeMessage = { ...userMessage, id: "cancel-assistant", sequence: 2, role: "assistant", status: "cancelled", content: "Agent 任务已取消。" };
+        const markup = renderToStaticMarkup(
+            <App>
+                <CreativeMessages
+                    messages={[userMessage, assistantMessage]}
+                    assets={[]}
+                    loading={false}
+                    projectLinks={{}}
+                    projectErrors={{}}
+                    runDetails={{
+                        "cancel-run": {
+                            id: "cancel-run",
+                            conversationId: "conversation-one",
+                            inputMessageId: userMessage.id,
+                            assistantMessageId: assistantMessage.id,
+                            status: "cancelled",
+                            generationPreferences: { mode: "image" },
+                            assetIds: [],
+                            tasks: [],
+                        },
+                    }}
+                    onMaterializeProject={async () => {
+                        throw new Error("not used");
+                    }}
+                    onRetryMessage={vi.fn()}
+                    selectedAssetIds={[]}
+                    onToggleAsset={vi.fn()}
+                />
+            </App>,
+        );
+
+        expect(markup).toMatch(/<h2[^>]*>已取消生成<\/h2>/);
+        expect(markup).toContain("Agent 任务已取消。");
+        expect(markup).not.toContain("已为你生成图片");
+    });
+
     it("uses a warm elapsed-time status while a media result is still running", () => {
         const now = Date.now();
         const userMessage: CreativeMessage = {

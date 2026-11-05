@@ -9,7 +9,8 @@ services:
     volumes:
       - vozeb-pro-data:/app/web/.data
     environment:
-      NODE_OPTIONS: "--max-old-space-size=384"
+      NODE_OPTIONS: "--max-old-space-size=${VOZEB_PRO_WEB_HEAP_MB:-384}"
+      VOZEB_PRO_WEB_HEAP_MB: ${VOZEB_PRO_WEB_HEAP_MB:-384}
       UV_THREADPOOL_SIZE: "2"
       NEXT_TELEMETRY_DISABLED: "1"
       VOZEB_PRO_DATA_DIR: /app/web/.data
@@ -22,7 +23,13 @@ services:
       VOZEB_PRO_INSTALL_TOKEN: ${VOZEB_PRO_INSTALL_TOKEN:?请在 .env 中配置至少 32 位一次性安装令牌}
       VOZEB_PRO_MAINTENANCE_TOKEN: ${VOZEB_PRO_MAINTENANCE_TOKEN:?请在 .env 中配置至少 32 位维护令牌}
       VOZEB_PRO_WORKER_TOKEN: ${VOZEB_PRO_WORKER_TOKEN:?请在 .env 中配置独立的至少 32 位 Worker 令牌}
-    mem_limit: 512m
+      VOZEB_PRO_GENERATION_WORKER_MEMORY_MB: ${VOZEB_PRO_GENERATION_WORKER_MEMORY_MB:?请在 .env 中显式配置 Worker 总内存 MiB 正整数}
+      VOZEB_PRO_GENERATION_WORKER_HEAP_MB: ${VOZEB_PRO_GENERATION_WORKER_HEAP_MB:-64}
+      VOZEB_PRO_GENERATION_WORKER_CPUS: ${VOZEB_PRO_GENERATION_WORKER_CPUS:?请在 .env 中显式配置 Worker CPU 正值}
+      VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB: ${VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB:?请在 .env 中显式配置图像预算 MiB 正整数}
+      VOZEB_PRO_IMAGE_PROCESS_HEAP_MB: ${VOZEB_PRO_IMAGE_PROCESS_HEAP_MB:-384}
+      VOZEB_PRO_IMAGE_PROCESS_CONCURRENCY: ${VOZEB_PRO_IMAGE_PROCESS_CONCURRENCY:-1}
+    mem_limit: ${VOZEB_PRO_WEB_MEMORY_LIMIT:-512m}
     memswap_limit: 768m
     healthcheck:
       test:
@@ -43,14 +50,22 @@ services:
     pull_policy: always
     command: ["node", "/app/web/scripts/generation-worker.mjs"]
     environment:
-      NODE_OPTIONS: "--max-old-space-size=64"
+      NODE_OPTIONS: "--max-old-space-size=${VOZEB_PRO_GENERATION_WORKER_HEAP_MB:-64}"
       VOZEB_PRO_WORKER_API_ORIGIN: http://app:3000
       VOZEB_PRO_WORKER_TOKEN: ${VOZEB_PRO_WORKER_TOKEN:?请在 .env 中配置独立的至少 32 位 Worker 令牌}
+      VOZEB_PRO_GENERATION_WORKER_MEMORY_MB: ${VOZEB_PRO_GENERATION_WORKER_MEMORY_MB:?请在 .env 中显式配置 Worker 总内存 MiB 正整数}
+      VOZEB_PRO_GENERATION_WORKER_HEAP_MB: ${VOZEB_PRO_GENERATION_WORKER_HEAP_MB:-64}
+      VOZEB_PRO_GENERATION_WORKER_CPUS: ${VOZEB_PRO_GENERATION_WORKER_CPUS:?请在 .env 中显式配置 Worker CPU 正值}
+      VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB: ${VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB:?请在 .env 中显式配置图像预算 MiB 正整数}
+      VOZEB_PRO_IMAGE_PROCESS_HEAP_MB: ${VOZEB_PRO_IMAGE_PROCESS_HEAP_MB:-384}
+      VOZEB_PRO_IMAGE_PROCESS_CONCURRENCY: ${VOZEB_PRO_IMAGE_PROCESS_CONCURRENCY:-1}
     depends_on:
       app:
         condition: service_healthy
-    mem_limit: 96m
-    memswap_limit: 128m
+    mem_limit: "${VOZEB_PRO_GENERATION_WORKER_MEMORY_MB:?请在 .env 中显式配置 Worker 总内存 MiB 正整数}m"
+    memswap_limit: "${VOZEB_PRO_GENERATION_WORKER_MEMORY_MB:?请在 .env 中显式配置 Worker 总内存 MiB 正整数}m"
+    cpus: ${VOZEB_PRO_GENERATION_WORKER_CPUS:?请在 .env 中显式配置 Worker CPU 正值}
+    stop_grace_period: ${VOZEB_PRO_WORKER_STOP_GRACE_PERIOD:?请在 .env 中显式配置合法的 Worker 排空时长}
     restart: unless-stopped
 
 volumes:

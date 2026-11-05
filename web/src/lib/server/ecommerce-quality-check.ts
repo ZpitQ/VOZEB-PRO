@@ -1,6 +1,9 @@
+import { StructuredTextSubmissionRejectedError, StructuredTextSubmissionUnknownError, type TextPlanningSubmission } from "./text-planning-runtime";
 import { refundUserPoints } from "@/lib/auth/store";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import sharp from "sharp";
+import { originalImageSourceUrl } from "@/lib/media-image-url";
 import { CREATIVE_UPLOAD_MAX_BYTES } from "@/lib/creative-upload";
 import { fetchInternalApi } from "@/lib/server/internal-origin";
 import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
@@ -25,6 +28,8 @@ import { rankTextPlanningCandidates, requestStructuredText, type TextPlanningBod
 import { compositeSceneEdit, type SceneEditProtectionEvidence } from "./ecommerce-product-regions";
 import { SYSTEM_PROXY_JSON_BODY_MAX_BYTES } from "./system-proxy-request-limits";
 import type { ImageTaskResultEvidence } from "./image-task-store";
+import type { CompletedImageResultTechnicalEvidence } from "./image-task-result-processing";
+import { ImageProcessingInputError } from "./image-processing-service";
 
 export const ECOMMERCE_QUALITY_CHECK_VERSION = "ecommerce-quality.v2" as const;
 export const ECOMMERCE_QUALITY_CHECK_KEYS = [
@@ -150,11 +155,42 @@ const HARD_CHECKS = new Set<EcommerceQualityCheckKey>([
     "stored_media",
 ]);
 
-async function collectEcommerceTechnicalEvidence(input: EcommerceQualityCheckRequest) {
+type CompletedImageRead = { status: "legacy" } | { status: "completed"; result: CompletedImageResultTechnicalEvidence } | { status: "failed" | "not_applicable"; reason: string };
+type CompletedImageReader = (resultId: string) => Promise<CompletedImageResultTechnicalEvidence | undefined>;
+
+async function readCompletedImageResults(input: EcommerceQualityCheckRequest, readCompleted?: CompletedImageReader) {
+    const results = new Map<string, CompletedImageRead>();
+    if (!readCompleted) return results;
+    for (const result of input.resultImages) {
+        try {
+            const completed = await readCompleted(result.resultId);
+            if (!completed) {
+                results.set(result.resultId, { status: "legacy" });
+                continue;
+            }
+            if (
+                completed.resultId !== result.resultId ||
+                completed.url !== result.url ||
+                completed.nativeUrl !== result.nativeUrl ||
+                completed.sourceAssetId !== input.baselineReference.assetId ||
+                completed.sourceUrl !== originalImageSourceUrl(input.baselineReference.url) ||
+                !isDeepStrictEqual(completed.sceneProtectionEvidence, result.sceneProtectionEvidence) ||
+                (result.nativeSize && !isDeepStrictEqual(completed.nativeSize, result.nativeSize))
+            )
+                throw new ImageProcessingInputError("技术验收请求与原完成槽位、基线或保护证据不符", 409);
+            results.set(result.resultId, { status: "completed", result: completed });
+        } catch (error) {
+            results.set(result.resultId, { status: error instanceof ImageProcessingInputError && [400, 409, 413].includes(error.status) ? "failed" : "not_applicable", reason: error instanceof Error ? error.message : "无法读取已完成结果的真实原件" });
+        }
+    }
+    return results;
+}
+
+async function collectEcommerceTechnicalEvidence(input: EcommerceQualityCheckRequest, completedImages = new Map<string, CompletedImageRead>()) {
     let canvasEvidence: EcommerceCanvasQualityEvidence[] = [];
     let geometryChecks: EcommerceQualityCheckItem[] = [];
     const sceneProtectionEvidence = input.resultImages.flatMap((result) => (result.sceneProtectionEvidence ? [{ resultId: result.resultId, evidence: structuredClone(result.sceneProtectionEvidence) }] : []));
-    const protectionChecks = await qualityProtectionChecks(input);
+    const protectionChecks = await qualityProtectionChecks(input, completedImages);
     if (input.plan.canvas) {
         const constraint = input.plan.canvas;
         validateEcommerceDimensions(constraint.size);
@@ -165,8 +201,8 @@ async function collectEcommerceTechnicalEvidence(input: EcommerceQualityCheckReq
         canvasEvidence = await Promise.all(
             slots.map(async ({ evidence, result }) => {
                 const [native, stored] = await Promise.allSettled([
-                    result?.nativeUrl ? qualityCanvasSize(result.nativeUrl, input) : Promise.reject(new Error("上游原生画幅证据缺失")),
-                    result?.url ? qualityCanvasSize(result.url, input) : Promise.reject(new Error("落盘画幅证据缺失")),
+                    result?.nativeUrl ? qualityCanvasSize(result.nativeUrl, input, completedImages.get(result.resultId)) : Promise.reject(new Error("上游原生画幅证据缺失")),
+                    result?.url ? qualityCanvasSize(result.url, input, completedImages.get(result.resultId)) : Promise.reject(new Error("落盘画幅证据缺失")),
                 ]);
                 const nativeSize = native.status === "fulfilled" ? native.value : (evidence?.nativeStatus === "readable" ? evidence.nativeSize : undefined) || result?.nativeSize;
                 const storedSize = stored.status === "fulfilled" ? stored.value : undefined;
@@ -206,7 +242,13 @@ async function collectEcommerceTechnicalEvidence(input: EcommerceQualityCheckReq
     return { checks: [...geometryChecks, ...protectionChecks], canvasEvidence, sceneProtectionEvidence };
 }
 
-export async function checkEcommerceResult(input: EcommerceQualityCheckRequest, candidate: EcommerceRoleCandidate, technicalCheck?: EcommerceResultTechnicalCheck): Promise<EcommerceQualityCheck> {
+export type PreparedEcommerceQualityView = { source: string; size: EcommerceDimensions; region?: EcommerceManualRegion; url: string };
+export type EcommerceQualityReviewControl = {
+    views: readonly PreparedEcommerceQualityView[];
+    onBeforeRequest: (candidate: EcommerceRoleCandidate, submission: TextPlanningSubmission) => Promise<void>;
+};
+
+export async function checkEcommerceResult(input: EcommerceQualityCheckRequest, candidate: EcommerceRoleCandidate, technicalCheck?: EcommerceResultTechnicalCheck, review?: EcommerceQualityReviewControl): Promise<EcommerceQualityCheck> {
     let canvasEvidence: EcommerceCanvasQualityEvidence[] = [];
     let geometryChecks: EcommerceQualityCheckItem[] = [];
     let protectionChecks: EcommerceQualityCheckItem[] = [];
@@ -223,7 +265,7 @@ export async function checkEcommerceResult(input: EcommerceQualityCheckRequest, 
         const unavailableEvidence = canvasEvidence.find((evidence) => evidence.nativeStatus === "unavailable" || evidence.storedStatus === "unavailable");
         if (unavailableEvidence) throw new Error(!unavailableEvidence.nativeUrl ? "上游原生画幅证据缺失" : "画幅验收真实文件不可读");
         const resultIds = input.resultImages.map((item) => item.resultId);
-        const prepared = await qualityCheckMessages(input);
+        const prepared = await qualityCheckMessages(input, review?.views);
         visionEvidence = prepared.evidence;
         const normalize = (value: unknown) => normalizeQualityResult(value, resultIds, independent, Boolean(input.productAnchorReference), prepared.evidence.images);
         const idempotencyKey = systemAiIdempotencyKey("ecommerce-quality-check", input.userId, input.requestId, candidate.logicalModelId, candidate.channelId, candidate.upstreamModel);
@@ -239,6 +281,7 @@ export async function checkEcommerceResult(input: EcommerceQualityCheckRequest, 
                 ...systemAiBillingHeaders(candidate.logicalModelId, idempotencyKey, candidate.upstreamModel),
             },
             preferNativeTools: true,
+            ...(review ? { onBeforeRequest: (submission: TextPlanningSubmission) => review.onBeforeRequest(candidate, submission) } : {}),
             validateArguments: (argumentsText) => {
                 try {
                     return normalize(JSON.parse(argumentsText)) !== null;
@@ -283,6 +326,7 @@ export async function checkEcommerceResult(input: EcommerceQualityCheckRequest, 
             visionEvidence,
         };
     } catch (error) {
+        if (error instanceof StructuredTextSubmissionUnknownError || error instanceof StructuredTextSubmissionRejectedError) throw error;
         const unavailable = unavailableEcommerceQualityCheck(error instanceof Error ? error.message : "结果验收模型不可用", candidate.snapshot);
         const checks = [...geometryChecks, ...protectionChecks];
         const hardFailures = checks.filter((check) => check.status === "failed");
@@ -299,16 +343,17 @@ export async function checkEcommerceResult(input: EcommerceQualityCheckRequest, 
     }
 }
 
-export async function checkEcommerceTechnicalResult(input: EcommerceQualityCheckRequest): Promise<EcommerceResultTechnicalCheck> {
+export async function checkEcommerceTechnicalResult(input: EcommerceQualityCheckRequest, readCompleted?: CompletedImageReader): Promise<EcommerceResultTechnicalCheck> {
     let evidence: Awaited<ReturnType<typeof collectEcommerceTechnicalEvidence>> = { checks: [], canvasEvidence: [], sceneProtectionEvidence: [] };
     try {
-        evidence = await collectEcommerceTechnicalEvidence(input);
+        const completedImages = await readCompletedImageResults(input, readCompleted);
+        evidence = await collectEcommerceTechnicalEvidence(input, completedImages);
         if (!input.plan.canvas) {
             evidence.checks.push(
                 ...(await Promise.all(
                     input.resultImages.map(async (result): Promise<EcommerceQualityCheckItem> => {
                         try {
-                            const size = await qualityCanvasSize(result.url, input);
+                            const size = await qualityCanvasSize(result.url, input, completedImages.get(result.resultId));
                             return { resultId: result.resultId, key: "stored_media", source: "media", status: "passed", reason: `stored=${size.width}x${size.height}` };
                         } catch {
                             return { resultId: result.resultId, key: "stored_media", source: "media", status: "not_applicable", reason: "保存的图片无法读取或解码" };
@@ -332,10 +377,10 @@ export function ecommerceResultDeliveryGate(technical: EcommerceResultTechnicalC
     return { action: "publish" as const, publicStatus: quality ? ("passed" as const) : undefined, publicMessage: "图片已生成。" };
 }
 
-export async function checkEcommerceResultWithFallback(input: EcommerceQualityCheckRequest, candidates: EcommerceRoleCandidate[], technical?: EcommerceResultTechnicalCheck): Promise<EcommerceQualityCheck> {
+export async function checkEcommerceResultWithFallback(input: EcommerceQualityCheckRequest, candidates: EcommerceRoleCandidate[], technical?: EcommerceResultTechnicalCheck, review?: EcommerceQualityReviewControl): Promise<EcommerceQualityCheck> {
     let latest: EcommerceQualityCheck | null = null;
     for (const candidate of rankTextPlanningCandidates(candidates)) {
-        latest = await checkEcommerceResult(input, candidate, technical);
+        latest = await checkEcommerceResult(input, candidate, technical, review);
         if (latest.status !== "unavailable") return latest;
     }
     if (latest) return latest;
@@ -375,11 +420,23 @@ export function ecommerceQualityGate(check: EcommerceQualityCheck) {
     return { action: "publish" as const, publicStatus: "passed" as const, publicMessage: "商品一致性检查通过。" };
 }
 
-async function qualityCheckMessages(input: EcommerceQualityCheckRequest) {
+async function qualityCheckMessages(input: EcommerceQualityCheckRequest, preparedViews?: readonly PreparedEcommerceQualityView[]) {
     const independent = ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(input.plan.planVersion);
     const evidence: NonNullable<EcommerceQualityCheck["visionEvidence"]> = { imageCount: 0, transmissions: [], images: [] };
     const regionHints = [...new Map((input.plan.visibleStructure || []).map((fact) => [JSON.stringify(fact.evidenceRegion), fact.evidenceRegion])).values()];
     const appendImage = async (content: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>, source: string, url: string, crop: boolean) => {
+        if (preparedViews) {
+            const views = preparedViews.filter((view) => view.source === source);
+            const regions = crop ? regionHints : [];
+            if (!independent || views.length !== 1 + regions.length || views[0].region || regions.some((region, index) => !isDeepStrictEqual(region, views[index + 1].region))) throw new Error("持久复核视图与原始顺序或裁片不符");
+            for (const view of views) {
+                if (view.region) content.push({ type: "text", text: `qaOnlyCrop=${source};region=${JSON.stringify(view.region)};sourceSize=${JSON.stringify(view.size)}` });
+                content.push({ type: "image_url", image_url: { url: view.url } });
+                evidence.images.push({ source, size: { ...view.size }, ...(view.region ? { region: { ...view.region } } : {}) });
+                evidence.imageCount++;
+            }
+            return;
+        }
         if (!independent) {
             content.push({ type: "image_url", image_url: { url: await normalizeQualityImage(url, input.origin, input.cookie) } });
             evidence.imageCount++;
@@ -479,11 +536,17 @@ async function normalizeQualityImage(value: string, origin: string, cookie: stri
     return boundEcommerceVisionImage(`data:${mimeType};base64,${bytes.toString("base64")}`);
 }
 
-async function qualityCanvasSize(value: string, input: EcommerceQualityCheckRequest): Promise<EcommerceDimensions> {
+async function qualityCanvasSize(value: string, input: EcommerceQualityCheckRequest, completed?: CompletedImageRead): Promise<EcommerceDimensions> {
+    if (completed && completed.status !== "legacy") {
+        if (completed.status !== "completed") throw new Error(completed.reason);
+        if (value === completed.result.url) return completed.result.storedSize;
+        if (value === completed.result.nativeUrl) return completed.result.nativeSize;
+        throw new ImageProcessingInputError("画幅验收URL与原完成槽位不符", 409);
+    }
     return decodeEcommerceCanvasSize(await qualityImageBytes(value, input));
 }
 
-async function qualityImageBytes(value: string, input: EcommerceQualityCheckRequest): Promise<Buffer> {
+export async function qualityImageBytes(value: string, input: EcommerceQualityCheckRequest): Promise<Buffer> {
     const data = value.match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\r\n]+)$/i);
     let bytes: Buffer;
     if (data) bytes = Buffer.from(data[2], "base64");
@@ -684,7 +747,30 @@ function qualityContradictions(input: EcommerceQualityCheckRequest, observed: Ec
     );
 }
 
-async function qualityProtectionChecks(input: EcommerceQualityCheckRequest): Promise<EcommerceQualityCheckItem[]> {
+function validSceneProtectionGeometry(proof: SceneEditProtectionEvidence, assetId: string, source: EcommerceDimensions, stored: EcommerceDimensions) {
+    const r = proof.targetRegion;
+    return (
+        proof.version === "scene-edit-protection.v1" &&
+        proof.selectionSource === "user_selection" &&
+        proof.method === "source_pixels_copy" &&
+        proof.maskSemantics === "alpha_zero_edit" &&
+        proof.sourceAssetId === assetId &&
+        proof.sourceSize.width === source.width &&
+        proof.sourceSize.height === source.height &&
+        source.width === stored.width &&
+        source.height === stored.height &&
+        r &&
+        Object.values(r).every(Number.isSafeInteger) &&
+        r.x >= 0 &&
+        r.y >= 0 &&
+        r.width > 0 &&
+        r.height > 0 &&
+        r.x + r.width <= stored.width &&
+        r.y + r.height <= stored.height
+    );
+}
+
+async function qualityProtectionChecks(input: EcommerceQualityCheckRequest, completedImages = new Map<string, CompletedImageRead>()): Promise<EcommerceQualityCheckItem[]> {
     if (input.plan.protection?.scope !== "local")
         return ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(input.plan.planVersion)
             ? input.resultImages.map((result) => ({ resultId: result.resultId, key: "unmodified_region", status: "not_applicable", source: "protection", reason: "当前全局编辑没有局部选区外像素不变承诺" }))
@@ -693,33 +779,31 @@ async function qualityProtectionChecks(input: EcommerceQualityCheckRequest): Pro
         input.resultImages.map(async (result) => {
             const proof = result.sceneProtectionEvidence;
             const item: EcommerceQualityCheckItem = { resultId: result.resultId, key: "unmodified_region", status: "not_applicable", source: "protection", reason: "缺少真实选区外合成证据，不能宣称像素保持" };
+            const completed = completedImages.get(result.resultId);
+            if (completed && completed.status !== "legacy" && completed.status !== "completed") return { ...item, status: completed.status, reason: completed.reason };
             if (!input.plan.protection?.preserveOutsideMask || !proof) return item;
+            if (completed?.status === "completed") {
+                if (completed.result.kind !== "scene") return { ...item, status: "failed", reason: "局部场景验收与原完成结果类型不符" };
+                const verified = completed.result.sceneProtectionEvidence;
+                const region = verified.targetRegion;
+                const stored = completed.result.storedSize;
+                if (!validSceneProtectionGeometry(verified, input.baselineReference.assetId, completed.result.sourceSize, stored)) return { ...item, status: "failed", reason: "真实源图或合成文件与独立保护证据不一致" };
+                const outsidePixels = stored.width * stored.height - region.width * region.height;
+                const changedPixels = verified.compositeOutsideChangedPixels;
+                return {
+                    ...item,
+                    status: changedPixels || !outsidePixels || verified.outsidePixels !== outsidePixels || verified.compositeOutsideChangedPixels !== 0 ? "failed" : "passed",
+                    evidence: { baselineRegion: { ...region }, resultRegion: { ...region } },
+                    reason: `actualOutsidePixels=${outsidePixels};actualChangedPixels=${changedPixels};mappedChangedPixels=${verified.mappedOutsideChangedPixels};normalization=${verified.normalization}`,
+                };
+            }
             try {
                 const [source, stored] = await Promise.all([qualityImageBytes(input.baselineReference.url, input), qualityImageBytes(result.url, input)]);
                 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
                 const decode = (bytes: Buffer) => sharp(bytes, { limitInputPixels: 64_000_000 }).rotate().toColourspace("srgb").ensureAlpha().raw().toBuffer({ resolveWithObject: true });
                 const [original, composite] = await Promise.all([decode(source), decode(stored)]);
                 const r = proof.targetRegion;
-                const valid =
-                    proof.version === "scene-edit-protection.v1" &&
-                    proof.selectionSource === "user_selection" &&
-                    proof.method === "source_pixels_copy" &&
-                    proof.maskSemantics === "alpha_zero_edit" &&
-                    proof.sourceAssetId === input.baselineReference.assetId &&
-                    proof.sourceDigest === digest(source) &&
-                    proof.compositeDigest === digest(stored) &&
-                    proof.sourceSize.width === original.info.width &&
-                    proof.sourceSize.height === original.info.height &&
-                    original.info.width === composite.info.width &&
-                    original.info.height === composite.info.height &&
-                    r &&
-                    Object.values(r).every(Number.isSafeInteger) &&
-                    r.x >= 0 &&
-                    r.y >= 0 &&
-                    r.width > 0 &&
-                    r.height > 0 &&
-                    r.x + r.width <= composite.info.width &&
-                    r.y + r.height <= composite.info.height;
+                const valid = validSceneProtectionGeometry(proof, input.baselineReference.assetId, original.info, composite.info) && proof.sourceDigest === digest(source) && proof.compositeDigest === digest(stored);
                 if (!valid) return { ...item, status: "failed", reason: "真实源图或合成文件与独立保护证据不一致" };
                 if (proof.normalization === "uniform_scale" || proof.normalization === "pixel_grid_scale") {
                     if (proof.nativeOutsideChangedPixels !== undefined) return { ...item, status: "failed", reason: "跨分辨率映射不得声明原生逐像素变化数量" };

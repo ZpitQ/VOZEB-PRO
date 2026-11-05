@@ -18,12 +18,14 @@ export function CreativeGenerationWaiting({
     onConfirmSceneSelection,
     onRecoverReference,
     onCheckStatus,
+    onResumeImageProcessing,
 }: {
     run?: CreativeAgentRun;
     message: Pick<CreativeMessage, "content" | "createdAt">;
     onConfirmSceneSelection?: (runId: string, selection: CreativeSceneSelection) => Promise<void>;
     onRecoverReference?: (runId: string, recovery: CreativeReferenceRecovery) => Promise<void>;
     onCheckStatus?: (runId: string) => Promise<void>;
+    onResumeImageProcessing?: (runId: string) => Promise<void>;
 }) {
     const startedAt = run?.createdAt || message.createdAt;
     const active = !run || run.status === "planning" || run.status === "running";
@@ -46,6 +48,21 @@ export function CreativeGenerationWaiting({
         }
     };
 
+    const resumeImageProcessing = async () => {
+        if (!run?.imageProcessingRecovery?.canResume || !onResumeImageProcessing || checkingRef.current) return;
+        checkingRef.current = true;
+        setChecking(true);
+        setCheckError("");
+        try {
+            await onResumeImageProcessing(run.id);
+        } catch (error) {
+            setCheckError(error instanceof Error ? error.message : "暂时无法继续图像处理，请重试。");
+        } finally {
+            checkingRef.current = false;
+            setChecking(false);
+        }
+    };
+
     useEffect(() => {
         if (!active) return;
         const update = () => setNow(Date.now());
@@ -56,12 +73,14 @@ export function CreativeGenerationWaiting({
 
     const elapsedSeconds = Math.max(0, Math.floor((now - startedAt) / 1000));
     const reviewText = run?.status === "paused" ? run.tasks.find((task) => task.status === "needs_review" && task.error?.trim())?.error : undefined;
-    const copy =
-        run?.ecommerceReferenceReview && run.status === "paused"
-            ? run.ecommerceReferenceReview.question
-            : run?.ecommerceSceneSelection && run.status === "paused"
-              ? "请确认需要修改的位置，然后继续这次创作。"
-              : creativeGenerationWaitingCopy({ mode: creativeRunMode(run), runStatus: run?.status, progressText: message.content, reviewText, elapsedSeconds });
+    const resourceRecovery = run?.status === "paused" ? run.imageProcessingRecovery : undefined;
+    const copy = resourceRecovery
+        ? resourceRecovery.message
+        : run?.ecommerceReferenceReview && run.status === "paused"
+          ? run.ecommerceReferenceReview.question
+          : run?.ecommerceSceneSelection && run.status === "paused"
+            ? "请确认需要修改的位置，然后继续这次创作。"
+            : creativeGenerationWaitingCopy({ mode: creativeRunMode(run), runStatus: run?.status, progressText: message.content, reviewText, elapsedSeconds });
 
     return (
         <div data-testid="creative-generation-waiting" className="mb-3 max-w-[520px] py-1 text-[#667085] dark:text-[#a0a9b4]">
@@ -82,9 +101,14 @@ export function CreativeGenerationWaiting({
                     {run?.status === "paused" && run.ecommerceReferenceReview && onRecoverReference ? (
                         <CreativeReferenceReviewPanel key={`${run.id}:${run.ecommerceReferenceReview.reviewId}`} runId={run.id} review={run.ecommerceReferenceReview} onRecover={onRecoverReference} />
                     ) : null}
-                    {run?.status === "paused" && run.canCheckStatus && onCheckStatus && !run.ecommerceReferenceReview && !run.ecommerceSceneSelection ? (
+                    {run?.status === "paused" && run.canCheckStatus && onCheckStatus && !run.ecommerceReferenceReview && !run.ecommerceSceneSelection && !resourceRecovery ? (
                         <button type="button" disabled={checking} onClick={() => void checkStatus()} className="mt-3 rounded-lg bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-60">
                             {checking ? "正在检查" : "检查状态"}
+                        </button>
+                    ) : null}
+                    {resourceRecovery?.canResume && onResumeImageProcessing ? (
+                        <button type="button" disabled={checking} onClick={() => void resumeImageProcessing()} className="mt-3 rounded-lg bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-60">
+                            {checking ? "正在继续" : "继续图像处理"}
                         </button>
                     ) : null}
                     {checkError ? (

@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
 import { createHash } from "node:crypto";
-import type { CreativeConversationContext } from "@/lib/creative-runtime-contract";
+import type { CreativeAsset, CreativeConversationContext } from "@/lib/creative-runtime-contract";
 import { AGENT_PLAN_SCHEMA_VERSION } from "./agent-run-audit";
 import type { AgentRun, AgentRunTask } from "./agent-run-store";
 import type { ImageTask } from "./image-task-store";
+import type { PreparedEcommerceReference } from "./ecommerce-reference-preparation";
 import { buildSceneEditProtection, compositeSceneEdit } from "./ecommerce-product-regions";
 import { resolveImageEditProtocol } from "./image-edit-protocol";
 import { canvasPlan, canvasSettings, conversationPlan, creativeImageAsset, disabledSettings, imageTask, plannerFailoverSettings, planningRun, runFixture, runWithTasks, settings } from "./agent-run-executor.test-fixtures";
+
+type UnitPreparedSource = Pick<PreparedEcommerceReference, "contentSha256" | "sourceBytes" | "sourceSize">;
 
 const mocks = vi.hoisted(() => ({
     fetchInternalApi: vi.fn(),
@@ -31,6 +34,10 @@ const mocks = vi.hoisted(() => ({
     updateAgentRunTaskById: vi.fn(),
     scheduleGenerationTask: vi.fn<(type: string, id: string, patch: { executionPhase?: string }) => Promise<void>>(async () => undefined),
     analyzeEcommerceReferences: vi.fn(),
+    prepareEcommerceReferences: vi.fn<typeof import("./ecommerce-reference-preparation").prepareEcommerceReferences>(),
+    prepareEcommerceProtectionTask: vi.fn<typeof import("./ecommerce-protection-preparation").prepareEcommerceProtectionTask>(),
+    protectionRequestContext: undefined as { origin: string; cookie: string } | undefined,
+    preparedSource: undefined as UnitPreparedSource | undefined,
     planEcommerceEdit: vi.fn(),
     selectCurrentSceneBaseline: vi.fn(),
     createEditBranch: vi.fn(),
@@ -62,6 +69,11 @@ vi.mock("@/lib/server/generation-task-scheduler", () => ({ scheduleGenerationTas
 vi.mock("@/lib/server/generation-log-store", () => ({ attachEcommerceTraceToGenerationLogs: mocks.attachEcommerceTraceToGenerationLogs }));
 vi.mock("@/lib/server/image-task-store", () => ({ updateImageTask: mocks.updateImageTask, getImageTask: mocks.getImageTask }));
 vi.mock("@/lib/server/creative-review-service", () => ({ reviewCreativeOutputs: mocks.reviewCreativeOutputs }));
+vi.mock("./ecommerce-reference-preparation", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("./ecommerce-reference-preparation")>()),
+    prepareEcommerceReferences: mocks.prepareEcommerceReferences,
+}));
+vi.mock("./ecommerce-protection-preparation", async (original) => ({ ...(await original<typeof import("./ecommerce-protection-preparation")>()), prepareEcommerceProtectionTask: mocks.prepareEcommerceProtectionTask }));
 vi.mock("./ecommerce-visual-analysis", async (importOriginal) => {
     const actual = await importOriginal<typeof import("./ecommerce-visual-analysis")>();
     return { ...actual, analyzeEcommerceReferences: mocks.analyzeEcommerceReferences };
@@ -79,6 +91,7 @@ vi.mock("@/lib/server/agent-run-store", async (importOriginal) => {
     return {
         ...actual,
         getAgentRun: vi.fn(async () => mocks.run),
+        reconcileAgentRunImageProcessingFacts: vi.fn(async () => mocks.run),
         updateAgentRunById: mocks.updateAgentRunById,
         updateAgentRunTaskById: mocks.updateAgentRunTaskById,
         selectCurrentSceneBaseline: mocks.selectCurrentSceneBaseline,
@@ -87,21 +100,31 @@ vi.mock("@/lib/server/agent-run-store", async (importOriginal) => {
 });
 
 import { executeAgentRun } from "./agent-run-executor";
-import { prepareEcommerceSceneSelectionResume } from "./ecommerce-generation-service";
+import { createEcommerceSceneEditTask, buildLocalEditProductProtection, buildWhiteBackgroundProductProtection, createEcommerceLocalEditTask, createEcommerceProductSceneTask, loadEcommercePlanningImage } from "./ecommerce-generation-service";
+import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
+import { resolveLocalEditTarget } from "./ecommerce-edit-planner";
+import { originalImageSourceUrl } from "@/lib/media-image-url";
 import { executeTasks, processAgentRunReview, taskResultOps } from "./agent-run-execution";
 import { resetTextPlanningRuntime } from "./text-planning-runtime";
 import { publicAgentRun } from "./agent-run-public";
 import { UNKNOWN_SUBMISSION_REVIEW_ERROR } from "./generation-errors";
-import { normalizeEcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
-import { createEcommerceReferenceCheckpoint, referenceSourcesLoaded } from "./ecommerce-reference-recovery";
+import { normalizeEcommerceVisualAnalysis, type EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
+import { createEcommerceReferenceCheckpoint, referenceSourcesLoaded, EcommerceReferenceSourceChangedError } from "./ecommerce-reference-recovery";
 import { buildEcommercePlanningInput } from "./ecommerce-generation-snapshot";
 import { referenceUsesFromEcommerceDecision, resolveEcommerceReferenceDecision } from "./ecommerce-reference-purpose";
 import { recoverEcommerceReferences } from "./ecommerce-reference-recovery-service";
 import { publicAgentRunForRequest } from "./agent-run-public-selection";
 
 async function executeAndReview(...args: Parameters<typeof executeAgentRun>) {
+    mocks.protectionRequestContext = { origin: args[1], cookie: args[2] };
     await executeAgentRun(...args);
     if (mocks.run?.status === "completed" && mocks.run.reviewStatus === "review_pending" && mocks.run.ecommerceSnapshot?.qualityPolicy === "advisory") {
+        if (["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(mocks.run.ecommerceSnapshot.plan?.planVersion || "")) {
+            // These planner/compiler units stop at delivery. Actual owned preparation and QA are covered by the real runtime suites.
+            expect(mocks.run.reviewed).toBe(false);
+            expect(mocks.checkEcommerceResult).not.toHaveBeenCalled();
+            return;
+        }
         await processAgentRunReview(mocks.run, args[1], args[2]);
     }
 }
@@ -109,6 +132,7 @@ async function executeAndReview(...args: Parameters<typeof executeAgentRun>) {
 describe("executeAgentRun backend settings", () => {
     it("keeps completed analysis, route and frozen identities after a temporary original-source 503", async () => {
         const fixture = await frozenReferenceFixture("confirm_purposes");
+        await setPreparedSourceFixture(fixture.source);
         const frozen = fixture.run.ecommerceSnapshot!.referenceCheckpoint!;
         frozen.route = { ...fixture.analysis.modelRole, capability: "text", apiFormat: "gemini" };
         mocks.run = fixture.run;
@@ -135,6 +159,7 @@ describe("executeAgentRun backend settings", () => {
 
     it("recovers the same run from source-read review on matching bytes without clearing or reposting completed analysis", async () => {
         const fixture = await frozenReferenceFixture("confirm_purposes");
+        await setPreparedSourceFixture(fixture.source);
         const checkpoint = fixture.run.ecommerceSnapshot!.referenceCheckpoint!;
         const route = { ...fixture.analysis.modelRole, capability: "text" as const, apiFormat: "gemini" as const };
         mocks.run = {
@@ -179,6 +204,7 @@ describe("executeAgentRun backend settings", () => {
     });
 
     it("persists the complete frozen reference input and stage identity before entering the analyzer", async () => {
+        await createPreparedImageFixture();
         const product = { ...creativeImageAsset("asset-product", "product.png", "upload"), type: "image" as const, status: "ready" as const, serverUrl: "/api/reference-assets/product.png" };
         mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "修改图片1", referencedAssetIds: [product.id], generationPreferences: { mode: "image" } });
         mocks.getCreativeAssetsByIds.mockResolvedValue([product]);
@@ -220,6 +246,7 @@ describe("executeAgentRun backend settings", () => {
         const source = await sharp({ create: { width: 64, height: 48, channels: 3, background: "white" } })
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(source);
         const checkpoint = referenceSourcesLoaded(createEcommerceReferenceCheckpoint(run, planningInput, [product]), [{ assetId: product.id, contentSha256: createHash("sha256").update(source).digest("hex"), sourceSize: { width: 64, height: 48 } }]);
         checkpoint.state = action === "confirm_purposes" ? "consumed" : "resolved";
         checkpoint.analysis = analysis;
@@ -262,6 +289,7 @@ describe("executeAgentRun backend settings", () => {
 
     it("persists the actionable needs-review state after a purpose ambiguity pause", async () => {
         const fixture = await frozenReferenceFixture("confirm_purposes");
+        await setPreparedSourceFixture(fixture.source);
         const auxiliary = { ...fixture.product, id: "lighting-detail", title: "lighting detail", serverUrl: "/api/reference-assets/lighting-detail.png" };
         mocks.run = { ...fixture.run, ecommerceSnapshot: undefined, prompt: "图片1和图片2", referencedAssetIds: [fixture.product.id, auxiliary.id] };
         const first = fixture.analysis.references[0];
@@ -296,6 +324,7 @@ describe("executeAgentRun backend settings", () => {
 
     it.each(["confirm_purposes", "retry_analysis"] as const)("rejects original-byte replacement after the %s recovery commit without another planning or image POST", async (action) => {
         const fixture = await frozenReferenceFixture(action);
+        await setPreparedSourceFixture(fixture.source);
         mocks.run = fixture.run;
         const frozen = structuredClone(fixture.run.ecommerceSnapshot!.referenceCheckpoint!);
         const replacement = await sharp({ create: { width: 64, height: 48, channels: 3, background: "blue" } })
@@ -352,6 +381,7 @@ describe("executeAgentRun backend settings", () => {
         const source = await sharp({ create: { width: 64, height: 48, channels: 3, background: "white" } })
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(source);
         mocks.fetchInternalApi.mockImplementation(async () => new Response(source, { headers: { "content-type": "image/png" } }));
         await executeAndReview(mocks.run, "http://localhost", "session=test");
         expect(mocks.analyzeEcommerceReferences).toHaveBeenCalledOnce();
@@ -389,7 +419,8 @@ describe("executeAgentRun backend settings", () => {
         const source = await sharp({ create: { width: 6, height: 4, channels: 3, background: "blue" } })
             .png()
             .toBuffer();
-        const scene = { ...creativeImageAsset("asset-scene", "scene.png", ""), sourceRunId: "upload", serverUrl: "/api/reference-assets/scene.png" };
+        await setPreparedSourceFixture(source);
+        const scene: CreativeAsset = { ...creativeImageAsset("asset-scene", "scene.png", ""), type: "image", status: "ready", sourceRunId: "upload", serverUrl: "/api/reference-assets/scene.png" };
         const plan = {
             ...ecommerceScenePlan(),
             planVersion: "ecommerce-edit.v3" as const,
@@ -434,7 +465,17 @@ describe("executeAgentRun backend settings", () => {
         await executeAndReview(mocks.run, "http://localhost", "session=test");
         expect(mocks.run!.status).toBe("paused");
         expect(mocks.run!.ecommerceSnapshot).toEqual(snapshot);
-        const tasks = await prepareEcommerceSceneSelectionResume(mocks.run!, { baselineAssetId: scene.id, region: { x: 2, y: 1, width: 2, height: 2 } }, "http://localhost", "session=test", "user");
+        // Controlled post-confirmation fixture for downstream executor behavior;
+        // this Web-built mask does not qualify receipt confirmation or native protection.
+        const saved = mocks.run!;
+        const savedPlan = saved.ecommerceSnapshot?.plan;
+        const savedTask = saved.tasks[0];
+        const execution = savedTask.ecommerceExecution;
+        if (!savedPlan || !execution) throw new Error("scene execution fixture missing");
+        const protection = await buildSceneEditProtection(source, scene.id, { x: 2, y: 1, width: 2, height: 2 }, savedPlan.delta.requestedChanges, "user_selection");
+        protection.confirmation = { actorUserId: "user", confirmedAt: Date.now() };
+        const executable = createEcommerceSceneEditTask(saved, savedPlan, [scene], execution, protection);
+        const tasks = [{ ...executable, id: savedTask.id, count: savedTask.count, attempts: savedTask.attempts }];
         mocks.run = { ...mocks.run!, status: "running", tasks };
         await executeAndReview(mocks.run, "http://localhost", "session=test");
         const submitted = mocks.fetchInternalApi.mock.calls.filter(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"));
@@ -482,6 +523,7 @@ describe("executeAgentRun backend settings", () => {
         const sceneBytes = await sharp({ create: { width: 100, height: 80, channels: 3, background: "#ddd" } })
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(sceneBytes);
         const root = { ...creativeImageAsset("scene-root", "root.png", ""), sourceRunId: "upload", serverUrl: "/api/reference-assets/root.png" };
         const history = {
             ...creativeImageAsset("asset-scene", "scene.png", ""),
@@ -502,131 +544,45 @@ describe("executeAgentRun backend settings", () => {
         mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
             if (url.endsWith("/api/reference-assets/scene.png")) return new Response(sceneBytes, { headers: { "content-type": "image/png" } });
             if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-scene-continuation" } });
-            if (url.endsWith("/api/image-tasks/child-scene-continuation")) return Response.json({ task: { status: "success", result: { url: "/api/generation-log-assets/result.png" } } });
+            if (url.endsWith("/api/image-tasks/child-scene-continuation")) return Response.json({ task: { status: "running", needsReview: true, reviewReason: "请求路由单元在原子任务边界停止" } });
             return Response.json({ output: [{ type: "function_call", name: "create_agent_plan", arguments: JSON.stringify(conversationPlan("image-model", "好的")) }] });
         });
         await executeAndReview(mocks.run, "http://localhost", "session=test");
-        expect(mocks.run).toMatchObject({ status: "completed", ecommerceSnapshot: { continuity: { sceneRootAssetId: root.id, parentResultId: history.id }, plan: { operation: "scene_edit" }, qualityCheck: { status: "passed" } } });
+
+        expect(mocks.run).toMatchObject({ ecommerceSnapshot: { continuity: { sceneRootAssetId: root.id, parentResultId: history.id }, plan: { operation: "scene_edit", source: { productAnchorId: null } } } });
+        const createCall = mocks.fetchInternalApi.mock.calls.find(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"));
+        expect(JSON.parse(String(createCall?.[1]?.body))).toMatchObject({ references: [{ id: history.id, ecommerceRole: "scene" }] });
         expect(mocks.analyzeEcommerceReferences).toHaveBeenCalledOnce();
         expect(mocks.fetchInternalApi.mock.calls.filter(([url]) => String(url).includes("/api/ai/system/"))).toHaveLength(0);
-    });
-    it.each([
-        { label: "valid v4 independent observations", validQualityResponse: true },
-        { label: "invalid legacy QA response", validQualityResponse: false },
-    ])("blocks a native canvas mismatch before optional visual QA ($label)", async ({ validQualityResponse }) => {
-        const diagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
-        const observation = { readable: true, logo: "absent", packagingText: "absent", visibleStructure: [{ objectId: "fixture-furniture", feature: "drawers", count: 0, certainty: "confirmed", evidenceRegion: { x: 0, y: 0, width: 384, height: 216 } }] };
-        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
-        const original = await sharp({ create: { width: 384, height: 216, channels: 3, background: "#aaa" } })
-            .png()
-            .toBuffer();
-        const square = await sharp({ create: { width: 288, height: 288, channels: 3, background: "#bbb" } })
-            .png()
-            .toBuffer();
-        mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "冬日阳光，保持原尺寸", referencedAssetIds: ["asset-scene"], generationPreferences: { mode: "image", image: { size: "3:2" } } });
-        mocks.getCreativeAssetsByIds.mockResolvedValue([{ ...creativeImageAsset("asset-scene", "scene.png", ""), serverUrl: "/api/reference-assets/scene.png", sourceRunId: "upload" }]);
-        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
-        mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceSceneAnalysis());
-        mocks.planEcommerceEdit.mockResolvedValue({
-            plan: { ...ecommerceScenePlan(), protection: { scope: "global", protectedObjectIds: ["fixture-furniture"], preserveOutsideMask: false, allowLightingChange: true } },
-            modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
-        });
-        const media = [1, 2].map((index) => ({
-            dataUrl: `/api/generation-log-assets/stored-${index}.png`,
-            serverUrl: `/api/generation-log-assets/stored-${index}.png`,
-            remoteUrl: "https://provider.fixture/shared-result.png",
-            width: 999,
-            height: 999,
-            canvasEvidence: {
-                constraint: { mode: "exact" as const, size: { width: 384, height: 216 }, source: "user_text" as const, allowReframe: false },
-                requestedSize: { width: 384, height: 216 },
-                nativeSize: { width: 384, height: 216 },
-                storedSize: { width: 384, height: 216 },
-                nativeUrl: `/api/generation-log-assets/native-${index}.png`,
-                normalization: "none" as const,
-            },
-        }));
-        mocks.getImageTask.mockResolvedValue({ id: "child-canvas", userId: "user", result: { ...media[0], results: media } } as ImageTask);
-        const quality = await vi.importActual<typeof import("./ecommerce-quality-check")>("./ecommerce-quality-check");
-        mocks.checkEcommerceResult.mockImplementation(quality.checkEcommerceResultWithFallback);
-        mocks.checkEcommerceTechnicalResult.mockImplementation(quality.checkEcommerceTechnicalResult);
-        mocks.fetchSafeOutbound.mockRejectedValue(new Error("fixture forbids remote media reads"));
-        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
-            if (url.endsWith("/api/reference-assets/scene.png") || /\/stored-[12]\.png$/.test(url) || url.endsWith("/native-2.png")) return new Response(original, { headers: { "content-type": "image/png" } });
-            if (url.endsWith("/native-1.png")) return new Response(square, { headers: { "content-type": "image/png" } });
-            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-canvas" } });
-            if (url.endsWith("/api/image-tasks/child-canvas"))
-                return Response.json({
-                    task: {
-                        status: "success",
-                        result: {
-                            ...media[0],
-                            results: media.map(({ canvasEvidence, ...publicMedia }) => {
-                                void canvasEvidence;
-                                return publicMedia;
-                            }),
-                        },
-                    },
-                });
-            if (url.includes("/api/ai/system/"))
-                return Response.json({
-                    output: [
-                        {
-                            type: "function_call",
-                            name: "check_ecommerce_results",
-                            arguments: JSON.stringify({
-                                ...(validQualityResponse ? { baselineObservation: observation } : {}),
-                                results: [1, 2].map((index) => ({
-                                    resultId: `child-canvas:${index}`,
-                                    ...(validQualityResponse ? { observation } : {}),
-                                    checks: (validQualityResponse ? quality.ECOMMERCE_QUALITY_CHECK_KEYS : quality.ECOMMERCE_QUALITY_CHECK_KEYS.slice(0, 8)).map((key) => ({ key, status: "passed", reason: "fixture visual checks passed" })),
-                                })),
-                            }),
-                        },
-                    ],
-                });
-            throw new Error("unexpected fixture request: " + url);
-        });
-        await executeAndReview(mocks.run, "http://localhost", "session=test");
-        expect(mocks.run?.status).toBe("paused");
-        expect(mocks.registerCreativeAssets).not.toHaveBeenCalled();
-        expect(mocks.run?.ecommerceSnapshot?.technicalCheck).toMatchObject({
-            status: "blocked",
-            hardFailures: [{ resultId: "child-canvas:1", key: "canvas_geometry" }],
-            canvasEvidence: [
-                { resultId: "child-canvas:1", nativeSize: { width: 288, height: 288 }, storedSize: { width: 384, height: 216 }, nativeMatches: false, storedMatches: true },
-                { resultId: "child-canvas:2", nativeMatches: true, storedMatches: true },
-            ],
-        });
-        expect(mocks.fetchSafeOutbound).not.toHaveBeenCalled();
-        expect(mocks.fetchInternalApi.mock.calls.filter(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"))).toHaveLength(1);
+        expect(mocks.checkEcommerceTechnicalResult).not.toHaveBeenCalled();
         expect(mocks.checkEcommerceResult).not.toHaveBeenCalled();
-        expect(mocks.run?.ecommerceSnapshot?.qualityCheck).toBeUndefined();
-        expect(diagnostic).not.toHaveBeenCalled();
-        diagnostic.mockRestore();
     });
-    it.each([true, false])("resolves preserve-original from actual baseline bytes or pauses before submission (decode=%s)", async (decode) => {
+    it.each([true, false])("uses original prepared dimensions or pauses when the prepared identity changed (available=%s)", async (available) => {
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
         const sceneBytes = await sharp({ create: { width: 384, height: 216, channels: 3, background: "#aaa" } })
             .png()
             .toBuffer();
+        if (available) await setPreparedSourceFixture(sceneBytes);
+        else mocks.prepareEcommerceReferences.mockRejectedValueOnce(new EcommerceReferenceSourceChangedError());
         mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "改成冬日阳光，保持原尺寸", referencedAssetIds: ["asset-scene"], generationPreferences: { mode: "image", image: { size: "3000x2000" } } });
         mocks.getCreativeAssetsByIds.mockResolvedValue([{ ...creativeImageAsset("asset-scene", "scene.png", ""), serverUrl: "/api/reference-assets/scene.png", width: 900, height: 900, sourceRunId: "upload" }]);
         mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
         mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceSceneAnalysis());
         mocks.planEcommerceEdit.mockResolvedValue({ plan: ecommerceScenePlan(), modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" } });
         mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
-            if (url.endsWith("/api/reference-assets/scene.png")) return new Response(decode ? sceneBytes : Buffer.from("invalid"), { headers: { "content-type": "image/png" } });
+            if (url.endsWith("/api/reference-assets/scene.png")) return new Response(sceneBytes, { headers: { "content-type": "image/png" } });
             if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-preserve" } });
             if (url.endsWith("/api/image-tasks/child-preserve")) return Response.json({ task: { status: "success", result: { url: "/api/generation-log-assets/stored.png" } } });
             throw new Error("unexpected request: " + url);
         });
         await executeAndReview(mocks.run, "http://localhost", "session=test");
         const submitted = mocks.fetchInternalApi.mock.calls.find(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"));
-        if (!decode) {
+        if (!available) {
             expect(submitted).toBeUndefined();
             expect(mocks.run?.status).toBe("paused");
-            expect(mocks.run?.tasks[0].error).toContain("尺寸");
+            expect(mocks.run?.ecommerceSnapshot?.fallback?.reason).toBe("reference_source_changed");
+            expect(mocks.analyzeEcommerceReferences).not.toHaveBeenCalled();
+            expect(mocks.planEcommerceEdit).not.toHaveBeenCalled();
         } else {
             expect(submitted).toBeDefined();
             const body = JSON.parse(String(submitted?.[1]?.body));
@@ -644,6 +600,26 @@ describe("executeAgentRun backend settings", () => {
         mocks.getCreativeAssetsByIds.mockResolvedValue([]);
         mocks.listRecentCreativeMediaAssets.mockResolvedValue([]);
         mocks.analyzeEcommerceReferences.mockReset();
+        mocks.preparedSource = undefined;
+        mocks.prepareEcommerceReferences.mockReset().mockImplementation(async (run) => {
+            const source = mocks.preparedSource;
+            const checkpoint = run.ecommerceSnapshot?.referenceCheckpoint;
+            if (!source || !checkpoint) throw new Error("Configure the executor unit's prepared source fixture");
+            return checkpoint.assets.map(({ asset }): PreparedEcommerceReference => {
+                const sourceUrl = asset.serverUrl || asset.remoteUrl;
+                if (!sourceUrl) throw new Error("The executor unit reference needs its original URL");
+                return {
+                    assetId: asset.id,
+                    ...source,
+                    sourceUrl,
+                    // This suite mocks the analyzer; this descriptor is never registered or loaded.
+                    analysis: { kind: "analysis", storageKey: "unit-analysis/" + asset.id, sha256: source.contentSha256, bytes: source.sourceBytes, mimeType: "image/png", ...source.sourceSize },
+                };
+            });
+        });
+
+        mocks.protectionRequestContext = undefined;
+        mocks.prepareEcommerceProtectionTask.mockReset().mockImplementation(prepareUnitProtectionTask);
         mocks.planEcommerceEdit.mockReset();
         mocks.selectCurrentSceneBaseline.mockReset().mockResolvedValue(null);
         mocks.createEditBranch.mockReset().mockImplementation(async (parentResultId: string, run: AgentRun) => ({ parentResultId, branchId: `ecommerce-${run.id}` }));
@@ -743,6 +719,7 @@ describe("executeAgentRun backend settings", () => {
     });
 
     it("pauses for review when every visual-analysis candidate fails", async () => {
+        await createPreparedImageFixture();
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
         mocks.run = runFixture({
             surface: "chat",
@@ -779,6 +756,7 @@ describe("executeAgentRun backend settings", () => {
         const source = await sharp({ create: { width: 64, height: 48, channels: 4, background: "white" } })
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(source);
         const product = { ...creativeImageAsset("asset-product", "product.png", "upload"), serverUrl: "/api/reference-assets/product.png", width: 64, height: 48 };
         mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "修改图片1", referencedAssetIds: [product.id], generationPreferences: { mode: "image" } });
         mocks.getCreativeAssetsByIds.mockResolvedValue([product]);
@@ -810,12 +788,13 @@ describe("executeAgentRun backend settings", () => {
         expect(mocks.fetchInternalApi.mock.calls.some(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"))).toBe(false);
     });
 
-    it.each(["off", "internal", "enabled"])("executes the administrator-enabled product-to-scene slice when rollout is %s", async (rollout) => {
+    it.each(["off", "internal", "enabled"])("routes the administrator-enabled product slice to protection preparation when rollout is %s", async (rollout) => {
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", rollout);
         const source = await sharp({ create: { width: 64, height: 48, channels: 4, background: "#ffffff" } })
             .composite([{ input: { create: { width: 20, height: 28, channels: 4, background: "#252525" } }, left: 22, top: 10 }])
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(source);
         mocks.run = runFixture({
             surface: "chat",
             projectId: undefined,
@@ -838,90 +817,35 @@ describe("executeAgentRun backend settings", () => {
             plan: ecommercePlan(),
             modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
         });
-        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
+        mocks.prepareEcommerceProtectionTask.mockResolvedValue(undefined);
+        mocks.fetchInternalApi.mockImplementation(async (url: string) => {
             if (url.endsWith("/api/reference-assets/product.png")) return new Response(source, { headers: { "content-type": "image/png" } });
-            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-ecommerce" } });
-            if (url.endsWith("/api/image-tasks/child-ecommerce")) {
-                return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/ecommerce.png" } } });
-            }
-            throw new Error("unexpected request: " + url);
+            throw new Error("unexpected request before protection completion: " + url);
         });
 
         await executeAndReview(mocks.run, "http://localhost", "session=test");
 
         expect(mocks.analyzeEcommerceReferences).toHaveBeenCalledOnce();
         expect(mocks.planEcommerceEdit).toHaveBeenCalledOnce();
-        const createCall = mocks.fetchInternalApi.mock.calls.find(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"));
-        const body = JSON.parse(String(createCall?.[1]?.body)) as {
-            references: Array<Record<string, unknown>>;
-            productProtectionRegions: Record<string, unknown>;
-            ecommerceExecution: Record<string, unknown>;
-        };
-        expect(body.references).toEqual([expect.objectContaining({ id: "asset-product", url: "/api/reference-assets/product.png", width: 64, height: 48 })]);
-        expect(body.productProtectionRegions).toMatchObject({
-            productAnchorId: "asset-product",
-            sourceSize: { width: 64, height: 48 },
-            editableBackground: { mask: { trust: "trusted", provider: "white-background-flood-fill.v1" } },
-        });
-        expect(body.ecommerceExecution).toMatchObject({
-            state: "ready",
-            compilerVersion: "ecommerce-openai-image-2.5.v1",
-            providerProfileId: "gpt-image-2.5-flare",
-            modelSnapshot: {
-                logicalRole: "image_generation",
-                logicalModelId: "image-model",
-                channelId: "image-channel",
-                upstreamModel: "gpt-image-2.5-flare",
-            },
-        });
-        expect(mocks.run).toMatchObject({
-            status: "completed",
-            ecommerceSnapshot: {
-                mode: "active",
-                plan: { operation: "product_to_scene", strategy: "strict_product" },
-                compilerVersion: "ecommerce-openai-image-2.5.v1",
-                modelRouteSnapshots: {
-                    vision_analysis: expect.objectContaining({ logicalRole: "vision_analysis", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" }),
-                    edit_planning: expect.objectContaining({ logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" }),
-                    image_generation: expect.objectContaining({ channelId: "image-channel", upstreamModel: "gpt-image-2.5-flare" }),
-                    quality_check: expect.objectContaining({ logicalRole: "quality_check", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" }),
-                },
-                qualityCheck: expect.objectContaining({ status: "passed", publicStatus: "passed" }),
-            },
-        });
-        expect(mocks.checkEcommerceResult).toHaveBeenCalledOnce();
-        expect(mocks.checkEcommerceResult.mock.calls[0]?.[1]).toEqual([
-            expect.objectContaining({ logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" }),
+        expect(mocks.prepareEcommerceProtectionTask).toHaveBeenCalledWith(
             expect.objectContaining({
-                logicalModelId: "quality-fallback",
-                channelId: "quality-fallback-channel",
-                upstreamModel: "gpt-5.6-sol",
+                ecommerceSnapshot: expect.objectContaining({
+                    mode: "active",
+                    plan: expect.objectContaining({ operation: "product_to_scene", strategy: "strict_product", source: { productAnchorId: "asset-product", currentSceneBaselineId: null, sceneReferenceIds: [] } }),
+                    compilerVersion: "ecommerce-openai-image-2.5.v1",
+                    modelRouteSnapshots: expect.objectContaining({
+                        vision_analysis: expect.objectContaining({ logicalRole: "vision_analysis", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" }),
+                        edit_planning: expect.objectContaining({ logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" }),
+                        image_generation: expect.objectContaining({ channelId: "image-channel", upstreamModel: "gpt-image-2.5-flare" }),
+                        quality_check: expect.objectContaining({ logicalRole: "quality_check", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" }),
+                    }),
+                }),
             }),
-        ]);
-        expect(mocks.attachEcommerceTraceToGenerationLogs).toHaveBeenCalledWith(
-            ["child-ecommerce"],
-            expect.objectContaining({
-                version: "ecommerce-generation-trace.v1",
-                runId: mocks.run?.id,
-                finalStatus: "completed",
-                stages: expect.arrayContaining([
-                    expect.objectContaining({ key: "visual_analysis", status: "completed" }),
-                    expect.objectContaining({ key: "edit_planning", status: "completed" }),
-                    expect.objectContaining({ key: "image_generation", status: "completed" }),
-                    expect.objectContaining({ key: "quality_check", status: "passed" }),
-                ]),
-            }),
+            expect.any(String),
+            expect.objectContaining({ references: [expect.objectContaining({ assetId: "asset-product", role: "product" })] }),
         );
-        expect(mocks.updateImageTask).toHaveBeenCalledWith("child-ecommerce", expect.objectContaining({ ecommerceTrace: expect.objectContaining({ finalStatus: "completed" }) }));
-        expect(mocks.updateImageTask.mock.invocationCallOrder[0]).toBeLessThan(mocks.attachEcommerceTraceToGenerationLogs.mock.invocationCallOrder[0]);
-        expect(mocks.registerCreativeAssets.mock.invocationCallOrder[0]).toBeLessThan(mocks.checkEcommerceResult.mock.invocationCallOrder[0]);
-        expect(mocks.events.filter((event) => event.type === "ecommerce.progress").map((event) => event.data)).toEqual([
-            { stage: "identifying_product", text: "正在识别商品" },
-            { stage: "planning_scene", text: "正在规划场景" },
-            { stage: "generating_image", text: "正在生成图片" },
-            { stage: "checking_result", text: "正在检查商品细节" },
-        ]);
-        expect(JSON.stringify(mocks.events)).not.toContain("vision-role-private");
+        expect(mocks.fetchInternalApi.mock.calls.filter(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"))).toHaveLength(0);
+        expect(mocks.checkEcommerceResult).not.toHaveBeenCalled();
     });
 
     it("routes one uploaded scene through scene editing when an image model is selected without an explicit mode", async () => {
@@ -929,6 +853,7 @@ describe("executeAgentRun backend settings", () => {
         const sceneBytes = await sharp({ create: { width: 1200, height: 900, channels: 3, background: "#aaa" } })
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(sceneBytes);
         mocks.run = runFixture({
             surface: "chat",
             projectId: undefined,
@@ -951,19 +876,10 @@ describe("executeAgentRun backend settings", () => {
             plan: ecommerceScenePlan(),
             modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
         });
-        const protection = await buildSceneEditProtection(sceneBytes, "asset-scene", { x: 0, y: 0, width: 10, height: 10 }, ["fixture-edit"], "user_selection");
-        const composite = await compositeSceneEdit(sceneBytes, sceneBytes, protection);
-        mocks.getImageTask.mockResolvedValue({
-            id: "child-scene-edit",
-            userId: "user",
-            result: { dataUrl: "https://cdn.example.com/scene-edited.png", serverUrl: "https://cdn.example.com/scene-edited.png", sceneProtectionEvidence: composite.evidence },
-        } as ImageTask);
         mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
             if (url.endsWith("/api/reference-assets/scene.png")) return new Response(sceneBytes, { headers: { "content-type": "image/png" } });
             if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-scene-edit" } });
-            if (url.endsWith("/api/image-tasks/child-scene-edit")) {
-                return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/scene-edited.png" } } });
-            }
+            if (url.endsWith("/api/image-tasks/child-scene-edit")) return Response.json({ task: { status: "running", needsReview: true, reviewReason: "请求路由单元在原子任务边界停止" } });
             throw new Error("unexpected request: " + url);
         });
 
@@ -975,20 +891,9 @@ describe("executeAgentRun backend settings", () => {
         const body = JSON.parse(String(createCall?.[1]?.body)) as Record<string, unknown>;
         expect(body.references).toEqual([expect.objectContaining({ id: "asset-scene", ecommerceRole: "scene" })]);
         expect(body).not.toHaveProperty("productProtectionRegions");
-        expect(mocks.checkEcommerceResult).toHaveBeenCalledWith(
-            expect.objectContaining({
-                plan: expect.objectContaining({ operation: "scene_edit" }),
-                baselineReference: expect.objectContaining({ assetId: "asset-scene", role: "scene" }),
-                resultImages: [expect.objectContaining({ resultId: "child-scene-edit:1", sceneProtectionEvidence: composite.evidence })],
-            }),
-            expect.any(Array),
-            expect.objectContaining({ status: "passed" }),
-        );
-        expect(mocks.run).toMatchObject({
-            status: "completed",
-            ecommerceSnapshot: { plan: { operation: "scene_edit", source: { productAnchorId: null, currentSceneBaselineId: "asset-scene" } } },
-        });
-        expect(mocks.events.filter((event) => event.type === "ecommerce.progress")).toHaveLength(4);
+        expect(mocks.run).toMatchObject({ ecommerceSnapshot: { plan: { operation: "scene_edit", source: { productAnchorId: null, currentSceneBaselineId: "asset-scene" } } } });
+        expect(mocks.checkEcommerceTechnicalResult).not.toHaveBeenCalled();
+        expect(mocks.checkEcommerceResult).not.toHaveBeenCalled();
     });
 
     it("generates with visual quality off even if no quality route is available", async () => {
@@ -997,6 +902,7 @@ describe("executeAgentRun backend settings", () => {
             .composite([{ input: { create: { width: 20, height: 28, channels: 4, background: "#252525" } }, left: 22, top: 10 }])
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(source);
         mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "生成简约家具图", referencedAssetIds: [product.id], generationPreferences: { mode: "image" } });
         mocks.getCreativeAssetsByIds.mockResolvedValue([product]);
         const configured = { ...(ecommerceSettings() as Record<string, unknown>), ecommerceVisualQualityCheckEnabled: false, ecommerceModelRoles: { quality_check: ["unavailable-quality-model"] } };
@@ -1019,61 +925,12 @@ describe("executeAgentRun backend settings", () => {
         expect(mocks.checkEcommerceResult).not.toHaveBeenCalled();
     });
 
-    it("keeps a visually flagged ecommerce result delivered with optional advice", async () => {
-        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
-        const source = await sharp({ create: { width: 64, height: 48, channels: 4, background: "#ffffff" } })
-            .composite([{ input: { create: { width: 20, height: 28, channels: 4, background: "#252525" } }, left: 22, top: 10 }])
-            .png()
-            .toBuffer();
-        mocks.run = runFixture({
-            surface: "chat",
-            projectId: undefined,
-            prompt: "生成简约家具图",
-            referencedAssetIds: ["asset-product"],
-            generationPreferences: { mode: "image", image: { size: "4:3", quality: "high", count: 1 } },
-        });
-        mocks.getCreativeAssetsByIds.mockResolvedValue([
-            {
-                ...creativeImageAsset("asset-product", "product.png", ""),
-                remoteUrl: undefined,
-                serverUrl: "/api/reference-assets/product.png",
-                width: 64,
-                height: 48,
-            },
-        ]);
-        mocks.getAuthSettings.mockResolvedValue(ecommerceSettings());
-        mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceAnalysis("product"));
-        mocks.planEcommerceEdit.mockResolvedValue({
-            plan: ecommercePlan(),
-            modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
-        });
-        mocks.checkEcommerceResult.mockResolvedValue(blockedQualityCheck());
-        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
-            if (url.endsWith("/api/reference-assets/product.png")) return new Response(source, { headers: { "content-type": "image/png" } });
-            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-blocked" } });
-            if (url.endsWith("/api/image-tasks/child-blocked")) return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/blocked.png" } } });
-            throw new Error("unexpected request: " + url);
-        });
-
-        await executeAndReview(mocks.run, "http://localhost", "session=test");
-
-        expect(mocks.checkEcommerceResult).toHaveBeenCalledOnce();
-        expect(mocks.registerCreativeAssets).toHaveBeenCalledOnce();
-        expect(mocks.run).toMatchObject({
-            status: "completed",
-            assetIds: ["asset-0"],
-            tasks: [{ status: "completed", result: { url: "https://cdn.example.com/blocked.png" }, assetIds: ["asset-0"] }],
-            ecommerceSnapshot: { qualityPolicy: "advisory", technicalCheck: { status: "passed" }, qualityCheck: { status: "blocked", publicStatus: "needs_review" } },
-        });
-        expect(mocks.events).toContainEqual({ type: "ecommerce.quality", data: { status: "needs_adjustment", text: expect.any(String) } });
-        expect(JSON.stringify(mocks.events)).not.toContain("product silhouette changed");
-    });
-
-    it("edits one explicitly referenced history result using the recovered product anchor", async () => {
+    it("routes selected product-scene history to local protection preparation", async () => {
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
         const sceneBytes = await sharp({ create: { width: 100, height: 80, channels: 4, background: "#d8d8d8" } })
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(sceneBytes);
         const product = { ...creativeImageAsset("product-anchor", "product.png", ""), serverUrl: "/api/reference-assets/product.png", width: 100, height: 80 };
         const history = {
             ...creativeImageAsset("scene-result", "scene.png", ""),
@@ -1082,6 +939,7 @@ describe("executeAgentRun backend settings", () => {
             height: 80,
             sourceRunId: "run-product-scene",
             parentAssetId: "product-anchor",
+            metadata: { ecommerceContinuity: { productAnchorId: product.id, parentResultId: null, branchId: "prior-product-branch" } },
         };
         mocks.selectCurrentSceneBaseline.mockResolvedValue(history);
         mocks.run = runFixture({
@@ -1102,25 +960,28 @@ describe("executeAgentRun backend settings", () => {
             plan: ecommerceLocalPlan(["background-main"]),
             modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
         });
-        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
+        mocks.prepareEcommerceProtectionTask.mockResolvedValue(undefined);
+        mocks.fetchInternalApi.mockImplementation(async (url: string) => {
             if (url.endsWith("/api/reference-assets/scene.png")) return new Response(sceneBytes, { headers: { "content-type": "image/png" } });
-            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-local-edit" } });
-            if (url.endsWith("/api/image-tasks/child-local-edit")) return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/local-edit.png" } } });
-            throw new Error("unexpected request: " + url);
+            throw new Error("unexpected request before protection completion: " + url);
         });
 
         await executeAndReview(mocks.run, "http://localhost", "session=test");
 
-        const createCall = mocks.fetchInternalApi.mock.calls.find(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"));
-        const body = JSON.parse(String(createCall?.[1]?.body)) as { references: Array<Record<string, unknown>>; productProtectionRegions: Record<string, unknown> };
-        expect(body.references).toEqual([expect.objectContaining({ id: "scene-result", ecommerceRole: "scene" }), expect.objectContaining({ id: "product-anchor", ecommerceRole: "product" })]);
-        expect(body.productProtectionRegions).toMatchObject({ productAnchorId: "product-anchor", sourceAssetId: "scene-result" });
-        expect(mocks.checkEcommerceResult).toHaveBeenCalledWith(
-            expect.objectContaining({ baselineReference: { assetId: history.id, url: history.serverUrl, role: "scene" }, productAnchorReference: { assetId: product.id, url: product.serverUrl } }),
-            expect.any(Array),
-            expect.objectContaining({ status: "passed" }),
+        expect(mocks.selectCurrentSceneBaseline).toHaveBeenCalledWith(mocks.run!.conversationId, history.id, mocks.run!.userId);
+        expect(mocks.getCreativeAssetsByIds).toHaveBeenCalledWith([product.id], mocks.run!.userId);
+        expect(mocks.prepareEcommerceProtectionTask).toHaveBeenCalledWith(
+            expect.objectContaining({
+                ecommerceSnapshot: expect.objectContaining({
+                    plan: expect.objectContaining({ operation: "local_edit", source: { productAnchorId: product.id, currentSceneBaselineId: history.id, sceneReferenceIds: [] } }),
+                    referenceCheckpoint: expect.objectContaining({ assets: [expect.objectContaining({ asset: expect.objectContaining({ id: history.id }) }), expect.objectContaining({ asset: expect.objectContaining({ id: product.id }) })] }),
+                }),
+            }),
+            expect.any(String),
+            expect.objectContaining({ references: [expect.objectContaining({ assetId: history.id, role: "scene" }), expect.objectContaining({ assetId: product.id, role: "product" })] }),
         );
-        expect(mocks.run).toMatchObject({ status: "completed", ecommerceSnapshot: { plan: { operation: "local_edit", source: { currentSceneBaselineId: "scene-result" } } } });
+        expect(mocks.fetchInternalApi.mock.calls.filter(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks"))).toHaveLength(0);
+        expect(mocks.checkEcommerceResult).not.toHaveBeenCalled();
     });
 
     it.each(["legacy", "v4", "v4_style", "v4_room", "v4_lighting_low_style", "v4_lighting_high_style"])("continues the latest completed scene through the real normalizer and compiler (%s)", async (mode) => {
@@ -1128,6 +989,7 @@ describe("executeAgentRun backend settings", () => {
         const sceneBytes = await sharp({ create: { width: 100, height: 80, channels: 4, background: "#d8d8d8" } })
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(sceneBytes);
         const product = { ...creativeImageAsset("product-anchor", "product.png", ""), serverUrl: "/api/reference-assets/product.png", width: 100, height: 80 };
         const history = {
             ...creativeImageAsset("scene-result", "scene.png", ""),
@@ -1247,16 +1109,10 @@ describe("executeAgentRun backend settings", () => {
                 expect(mocks.run?.ecommerceSnapshot?.referenceDecision).toMatchObject({ bindings: [{ assetId: style.id, purposes: ["lighting"], source: "inferred" }], appliedCues: [{ assetId: style.id, purpose: "lighting", cueIds: ["light"] }] });
                 expect(mocks.run?.ecommerceSnapshot?.plan?.referenceUses?.at(-1)).toMatchObject({ assetId: style.id, purposes: ["lighting"], usedCueIds: ["light"] });
             }
-            expect(mocks.checkEcommerceResult).toHaveBeenCalledWith(
-                expect.objectContaining({
-                    plan: expect.objectContaining({ planVersion: "ecommerce-edit.v6" }),
-                    analysisVisibleStructure: [],
-                    baselineReference: { assetId: history.id, url: history.serverUrl, role: "scene" },
-                    productAnchorReference: { assetId: product.id, url: product.serverUrl },
-                }),
-                expect.anything(),
-                expect.objectContaining({ status: "passed" }),
-            );
+            expect(mocks.run).toMatchObject({ status: "completed", reviewed: false, reviewStatus: "review_pending", ecommerceSnapshot: { plan: { planVersion: "ecommerce-edit.v6" }, technicalCheck: { status: "passed" } } });
+            expect(mocks.run?.tasks[0].references).toEqual(expect.arrayContaining([expect.objectContaining({ assetId: history.id, url: history.serverUrl }), expect.objectContaining({ assetId: product.id, url: product.serverUrl })]));
+            expect(mocks.run?.ecommerceSnapshot?.visualAnalysis?.references.find((reference) => reference.assetId === history.id)?.visibleStructure).toStrictEqual([]);
+            expect(mocks.checkEcommerceResult).not.toHaveBeenCalled();
         }
     });
 
@@ -1284,6 +1140,7 @@ describe("executeAgentRun backend settings", () => {
             .composite([{ input: { create: { width: 40, height: 48, channels: 4, background: "#987654" } }, left: 30, top: 16 }])
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(source);
         const product = {
             ...creativeImageAsset(continuation ? "product-anchor" : "asset-product", "product.png", ""),
             type: "image" as const,
@@ -1416,6 +1273,7 @@ describe("executeAgentRun backend settings", () => {
             .composite([{ input: { create: { width: 20, height: 28, channels: 4, background: "#252525" } }, left: 22, top: 10 }])
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(source);
         const product = { ...creativeImageAsset("asset-product", "product.png", "upload"), remoteUrl: undefined, serverUrl: "/api/reference-assets/product.png", width: 64, height: 48 };
         const style = { ...creativeImageAsset("style", "style.png", "upload"), remoteUrl: undefined, serverUrl: "/api/reference-assets/style.png" };
         mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt, referencedAssetIds: [style.id, product.id], generationPreferences: { mode: "image" } });
@@ -1534,6 +1392,7 @@ describe("executeAgentRun backend settings", () => {
     });
 
     it.each([false, true])("pauses unreliable reference lighting with preserved evidence and zero planner or image submission (withStyle=%s)", async (withStyle) => {
+        await createPreparedImageFixture();
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
         const product = creativeImageAsset("asset-product", "product.png", "upload");
         const style = creativeImageAsset("style", "style.png", "upload");
@@ -1638,71 +1497,16 @@ describe("executeAgentRun backend settings", () => {
         expect(mocks.events).toContainEqual({ type: "run.paused", data: { message } });
     });
 
-    it.each(["valid", "foreign", "missing"])("keeps all frozen v6 references while confirming a local scene selection (%s)", async (condition) => {
-        const source = await sharp({ create: { width: 6, height: 4, channels: 3, background: "blue" } })
-            .png()
-            .toBuffer();
-        const scene = { ...creativeImageAsset("asset-scene", "scene.png", "upload"), remoteUrl: undefined, serverUrl: "/api/reference-assets/scene.png", width: 6, height: 4 };
-        const style = { ...creativeImageAsset("style", "style.png", "upload"), remoteUrl: undefined, serverUrl: "/api/reference-assets/style.png", ...(condition === "foreign" ? { userId: "foreign" } : {}) };
-        const plan = {
-            ...ecommerceScenePlan(),
-            planVersion: "ecommerce-edit.v6" as const,
-            source: { productAnchorId: null, currentSceneBaselineId: scene.id, sceneReferenceIds: [style.id] },
-            referenceUses: [
-                { assetId: scene.id, alias: "图片2", purposes: ["edit_target" as const], usedCueIds: [] },
-                { assetId: style.id, alias: "图片1", purposes: ["style" as const], usedCueIds: ["style-cue"] },
-            ],
-            protection: { scope: "local" as const, protectedObjectIds: [], preserveOutsideMask: true, allowLightingChange: false },
-            canvas: { mode: "exact" as const, size: { width: 6, height: 4 }, source: "baseline" as const, allowReframe: false },
-        };
-        const compiler = await vi.importActual<typeof import("./ecommerce-image-compiler")>("./ecommerce-image-compiler");
-        const execution = compiler.compileEcommerceImageRequest(
-            plan,
-            compiler.resolveEcommerceImageProviderProfile({
-                logicalRole: "image_generation",
-                capability: "image",
-                logicalModelId: "image-model",
-                channelId: "image-channel",
-                upstreamModel: "gpt-image-2.5-flare",
-                apiFormat: "openai",
-                imageEdit: resolveImageEditProtocol({ model: "gpt-image-2.5-flare", apiFormat: "openai", baseUrl: "https://api.example.com/v1" }),
-            })!,
-        );
-        const run = runFixture({
-            status: "paused",
-            tasks: [{ ...imageTask("scene-task"), status: "needs_review", attempts: 0, ecommerceExecution: execution }],
-            ecommerceSnapshot: {
-                version: "ecommerce-generation.v1",
-                runId: "agent-run",
-                userId: "user",
-                mode: "active",
-                createdAt: 1,
-                input: { userRequest: "add vase", assetIds: [style.id, scene.id], conversationId: scene.conversationId, surface: "chat" },
-                plan,
-                fallback: { reason: "scene_selection_required" },
-            },
-        });
-        mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[] = []) => [scene, ...(condition === "missing" ? [] : [style])].filter((asset) => ids.includes(asset.id)));
-        mocks.fetchInternalApi.mockResolvedValue(new Response(source, { headers: { "content-type": "image/png" } }));
-        const resume = prepareEcommerceSceneSelectionResume(run, { baselineAssetId: scene.id, region: { x: 2, y: 1, width: 2, height: 2 } }, "http://localhost", "session=test", run.userId);
-        if (condition !== "valid") await expect(resume).rejects.toThrow("权限");
-        else {
-            const [task] = await resume;
-            expect(task.references?.map((reference) => reference.assetId)).toEqual([scene.id, style.id]);
-            expect(task.ecommerceExecution).toEqual(execution);
-            expect(task.sceneProtection).toMatchObject({ sourceAssetId: scene.id, selectionSource: "user_selection" });
-        }
-    });
-
     it("uses an uploaded empty room as a scene reference while retaining product and branch IDs", async () => {
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
         const productBytes = await sharp({ create: { width: 64, height: 48, channels: 4, background: "#ffffff" } })
             .composite([{ input: { create: { width: 20, height: 28, channels: 4, background: "#252525" } }, left: 22, top: 10 }])
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(productBytes);
         const product = { ...creativeImageAsset("product-anchor", "product.png", ""), serverUrl: "/api/reference-assets/product.png", width: 64, height: 48 };
         const room = { ...creativeImageAsset("scene-reference", "room.png", ""), serverUrl: "/api/reference-assets/room.png", width: 64, height: 48 };
-        const history = { ...creativeImageAsset("scene-result", "previous.png", ""), sourceRunId: "run-prior", parentAssetId: product.id };
+        const history = { ...creativeImageAsset("scene-result", "previous.png", ""), sourceRunId: "run-prior", parentAssetId: product.id, serverUrl: "/api/reference-assets/previous.png" };
         mocks.run = runFixture({ surface: "chat", projectId: undefined, prompt: "改成这个房间", referencedAssetIds: [room.id], generationPreferences: { mode: "image" } });
         mocks.selectCurrentSceneBaseline.mockResolvedValue(history);
         mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[] = []) => (ids.includes(room.id) ? [room] : ids.includes(product.id) ? [product] : []));
@@ -1715,6 +1519,8 @@ describe("executeAgentRun backend settings", () => {
         });
         mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
             if (url.endsWith("/api/reference-assets/product.png")) return new Response(productBytes, { headers: { "content-type": "image/png" } });
+            if (url.endsWith("/api/reference-assets/room.png")) return new Response(productBytes, { headers: { "content-type": "image/png" } });
+            if (url.endsWith("/api/reference-assets/previous.png")) return new Response(productBytes, { headers: { "content-type": "image/png" } });
             if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: "child-room" } });
             if (url.endsWith("/api/image-tasks/child-room")) return Response.json({ task: { status: "success", result: { url: "https://cdn.example.com/new-room.png" } } });
             throw new Error("unexpected request: " + url);
@@ -1738,6 +1544,7 @@ describe("executeAgentRun backend settings", () => {
             .composite([{ input: { create: { width: 20, height: 28, channels: 4, background: "#252525" } }, left: 22, top: 10 }])
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(replacementBytes);
         const replacement = { ...creativeImageAsset("replacement-product", "replacement.png", ""), serverUrl: "/api/reference-assets/replacement.png", width: 64, height: 48 };
         const room = { ...creativeImageAsset("room-reference", "room.png", ""), serverUrl: "/api/reference-assets/room.png", width: 64, height: 48 };
         const oldAnchor = { ...creativeImageAsset("product-anchor", "old-product.png", ""), serverUrl: "/api/reference-assets/old-product.png" };
@@ -1788,6 +1595,7 @@ describe("executeAgentRun backend settings", () => {
         const sceneBytes = await sharp({ create: { width: 100, height: 80, channels: 3, background: "#aaa" } })
             .png()
             .toBuffer();
+        await setPreparedSourceFixture(sceneBytes);
         mocks.fetchInternalApi.mockImplementation(async () => new Response(sceneBytes, { headers: { "content-type": "image/png" } }));
         const product = { ...creativeImageAsset("product-anchor", "product.png", ""), serverUrl: "/api/reference-assets/product.png", width: 100, height: 80 };
         const history = {
@@ -1816,6 +1624,7 @@ describe("executeAgentRun backend settings", () => {
     });
 
     it("persists ambiguous ecommerce references as needs_review without submitting a provider task", async () => {
+        await createPreparedImageFixture();
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
         mocks.run = runFixture({
             surface: "chat",
@@ -3018,6 +2827,46 @@ describe("executeAgentRun backend settings", () => {
     });
 });
 
+// This suite isolates the persistent queue; the real File/native path has its own integration cases.
+async function prepareUnitProtectionTask(run: AgentRun, _executionId: string, analysis: EcommerceVisualAnalysis): Promise<AgentRunTask> {
+    const plan = run.ecommerceSnapshot?.plan;
+    const checkpoint = run.ecommerceSnapshot?.referenceCheckpoint;
+    const route = run.ecommerceSnapshot?.modelRouteSnapshots?.image_generation;
+    const context = mocks.protectionRequestContext;
+    const prepared = mocks.preparedSource;
+    if (!plan || !checkpoint || !route || !context || !prepared) throw new Error("Configure the executor unit's protection input fixture");
+    const profile = resolveEcommerceImageProviderProfile(route);
+    if (!profile) throw new Error("The executor unit needs a supported frozen image route");
+    const execution = compileEcommerceImageRequest(plan, profile);
+    const assets = checkpoint.assets.map((item) => item.asset);
+    const sourceAssetId = plan.source.currentSceneBaselineId || plan.source.productAnchorId;
+    const sourceUrl = checkpoint.planningInput.assetCandidates.find((asset) => asset.id === sourceAssetId)?.url;
+    if (!sourceUrl) throw new Error("The executor unit protection source needs its original URL");
+    const bytes = await loadEcommercePlanningImage(originalImageSourceUrl(sourceUrl), context.origin, context.cookie, prepared.contentSha256);
+    if (plan.operation === "local_edit") {
+        const target = resolveLocalEditTarget(plan, analysis);
+        if (target.state !== "resolved" || !plan.source.currentSceneBaselineId || !plan.source.productAnchorId) throw new Error("The executor unit local edit needs its resolved target and source IDs");
+        const regions = await buildLocalEditProductProtection(bytes, analysis, plan.source.currentSceneBaselineId, plan.source.productAnchorId, target.target);
+        return createEcommerceLocalEditTask(run, plan, assets, regions, execution);
+    }
+    if (!plan.source.productAnchorId) throw new Error("The executor unit product edit needs its product anchor");
+    const regions = await buildWhiteBackgroundProductProtection(bytes, analysis, plan.source.productAnchorId);
+    return createEcommerceProductSceneTask(run, plan, assets, regions, execution);
+}
+
+async function setPreparedSourceFixture(bytes: Buffer) {
+    const { width, height } = await sharp(bytes).metadata();
+    if (width === undefined || height === undefined) throw new Error("The executor unit source must have actual dimensions");
+    mocks.preparedSource = { contentSha256: createHash("sha256").update(bytes).digest("hex"), sourceBytes: bytes.byteLength, sourceSize: { width, height } };
+}
+
+async function createPreparedImageFixture() {
+    const bytes = await sharp({ create: { width: 64, height: 48, channels: 3, background: "white" } })
+        .png()
+        .toBuffer();
+    await setPreparedSourceFixture(bytes);
+}
+
 async function frozenReferenceFixture(action: "confirm_purposes" | "retry_analysis") {
     const product = { ...creativeImageAsset("asset-product", "product.png", ""), type: "image" as const, status: "ready" as const, sourceRunId: "upload", remoteUrl: undefined, serverUrl: "/api/reference-assets/product.png" };
     const source = await sharp({ create: { width: 64, height: 48, channels: 3, background: "white" } })
@@ -3166,17 +3015,6 @@ function passedQualityCheck() {
         hardFailures: [],
         internalReason: "all required checks passed",
         checkedAt: 1,
-    };
-}
-
-function blockedQualityCheck() {
-    return {
-        ...passedQualityCheck(),
-        status: "blocked" as const,
-        publicStatus: "needs_review" as const,
-        checks: [{ resultId: "child-blocked", key: "product_silhouette" as const, status: "failed" as const, reason: "product silhouette changed" }],
-        hardFailures: [{ resultId: "child-blocked", key: "product_silhouette" as const, status: "failed" as const, reason: "product silhouette changed" }],
-        internalReason: "product silhouette changed",
     };
 }
 

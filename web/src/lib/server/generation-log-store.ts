@@ -1,8 +1,10 @@
+import { isDeepStrictEqual } from "node:util";
+import { independentAdvisoryReview, reviewContextDigest, reviewQualityDigest } from "./ecommerce-visual-review-identity";
 import { randomUUID } from "node:crypto";
 import { relative, resolve } from "node:path";
 
 import { getAuthSettings, type UserRole } from "@/lib/auth/store";
-import { createPostgresRepositories, ensurePostgresSchema, isPostgresDatabaseEnabled, withPostgresTransaction } from "@/lib/server/database";
+import { createPostgresRepositories, ensurePostgresSchema, isPostgresDatabaseEnabled, withPostgresTransaction, type QueryExecutor } from "@/lib/server/database";
 import { collectLocalMediaStorageKeys, countLocalMediaReferences, localMediaStorageKeyFromValue } from "@/lib/server/local-media-references";
 import { deleteLocalMediaAssetsByStorageKeys, deleteUserLocalMediaAssets, GENERATION_MEDIA_ROOT } from "@/lib/server/local-media-storage";
 import { deleteUserMediaAssetsCascade } from "@/lib/server/user-media-deletion-service";
@@ -33,8 +35,8 @@ import {
 } from "./generation-log-repository";
 import type { GenerationAssetStats, GenerationLogInput, GenerationLogListOptions, StoredGenerationLog } from "./generation-log-types";
 import { buildEcommerceGenerationTrace, normalizeEcommerceGenerationTrace, type EcommerceGenerationTrace } from "./ecommerce-generation-trace";
-import { getImageTask } from "./image-task-store";
-import { getStoredGenerationTask } from "./generation-task-store";
+import { getImageTask, type ImageTask } from "./image-task-store";
+import { getStoredGenerationTask, getStoredGenerationTaskRecord, withGenerationTaskFileRead } from "./generation-task-store";
 import type { AgentRun } from "./agent-run-store";
 import { hydrateGenerationLogEnhancements } from "./generation-log-enhancement";
 
@@ -104,25 +106,33 @@ function sameTraceIdentity(left: EcommerceGenerationTrace, right: EcommerceGener
     return left.runId === right.runId && left.agentTaskId === right.agentTaskId && JSON.stringify(left.imageTaskIds) === JSON.stringify(right.imageTaskIds);
 }
 
+type CompletedReviewTraceFence = { runId: string; attempt: number; contextDigest: string; qualityDigest: string };
+
 export async function hydrateEcommerceTracesFromImageTasks(
     logs: StoredGenerationLog[],
-    persist: (taskIds: string[], trace: EcommerceGenerationTrace, expectedTrace?: EcommerceGenerationTrace | null) => Promise<{ updated: number }> = attachEcommerceTraceToGenerationLogs,
+    persist: (taskIds: string[], trace: EcommerceGenerationTrace, expectedTrace?: EcommerceGenerationTrace | null, review?: CompletedReviewTraceFence) => Promise<{ updated: number }> = attachEcommerceTraceToGenerationLogs,
 ) {
     return Promise.all(
         logs.map(async (log) => {
             if (!log.taskId || (log.ecommerceTrace && !pendingAdvisoryTrace(log.ecommerceTrace))) return log;
-            const task = await getImageTask(log.taskId);
-            if (!task || task.id !== log.taskId || task.userId !== log.userId) return log;
-            let trace = normalizeEcommerceGenerationTrace(task.ecommerceTrace);
+            const image = await getImageTask(log.taskId);
+            if (!image || image.id !== log.taskId || image.userId !== log.userId) return log;
+            let trace = normalizeEcommerceGenerationTrace(image.ecommerceTrace);
             if (log.ecommerceTrace && trace && !sameTraceIdentity(log.ecommerceTrace, trace)) return log;
-            if ((!trace || pendingAdvisoryTrace(trace)) && task.runId && task.parentTaskId) {
-                const run = await getStoredGenerationTask<AgentRun>("agent", task.runId);
+            let fence: CompletedReviewTraceFence | undefined;
+            const bindingTrace = trace || log.ecommerceTrace;
+            if (image.runId && image.parentTaskId) {
+                const run = await getStoredGenerationTask<AgentRun>("agent", image.runId);
                 const snapshot = run?.ecommerceSnapshot;
-                const parent = run?.tasks.find((entry) => entry.id === task.parentTaskId);
+                const belongs = (task: AgentRun["tasks"][number]) => (task.taskIds || (task.taskId ? [task.taskId] : [])).includes(image.id) && (!task.childTasks?.length || task.childTasks.some((child) => child.id === image.id));
+                // Native image tasks use run.id as parentTaskId; their verified trace names the Agent task.
+                const parent =
+                    run?.tasks.find((task) => task.id === image.parentTaskId) ||
+                    (image.parentTaskId === run?.id && bindingTrace?.runId === run.id && bindingTrace.imageTaskIds.includes(image.id) ? run.tasks.find((task) => task.id === bindingTrace.agentTaskId && belongs(task)) : undefined);
                 const ids = parent?.taskIds || (parent?.taskId ? [parent.taskId] : []);
                 if (
-                    run?.id === task.runId &&
-                    run.userId === task.userId &&
+                    run?.id === image.runId &&
+                    run.userId === image.userId &&
                     run.status === "completed" &&
                     run.reviewed &&
                     snapshot?.qualityPolicy === "advisory" &&
@@ -130,8 +140,13 @@ export async function hydrateEcommerceTracesFromImageTasks(
                     snapshot.qualityCheck &&
                     parent?.status === "completed" &&
                     parent.ecommerceExecution &&
-                    ids.includes(task.id)
+                    belongs(parent)
                 ) {
+                    if (independentAdvisoryReview(run)) {
+                        const checkpoint = snapshot.visualReview;
+                        if (!checkpoint) return log;
+                        fence = { runId: run.id, attempt: checkpoint.attempt, contextDigest: checkpoint.contextDigest, qualityDigest: reviewQualityDigest(snapshot.qualityCheck) };
+                    }
                     const rebuilt = buildEcommerceGenerationTrace({
                         runId: run.id,
                         task: parent,
@@ -142,38 +157,99 @@ export async function hydrateEcommerceTracesFromImageTasks(
                         recordedAt: run.timings?.reviewCompletedAt || snapshot.qualityCheck.checkedAt,
                     });
                     if (!log.ecommerceTrace || sameTraceIdentity(log.ecommerceTrace, rebuilt)) trace = rebuilt;
-                }
+                } else if (run && independentAdvisoryReview(run)) return log;
             }
             if (!trace || (log.ecommerceTrace && pendingAdvisoryTrace(trace))) return log;
             try {
-                await persist([log.taskId], trace, log.ecommerceTrace || null);
+                const result = await persist([log.taskId], trace, log.ecommerceTrace || null, fence);
+                if (fence && !result.updated) return log;
             } catch (error) {
                 console.error("[ecommerce-generation-trace] pending trace reconciliation failed", error instanceof Error ? error.message : "unknown error");
+                if (fence) return log;
             }
             return { ...log, ecommerceTrace: trace };
         }),
     );
 }
 
-export async function attachEcommerceTraceToGenerationLogs(taskIds: string[], trace: EcommerceGenerationTrace, expectedTrace?: EcommerceGenerationTrace | null) {
+function matchesCompletedReviewTrace(run: AgentRun, images: ImageTask[], trace: EcommerceGenerationTrace, fence: CompletedReviewTraceFence) {
+    const snapshot = run.ecommerceSnapshot;
+    const checkpoint = snapshot?.visualReview;
+    const task = run.tasks.find((item) => item.id === trace.agentTaskId);
+    const ids = task?.taskIds || (task?.taskId ? [task.taskId] : []);
+    if (
+        !independentAdvisoryReview(run) ||
+        !run.reviewed ||
+        !snapshot?.qualityCheck ||
+        !checkpoint ||
+        checkpoint.attempt !== fence.attempt ||
+        checkpoint.contextDigest !== fence.contextDigest ||
+        reviewQualityDigest(snapshot.qualityCheck) !== fence.qualityDigest ||
+        (reviewContextDigest(run, images) !== fence.contextDigest && !(snapshot.qualityCheck.status === "unavailable" && checkpoint.submission.state !== "completed")) ||
+        !task ||
+        trace.runId !== run.id ||
+        !isDeepStrictEqual(ids, trace.imageTaskIds)
+    )
+        return false;
+    return isDeepStrictEqual(
+        trace,
+        buildEcommerceGenerationTrace({ runId: run.id, task, snapshot, imageTaskIds: ids, generationStatus: "completed", finalStatus: "completed", recordedAt: run.timings?.reviewCompletedAt || snapshot.qualityCheck.checkedAt }),
+    );
+}
+
+export async function attachEcommerceTraceToGenerationLogs(taskIds: string[], trace: EcommerceGenerationTrace, expectedTrace?: EcommerceGenerationTrace | null, review?: CompletedReviewTraceFence) {
     const ids = Array.from(new Set(taskIds.map((id) => id.trim()).filter(Boolean)));
     const normalized = normalizeEcommerceGenerationTrace(trace);
-    if (!ids.length || !normalized) return { updated: 0 };
+    if (!ids.length || !normalized || (review && ids.some((id) => !normalized.imageTaskIds.includes(id)))) return { updated: 0 };
+    let fileReviewExpiry: number | undefined;
     if (isPostgresDatabaseEnabled()) {
         await ensurePostgresSchema();
+        if (review)
+            return withPostgresTransaction(async (executor) => {
+                const parent = await getStoredGenerationTaskRecord("agent", review.runId, executor, true);
+                if (!parent) return { updated: 0 };
+                const related = await executor.query<{ payload: ImageTask }>("SELECT payload FROM generation_tasks WHERE task_type = 'image' AND run_id = $1 AND user_id = $2 ORDER BY id FOR UPDATE", [review.runId, parent.userId]);
+                const live = await executor.query<{ live: boolean }>("SELECT expires_at > clock_timestamp() AS live FROM generation_tasks WHERE id = $1", [review.runId]);
+                if (
+                    !live.rows[0]?.live ||
+                    !matchesCompletedReviewTrace(
+                        parent.payload as AgentRun,
+                        related.rows.map((row) => row.payload),
+                        normalized,
+                        review,
+                    )
+                )
+                    return { updated: 0 };
+                const updated = await createPostgresRepositories(executor).generationLogs.updateEcommerceTraceByTaskIds(ids, normalized, expectedTrace);
+                const stillLive = await executor.query<{ live: boolean }>("SELECT expires_at > clock_timestamp() AS live FROM generation_tasks WHERE id = $1", [review.runId]);
+                if (!stillLive.rows[0]?.live) throw new Error("视觉复核日志提交时父任务已过期");
+                return { updated };
+            });
         return { updated: await createPostgresRepositories().generationLogs.updateEcommerceTraceByTaskIds(ids, normalized, expectedTrace) };
     }
-    return mutateGenerationLogDb(async (db) => {
-        const idSet = new Set(ids);
-        let updated = 0;
-        db.logs = db.logs.map((log) => {
-            if (!log.taskId || !idSet.has(log.taskId)) return log;
-            if (expectedTrace !== undefined && JSON.stringify(log.ecommerceTrace || null) !== JSON.stringify(expectedTrace)) return log;
-            updated += 1;
-            return { ...log, ecommerceTrace: normalized, updatedAt: new Date().toISOString() };
+    if (review)
+        return withGenerationTaskFileRead(async (records) => {
+            const parent = records.find((item) => item.type === "agent" && item.id === review.runId && item.expiresAt > Date.now());
+            const images = records.filter((item) => item.type === "image" && item.runId === review.runId && item.userId === parent?.userId).map((item) => item.payload as ImageTask);
+            if (!parent || !matchesCompletedReviewTrace(parent.payload as AgentRun, images, normalized, review)) return { updated: 0 };
+            fileReviewExpiry = parent.expiresAt;
+            return writeTrace();
         });
-        return { updated };
-    });
+    return writeTrace();
+    function writeTrace() {
+        return mutateGenerationLogDb(async (db) => {
+            const idSet = new Set(ids);
+            let updated = 0;
+            db.logs = db.logs.map((log) => {
+                if (!log.taskId || !idSet.has(log.taskId)) return log;
+                if (expectedTrace !== undefined && JSON.stringify(log.ecommerceTrace || null) !== JSON.stringify(expectedTrace)) return log;
+                updated += 1;
+                return { ...log, ecommerceTrace: normalized, updatedAt: new Date().toISOString() };
+            });
+            if (fileReviewExpiry !== undefined && fileReviewExpiry <= Date.now()) throw new Error("视觉复核日志提交时父任务已过期");
+            return { updated };
+        });
+    }
 }
 
 export async function listUserGenerationLogsForDelete(userId: string, ids: string[]) {
@@ -197,11 +273,11 @@ export async function listUserGenerationLogsForDelete(userId: string, ids: strin
     return userLogs.filter((log) => idSet.has(log.id) || log.assets.some((asset) => assetUrls.has(stableAssetUrl(asset))));
 }
 
-export async function recordGenerationLog(input: GenerationLogInput) {
+export async function recordGenerationLog(input: GenerationLogInput, beforePersist?: () => void, executor?: QueryExecutor) {
     const id = normalizeText(input.id, randomUUID(), 120);
     if (isPostgresDatabaseEnabled()) {
-        await ensurePostgresSchema();
-        const repository = createPostgresRepositories().generationLogs;
+        if (!executor) await ensurePostgresSchema();
+        const repository = createPostgresRepositories(executor).generationLogs;
         const existing = await repository.getById(id);
         if (existing && existing.userId !== input.userId) throw new Error("generation log id belongs to another user");
         const assets = await normalizeAssets(input.assets || [], {
@@ -211,13 +287,14 @@ export async function recordGenerationLog(input: GenerationLogInput) {
             taskId: input.taskId || existing?.taskId,
             originalName: input.title || existing?.title,
         });
-        return withPostgresTransaction(async (client) => {
+        const persist = async (client: QueryExecutor) => {
             const transactionRepository = createPostgresRepositories(client).generationLogs;
             const current = await transactionRepository.getById(id, true);
             if (current && current.userId !== input.userId) throw new Error("generation log id belongs to another user");
             const next = buildGenerationLog(input, id, current ? toStoredGenerationLog(current) : undefined, assets);
             return toStoredGenerationLog(await transactionRepository.upsert(next));
-        });
+        };
+        return executor ? persist(executor) : withPostgresTransaction(persist);
     }
     return mutateGenerationLogDb(async (db) => {
         const now = new Date().toISOString();
@@ -235,6 +312,7 @@ export async function recordGenerationLog(input: GenerationLogInput) {
         const completedAt = input.status === "pending" ? undefined : normalizeTime(input.completedAt, now);
         const next = buildGenerationLog(input, id, existing, assets, now, completedAt);
 
+        beforePersist?.();
         db.logs = [next, ...db.logs.filter((log) => log.id !== id)];
         return next;
     });

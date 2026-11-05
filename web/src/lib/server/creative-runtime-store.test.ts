@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentRun } from "./agent-run-store";
+import { updateAgentRunById, type AgentRun } from "./agent-run-store";
 import { writeJsonDataFile } from "./data-adapter";
 
 const mocks = vi.hoisted(() => ({
@@ -70,6 +70,17 @@ describe("creative runtime file provider", () => {
                 nextPollAt: expect.any(Number),
                 lastUpstreamStatus: "created",
             },
+        ]);
+    });
+
+    it("persists reference preparation progress on the original assistant message", async () => {
+        await createBundle(run({ id: "run-progress" }));
+
+        await updateAgentRunById("run-progress", { status: "running" }, { type: "ecommerce.progress", data: { stage: "identifying_product", text: "正在识别商品" } }, ["planning"]);
+
+        expect(await listCreativeMessages("conversation", 0, 10)).toMatchObject([
+            { id: "input-message", role: "user", content: "生成一张图" },
+            { id: "assistant-message", role: "assistant", status: "running", content: "正在识别商品", runId: "run-progress" },
         ]);
     });
 

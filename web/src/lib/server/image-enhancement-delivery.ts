@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { isDeepStrictEqual } from "node:util";
 import type { ImageTask, ImageTaskReference } from "./image-task-store";
+import type { ImageProcessingEnhancementBaseline } from "../image-processing/contracts";
 import { compositeProductEnhancement, type ProductEnhancementEvidence, type ProductEnhancementProtection } from "./image-enhancement-product-protection";
 import { validateSceneEditProtection } from "./ecommerce-product-regions";
 import { ecommerceSceneProtectionReferencesMatch } from "./ecommerce-image-task-orchestration";
@@ -35,7 +36,11 @@ export type ProductEnhancementBaselineEvidence = {
 };
 type DeliveryInput = Pick<ImageTask, "kind" | "config" | "references" | "mask" | "productProtection" | "sceneProtection" | "ecommerceExecution">;
 
-export async function freezeEcommerceEnhancementDelivery(input: DeliveryInput, readSource: (reference: ImageTaskReference) => Promise<Buffer>): Promise<EcommerceEnhancementDelivery | undefined> {
+export async function freezeEcommerceEnhancementDelivery(
+    input: DeliveryInput,
+    readSource: (reference: ImageTaskReference) => Promise<Buffer>,
+    readNativeSceneBaseline?: () => Promise<ImageProcessingEnhancementBaseline | undefined>,
+): Promise<EcommerceEnhancementDelivery | undefined> {
     if (resolveResultSize(input.config.quality, "1:1") !== resolveResultSize("4k", "1:1")) return;
     if (input.config.outputMode === "layers" || input.config.outputBackground === "transparent") return;
     const execution = input.ecommerceExecution;
@@ -54,6 +59,13 @@ export async function freezeEcommerceEnhancementDelivery(input: DeliveryInput, r
             baseline: { url: sourceUrl, sha256: scene.sourceDigest, byteLength: 0, ...scene.sourceSize, normalizedSha256: "" },
         };
         if (!localEnhancementContractMatches(input, contract)) return;
+        if (scene.mask.serverUrl) {
+            if (!readNativeSceneBaseline) return;
+            const qualified = await readNativeSceneBaseline();
+            if (qualified?.status !== "qualified" || qualified.scope !== "local_edit") return;
+            contract.baseline = { url: sourceUrl, ...qualified.baseline };
+            return contract;
+        }
         try {
             const source = await readSource(reference);
             await validateSceneEditProtection(source, scene);
@@ -145,7 +157,9 @@ export function localEnhancementContractMatches(input: DeliveryInput, contract: 
         contract.protection.normalization === "srgb-upright-v1" &&
         isDeepStrictEqual(input.sceneProtection, scene) &&
         isDeepStrictEqual(input.mask, scene.mask) &&
-        [input.mask?.url, input.mask?.serverUrl, input.mask?.remoteUrl, scene.mask.url, scene.mask.serverUrl, scene.mask.remoteUrl].every((value) => value === undefined) &&
+        scene.mask.url === undefined &&
+        scene.mask.remoteUrl === undefined &&
+        (scene.mask.serverUrl === undefined || (scene.mask.dataUrl === "" && scene.mask.serverUrl.startsWith("/api/reference-assets/"))) &&
         ecommerceSceneProtectionReferencesMatch(scene.sourceAssetId, input.references, execution) &&
         Boolean(reference) &&
         (reference!.serverUrl || reference!.dataUrl || reference!.url || reference!.remoteUrl) === contract.baseline.url &&

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { addAbortSignal, finished, Readable } from "node:stream";
 
 import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client, type ObjectIdentifier } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
@@ -93,6 +94,24 @@ export async function getObjectBytes(config: ObjectStorageRuntimeConfig, key: st
         return Buffer.from(await result.Body.transformToByteArray());
     } finally {
         client.destroy();
+    }
+}
+
+export async function getObjectStream(config: ObjectStorageRuntimeConfig, key: string, signal?: AbortSignal): Promise<Readable> {
+    const client = createObjectStorageClient(config);
+    try {
+        const result = await client.send(new GetObjectCommand({ Bucket: config.bucket, Key: key }), { abortSignal: signal });
+        if (!(result.Body instanceof Readable)) throw new Error("外部存储对象没有可读取的 Node 流");
+        const body = result.Body;
+        const stopWatching = finished(body, () => {
+            stopWatching();
+            client.destroy();
+        });
+        if (signal) addAbortSignal(signal, body);
+        return body;
+    } catch (error) {
+        client.destroy();
+        throw error;
     }
 }
 

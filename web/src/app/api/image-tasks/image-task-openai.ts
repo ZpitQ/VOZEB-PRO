@@ -191,7 +191,7 @@ export async function runOpenAiImageTask(task: ImageTask, origin: string, public
     if (!response.ok) throw imageSubmissionResponseError(response.status, await readFetchError(response, "图片生成失败"));
     const payload = await parseImageSubmissionJson<ImageApiResponse>(task, response);
     const resultBaseUrl = response.headers.get("x-vozeb-pro-upstream-url") || url;
-    const result = await parseChargedImageResponse(task, response, () => parseImagePayloadOrPoll(config, payload, resultBaseUrl, cookie, url, singleStep));
+    const result = await parseChargedImageResponse(task, response, () => parseImagePayloadOrPoll(config, payload, resultBaseUrl, cookie, url, singleStep, task.kind === "generation" && Array.isArray(payload.data) ? payload.data : undefined));
     if (allowProtocolFallback && responseFormat === "url" && shouldRetryInternalImageUrlAsBase64(result)) {
         await refundChargedImageResponse(task, response.headers);
         return runOpenAiImageTaskWithBase64Response(task, origin, publicOrigin, cookie, singleStep, "base64");

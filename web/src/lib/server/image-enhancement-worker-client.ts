@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { createWriteStream } from "node:fs";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { isDeepStrictEqual } from "node:util";
 import sharp from "sharp";
 import { Agent, FormData, request } from "undici";
@@ -19,8 +22,7 @@ function workerTransport(connection: TaskConnection) {
     if (!connection.endpoint || !connection.token || !connection.timeoutMs) fail("not_configured");
     const timeoutMs = connection.timeoutMs || fail("not_configured");
     const agent = new Agent({ connect: connection.trust === "custom_ca" ? { ca: connection.caPem, rejectUnauthorized: true } : { rejectUnauthorized: true } });
-    async function call(path: string, method: "GET" | "POST" | "DELETE" = "GET", maxBytes = 4 * 1024 * 1024, body?: string | FormData, headers?: Record<string, string>) {
-        // JSON responses use the same 4 MiB boundary as the existing admin request parser.
+    async function open(path: string, method: "GET" | "POST" | "DELETE", body?: string | FormData, headers?: Record<string, string>) {
         const response = await request(connection.endpoint + path, {
             method,
             dispatcher: agent,
@@ -35,6 +37,9 @@ function workerTransport(connection: TaskConnection) {
             response.body.destroy();
             fail("authentication_failed");
         }
+        return response;
+    }
+    async function responseBytes(response: Awaited<ReturnType<typeof open>>, maxBytes: number) {
         const chunks: Buffer[] = [];
         let length = 0;
         try {
@@ -47,24 +52,45 @@ function workerTransport(connection: TaskConnection) {
             response.body.destroy();
             throw error;
         }
-        const bytes = Buffer.concat(chunks);
-        if (response.statusCode !== 200 && response.statusCode !== 202) {
-            let code = "";
-            try {
-                code = String(object(JSON.parse(bytes.toString("utf8"))).code);
-            } catch {
-                /* Ignore untrusted error text. */
-            }
-            const reasons = new Map([
-                ["configuration_invalid", "worker_configuration_invalid"],
-                ["not_ready", "engine_unavailable"],
-                ["download_timeout", "timeout"],
-                ["budget_exceeded", "output_invalid"],
-                ...["strategy_mismatch", "queue_full", "idempotency_conflict", "job_not_found", "result_not_ready", "result_gone", "receipt_conflict"].map((reason) => [reason, reason] as [string, string]),
-            ]);
-            fail(reasons.get(code) ?? "invalid_response");
+        return Buffer.concat(chunks);
+    }
+    function responseFailure(bytes: Buffer): never {
+        let code = "";
+        try {
+            code = String(object(JSON.parse(bytes.toString("utf8"))).code);
+        } catch {
+            /* Ignore untrusted error text. */
         }
+        const reasons = new Map([
+            ["configuration_invalid", "worker_configuration_invalid"],
+            ["not_ready", "engine_unavailable"],
+            ["download_timeout", "timeout"],
+            ["budget_exceeded", "output_invalid"],
+            ...["strategy_mismatch", "queue_full", "idempotency_conflict", "job_not_found", "result_not_ready", "result_gone", "receipt_conflict"].map((reason) => [reason, reason] as [string, string]),
+        ]);
+        fail(reasons.get(code) ?? "invalid_response");
+    }
+    async function call(path: string, method: "GET" | "POST" | "DELETE" = "GET", maxBytes = 4 * 1024 * 1024, body?: string | FormData, headers?: Record<string, string>) {
+        const response = await open(path, method, body, headers);
+        const bytes = await responseBytes(response, maxBytes);
+        if (response.statusCode !== 200 && response.statusCode !== 202) responseFailure(bytes);
         return bytes;
+    }
+    async function file(path: string, destination: string, expected: EnhancementArtifact, maxBytes: number) {
+        const response = await open(path, "GET");
+        if (response.statusCode !== 200) responseFailure(await responseBytes(response, 4 * 1024 * 1024));
+        const hash = createHash("sha256");
+        let length = 0;
+        const meter = new Transform({
+            transform(chunk: Buffer, _encoding, done) {
+                length += chunk.length;
+                if (length > maxBytes || length > expected.byteLength) return done(new WorkerCheckError("output_invalid"));
+                hash.update(chunk);
+                done(null, chunk);
+            },
+        });
+        await pipeline(response.body, meter, createWriteStream(destination, { flags: "wx" }));
+        if (length !== expected.byteLength || hash.digest("hex") !== expected.sha256) fail("output_invalid");
     }
     async function json(path: string, method: "GET" | "POST" | "DELETE" = "GET", body?: string | FormData, headers?: Record<string, string>) {
         const bytes = await call(path, method, undefined, body, headers);
@@ -77,7 +103,7 @@ function workerTransport(connection: TaskConnection) {
         if (payload.code !== "ok") fail("invalid_response");
         return object(payload.data);
     }
-    return { call, json, close: () => agent.close() };
+    return { call, file, json, close: () => agent.close() };
 }
 
 export async function inspectEnhancementWorker(connection: Connection, sample: boolean): Promise<Report> {
@@ -346,27 +372,11 @@ export function createEnhancementTaskClient(connection: TaskConnection) {
                 await identity();
                 return job((await transport.json(`/v1/enhancement-jobs/${uuid(jobId)}`)).job, plan, jobId);
             }),
-        download: (plan: FrozenWorkerEnhancementPlan, jobId: string, expected: EnhancementArtifact) =>
+        download: (plan: FrozenWorkerEnhancementPlan, jobId: string, expected: EnhancementArtifact, destination: string) =>
             safe(async () => {
+                if (expected.byteLength > plan.budgets.ai.maxBytes || expected.width !== plan.source.width * plan.engine.nativeScale || expected.height !== plan.source.height * plan.engine.nativeScale) fail("output_invalid");
                 await identity();
-                const bytes = await transport.call(`/v1/enhancement-jobs/${uuid(jobId)}/result`, "GET", plan.budgets.ai.maxBytes);
-                if (
-                    bytes.length !== expected.byteLength ||
-                    createHash("sha256").update(bytes).digest("hex") !== expected.sha256 ||
-                    expected.width !== plan.source.width * plan.engine.nativeScale ||
-                    expected.height !== plan.source.height * plan.engine.nativeScale
-                )
-                    fail("output_invalid");
-                try {
-                    const image = sharp(bytes, { failOn: "warning", limitInputPixels: plan.budgets.ai.maxPixels });
-                    const metadata = await image.metadata();
-                    const stats = await image.stats();
-                    if (metadata.format !== "png" || (metadata.pages && metadata.pages !== 1) || (metadata.orientation && metadata.orientation !== 1) || metadata.width !== expected.width || metadata.height !== expected.height || !stats.isOpaque)
-                        fail("output_invalid");
-                } catch {
-                    fail("output_invalid");
-                }
-                return bytes;
+                await transport.file(`/v1/enhancement-jobs/${uuid(jobId)}/result`, destination, expected, plan.budgets.ai.maxBytes);
             }),
         acknowledge: (plan: FrozenWorkerEnhancementPlan, jobId: string, receiptId: string, output: EnhancementArtifact) =>
             safe(async () => {

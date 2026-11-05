@@ -367,6 +367,7 @@ export function useCreateAgent() {
                 onTerminal: (status, text) => {
                     if (generation !== conversationGenerationRef.current || activeConversationRef.current !== run.conversationId) return;
                     updateAssistant(assistantMessageId, text, status === "completed" ? "completed" : status);
+                    setRunDetails((current) => ({ ...current, [run.id]: { ...(current[run.id] || run), status } }));
                     setSending(false);
                     submittingRef.current = false;
                     setActiveRunId(undefined);
@@ -392,17 +393,21 @@ export function useCreateAgent() {
 
     useEffect(() => {
         if (!conversationId || sending || streamRef.current || activeConversationRef.current !== conversationId) return;
-        const running = messages.find((item) => item.role === "assistant" && item.status === "running" && item.runId);
+        const running = messages.find((item) => item.role === "assistant" && item.runId && (item.status === "running" || runDetails[item.runId]?.status === "planning" || runDetails[item.runId]?.status === "running"));
         if (!running?.runId) return;
         const generation = conversationGenerationRef.current;
         const expectedConversationId = conversationId;
         void getCreativeAgentRun(running.runId)
             .then((run) => {
                 if (!isCurrentConversation(expectedConversationId, generation) || run.conversationId !== expectedConversationId || streamRef.current) return;
+                if (running.status !== "running" && run.status !== "planning" && run.status !== "running") {
+                    setRunDetails((current) => ({ ...current, [run.id]: run }));
+                    return;
+                }
                 watchRun(run, running.id, generation);
             })
             .catch(() => undefined);
-    }, [conversationId, isCurrentConversation, messages, sending, watchRun]);
+    }, [conversationId, isCurrentConversation, messages, runDetails, sending, watchRun]);
 
     const executeSubmission = useCallback(
         async (snapshot: PendingCreateSubmission) => {
@@ -600,6 +605,24 @@ export function useCreateAgent() {
         [isCurrentConversation, messages, updateAssistant, watchRun],
     );
 
+    const resumeImageProcessing = useCallback(
+        async (runId: string) => {
+            const expectedConversationId = activeConversationRef.current;
+            const generation = conversationGenerationRef.current;
+            if (!expectedConversationId) throw new Error("当前对话已切换");
+            const result = await controlCreativeAgentRun(runId, "resume", expectedConversationId);
+            if (!isCurrentConversation(expectedConversationId, generation) || result.run.conversationId !== expectedConversationId) return;
+            setRunDetails((current) => ({ ...current, [runId]: result.run }));
+            if (result.run.status !== "running" && result.run.status !== "planning") throw new Error(result.run.imageProcessingRecovery?.message || "图像处理尚未继续，请刷新后查看任务状态。");
+            const assistantMessage = messages.find((item) => item.runId === runId && item.role === "assistant");
+            if (assistantMessage) {
+                updateAssistant(assistantMessage.id, "正在继续原任务的图像处理。", "running");
+                watchRun(result.run, assistantMessage.id, generation);
+            }
+        },
+        [isCurrentConversation, messages, updateAssistant, watchRun],
+    );
+
     const retryTask = useCallback(
         async (runId: string, taskId: string) => {
             const expectedConversationId = activeConversationRef.current;
@@ -690,6 +713,7 @@ export function useCreateAgent() {
         confirmSceneSelection,
         recoverReference,
         checkStatus,
+        resumeImageProcessing,
         retryTask,
         retryTasks,
         retryRun,

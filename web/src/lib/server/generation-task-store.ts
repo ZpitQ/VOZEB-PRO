@@ -84,10 +84,13 @@ export async function getStoredGenerationTask<T>(type: GenerationTaskType, id: s
     return record ? withExecutionState(record.payload as T, record.executionPhase, record.lastUpstreamStatus, record.resultPayload) : null;
 }
 
-export async function getStoredGenerationTaskRecord(type: GenerationTaskType, id: string): Promise<StoredGenerationTaskRecord | null> {
+export async function getStoredGenerationTaskRecord(type: GenerationTaskType, id: string, executor?: QueryExecutor, lock = false): Promise<StoredGenerationTaskRecord | null> {
     if (getDatabaseProvider() === "postgres") {
-        await ensurePostgresSchema();
-        const result = await postgresQuery<Record<string, unknown>>("SELECT * FROM generation_tasks WHERE id = $1 AND task_type = $2 AND expires_at > now()", [id, type]);
+        if (!executor) await ensurePostgresSchema();
+        const query: QueryExecutor["query"] = executor ? executor.query.bind(executor) : postgresQuery;
+        if (lock) await query("SELECT id FROM generation_tasks WHERE id = $1 AND task_type = $2 FOR UPDATE", [id, type]);
+        const clock = executor ? "clock_timestamp()" : "now()";
+        const result = await query<Record<string, unknown>>(`SELECT * FROM generation_tasks WHERE id = $1 AND task_type = $2 AND expires_at > ${clock}`, [id, type]);
         return result.rows[0] ? mapStoredTaskRecord(result.rows[0]) : null;
     }
     return (await readFileTasks()).find((task) => task.id === id && task.type === type && task.expiresAt > Date.now()) || null;
@@ -976,6 +979,15 @@ function mutateFileTasks(mutator: (tasks: StoredGenerationTaskRecord[]) => Store
     return withGenerationTaskFileMutation(async (tasks) => ({ tasks: mutator(tasks), result: undefined }));
 }
 
+export function withGenerationTaskFileRead<T>(read: (tasks: StoredGenerationTaskRecord[]) => Promise<T>) {
+    const result = fileMutationQueue.then(() => withJsonDataFileLock(TASK_FILE, async () => read(await readFileTasks())));
+    fileMutationQueue = result.then(
+        () => undefined,
+        () => undefined,
+    );
+    return result;
+}
+
 export function withGenerationTaskFileMutation<T>(mutator: (tasks: StoredGenerationTaskRecord[]) => Promise<{ tasks: StoredGenerationTaskRecord[]; result: T }>) {
     const run = fileMutationQueue.then(async () => {
         return withJsonDataFileLock(TASK_FILE, async () => {
@@ -1133,7 +1145,7 @@ function mapGenerationTaskCostAggregate(row: Record<string, unknown>): Generatio
 }
 
 function isTaskType(value: unknown): value is GenerationTaskType {
-    return value === "text" || value === "image" || value === "video" || value === "audio" || value === "agent" || value === "render";
+    return value === "text" || value === "image" || value === "video" || value === "audio" || value === "agent" || value === "render" || value === "image_processing";
 }
 
 function isTaskStatus(value: unknown): value is GenerationTaskStatus {

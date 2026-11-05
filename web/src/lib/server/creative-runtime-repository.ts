@@ -1,3 +1,4 @@
+import { getLocalMediaRegistrations, isLocalMediaRegistrationExpired, type LocalMediaRegistration } from "./local-media-registry";
 import { nanoid } from "nanoid";
 
 import { creativeConversationSourceForSurface, normalizeCreativeConversationSource, type CreativeAsset, type CreativeConversation, type CreativeMessage, type CreativeRunEvent, type CreativeSurface } from "@/lib/creative-runtime-contract";
@@ -45,8 +46,29 @@ export type RunMutation<T extends AgentRunBase> = {
     assistant?: { status: CreativeMessage["status"]; content?: string; metadata?: Record<string, unknown> };
     schedule?: Pick<GenerationTaskSchedulePatch, "executionPhase" | "nextPollAt" | "lastUpstreamStatus">;
 };
-export type RunMutationContext = { persistedChildren: Array<{ id: string }> };
-export type RunMutationOptions = { referenceRecovery?: boolean };
+export type RunMutationContext = { persistedChildren: Array<Pick<StoredGenerationTaskRecord, "id" | "type" | "status" | "userId" | "runId" | "executionPhase" | "payload" | "resultPayload">> };
+export type ReviewFrozenMedia = Pick<LocalMediaRegistration, "scope" | "storageKey" | "storageProvider" | "externalStorageId" | "bytes" | "mimeType">;
+
+export async function reviewSourceRegistrationsMatch(userId: string, sources: readonly ReviewFrozenMedia[], executor?: QueryExecutor) {
+    const registrations: LocalMediaRegistration[] = [];
+    for (const key of [...new Set(sources.map((source) => source.storageKey))].sort()) registrations.push(...(await getLocalMediaRegistrations([key], { ownerUserId: userId, executor, forUpdate: Boolean(executor) })));
+    const now = executor ? (await executor.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now.getTime() : Date.now();
+    return sources.every((source) => {
+        const current = registrations.find((item) => item.storageKey === source.storageKey);
+        return (
+            current &&
+            current.ownerUserId === userId &&
+            current.scope === source.scope &&
+            (current.storageProvider === "object" ? "object" : "local") === (source.storageProvider === "object" ? "object" : "local") &&
+            current.externalStorageId === source.externalStorageId &&
+            current.bytes === source.bytes &&
+            current.mimeType === source.mimeType &&
+            !isLocalMediaRegistrationExpired(current, now)
+        );
+    });
+}
+
+export type RunMutationOptions = { resumeWithChildren?: boolean; reviewClaim?: { workerId: string; executionId: string }; reviewSources?: ReviewFrozenMedia[] };
 
 export type NewAsset = Omit<CreativeAsset, "id" | "createdAt" | "updatedAt" | "status" | "metadata"> & { id?: string; status?: CreativeAsset["status"]; metadata?: Record<string, unknown> };
 export type NewConversationExchange = {
@@ -111,15 +133,37 @@ export async function mutatePostgresRun<T extends AgentRunBase>(
 ) {
     await ensurePostgresSchema();
     return withPostgresTransaction(async (client) => {
-        const result = await client.query<{ payload: T & { executionId?: string } }>("SELECT payload FROM generation_tasks WHERE id = $1 AND task_type = 'agent' AND expires_at > now() FOR UPDATE", [id]);
+        const result = await client.query<{ payload: T & { executionId?: string }; worker_id: string | null; lease_until: Date | null }>(
+            "SELECT payload, worker_id, lease_until FROM generation_tasks WHERE id = $1 AND task_type = 'agent' AND expires_at > now() FOR UPDATE",
+            [id],
+        );
         const current = result.rows[0]?.payload;
         if (!current || (allowedStatuses && !allowedStatuses.includes(current.status)) || (expectedExecutionId && current.executionId !== expectedExecutionId)) return null;
-        const children = options?.referenceRecovery ? await client.query<{ id: string }>("SELECT id FROM generation_tasks WHERE run_id = $1 AND user_id = $2 AND task_type <> 'agent'", [id, current.userId]) : { rows: [] };
-        const mutation = mutate(current as T, { persistedChildren: children.rows });
+        if (options?.reviewClaim) {
+            const clock = await client.query<{ active: boolean }>("SELECT worker_id = $2 AND payload ->> 'executionId' = $3 AND lease_until > clock_timestamp() AND expires_at > clock_timestamp() AS active FROM generation_tasks WHERE id = $1", [
+                id,
+                options.reviewClaim.workerId,
+                options.reviewClaim.executionId,
+            ]);
+            if (clock.rows[0]?.active !== true) return null;
+        }
+
+        const children =
+            options?.resumeWithChildren || options?.reviewClaim
+                ? await client.query<
+                      Omit<RunMutationContext["persistedChildren"][number], "executionPhase" | "resultPayload"> & { executionPhase: StoredGenerationTaskRecord["executionPhase"] | null; resultPayload: StoredGenerationTaskRecord["resultPayload"] | null }
+                  >(
+                      `SELECT id, task_type AS type, user_id AS "userId", run_id AS "runId", status, execution_phase AS "executionPhase", payload, result_payload AS "resultPayload" FROM generation_tasks WHERE run_id = $1 AND user_id = $2 AND task_type <> 'agent' ORDER BY id FOR UPDATE`,
+                      [id, current.userId],
+                  )
+                : { rows: [] };
+        if (options?.reviewSources && !(await reviewSourceRegistrationsMatch(current.userId, options.reviewSources, client))) return null;
+        const mutation = mutate(current as T, { persistedChildren: children.rows.map((child) => ({ ...child, executionPhase: child.executionPhase ?? undefined, resultPayload: child.resultPayload ?? undefined })) });
         if (!mutation) return null;
-        const now = Date.now();
+        if (options?.reviewClaim && (options.resumeWithChildren || mutation.schedule)) throw new Error("视觉复核不能改写交付调度");
+        const now = options?.reviewClaim ? (await client.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now.getTime() : Date.now();
         const run = { ...mutation.run, id: current.id, userId: current.userId, createdAt: current.createdAt, updatedAt: now };
-        if (options?.referenceRecovery) {
+        if (options?.resumeWithChildren) {
             await client.query(
                 "UPDATE generation_tasks SET status = $2, payload = $3::jsonb, updated_at = $4, expires_at = $5, execution_phase = 'created', next_poll_at = $4, last_upstream_status = 'created', worker_id = NULL, lease_until = NULL WHERE id = $1",
                 [id, normalizeTaskStatus(run.status), JSON.stringify(run), new Date(now), new Date(now + ttlMs)],
@@ -136,7 +180,11 @@ export async function mutatePostgresRun<T extends AgentRunBase>(
                 mutation.schedule.lastUpstreamStatus,
             ]);
         } else {
-            await client.query("UPDATE generation_tasks SET status = $2, payload = $3::jsonb, updated_at = $4, expires_at = $5 WHERE id = $1", [id, normalizeTaskStatus(run.status), JSON.stringify(run), new Date(now), new Date(now + ttlMs)]);
+            const updated = await client.query(
+                `UPDATE generation_tasks SET status = $2, payload = $3::jsonb, updated_at = $4, expires_at = $5 WHERE id = $1${options?.reviewClaim ? " AND worker_id = $6 AND payload ->> 'executionId' = $7 AND lease_until > clock_timestamp() AND expires_at > clock_timestamp()" : ""} RETURNING id`,
+                [id, normalizeTaskStatus(run.status), JSON.stringify(run), new Date(now), new Date(now + ttlMs), ...(options?.reviewClaim ? [options.reviewClaim.workerId, options.reviewClaim.executionId] : [])],
+            );
+            if (!updated.rows[0]) return null;
         }
         if (mutation.event) {
             await client.query("INSERT INTO creative_run_events (run_id, type, data, created_at) VALUES ($1, $2, $3::jsonb, $4)", [id, mutation.event.type, mutation.event.data === undefined ? null : JSON.stringify(mutation.event.data), new Date(now)]);

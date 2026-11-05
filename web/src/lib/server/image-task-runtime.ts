@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { runCustomImageTask, pollCustomImageTask } from "@/app/api/image-tasks/image-task-custom";
 import { customGeminiImageTaskPath } from "@/app/api/image-tasks/image-task-gemini-config";
 import { EcommerceCanvasAdapterReview } from "@/app/api/image-tasks/image-task-size";
@@ -21,9 +22,15 @@ import { resolveModelRequestTimeoutMs } from "@/lib/server/model-request-policy"
 import { imageReferenceToDataUrl, resolveImageTaskEditProtocol } from "@/app/api/image-tasks/image-task-support";
 import { validateSceneEditProtection } from "./ecommerce-product-regions";
 import { assertEcommerceImageExecutionSnapshot, ecommerceSceneProtectionReferencesMatch } from "./ecommerce-image-task-orchestration";
-import { getAgentRun } from "./agent-run-store";
+import { getAgentRun, type AgentRun } from "./agent-run-store";
 import { assertEcommerceReferenceContent, EcommerceReferenceSourceChangedError, EcommerceReferenceSourceReadError, referenceAssetVersion } from "./ecommerce-reference-recovery";
 import { originalImageSourceUrl } from "@/lib/media-image-url";
+import { captureImageTaskNativeResults } from "./image-task-native-capture";
+import { getStoredGenerationTaskRecord } from "./generation-task-store";
+import { ensureImageTaskResultProcessing, consumeCompletedImageTaskResultProcessing } from "./image-task-result-processing";
+import { usesImageTaskResultProcessing } from "./image-task-result-contract";
+import { readCompletedEcommerceSceneProtection } from "./ecommerce-protection-preparation";
+import { loadPreparedEcommerceReferenceSource } from "./ecommerce-reference-preparation";
 
 export type ImageUpstreamStep =
     | { state: "pending"; upstream: NonNullable<ImageTask["upstream"]>; status: string }
@@ -45,6 +52,17 @@ export async function createImageTaskUpstreamStep(task: ImageTask, origin: strin
     }
 
     const authContext = cookie || maintenanceWorkerContext(workerUserId || task.userId);
+    const localSceneEdit = running.sceneProtection || (running.ecommerceExecution?.protection?.scope === "local" && !running.productProtection);
+    let nativeScene: Awaited<ReturnType<typeof nativeSceneSubmissionState>>;
+    if (localSceneEdit) {
+        try {
+            nativeScene = await nativeSceneSubmissionState(running, task.executionId);
+        } catch (error) {
+            if (error instanceof EcommerceReferenceValidationUnavailableError) return { state: "needs_review", reason: "参考任务暂时无法核对，请稍后点击“检查状态”继续原任务。", status: "reference_validation_unavailable" };
+            return { state: "needs_review", reason: error instanceof Error ? error.message : "局部场景编辑证据无法验证", status: "scene_mask_review_required" };
+        }
+    }
+    let submissionMask = running.mask;
     let submissionReferences: ImageTask["references"];
     try {
         submissionReferences = await frozenImageSubmissionReferences(running, origin, authContext);
@@ -64,16 +82,27 @@ export async function createImageTaskUpstreamStep(task: ImageTask, origin: strin
             return { state: "needs_review", reason: error instanceof Error ? error.message : "电商生图执行配置已变化", status: "ecommerce_execution_snapshot_changed" };
         }
     }
-    const localSceneEdit = running.sceneProtection || (running.ecommerceExecution?.protection?.scope === "local" && !running.productProtection);
     if (running.productProtection || localSceneEdit) {
         try {
             if (!running.mask) throw new Error("局部编辑缺少可信独立蒙版");
             if (!(await resolveImageTaskEditProtocol(running.config)).supportsIndependentMask) throw new Error("当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。");
             if (localSceneEdit) {
-                if (!running.sceneProtection || !ecommerceSceneProtectionReferencesMatch(running.sceneProtection.sourceAssetId, running.references, running.ecommerceExecution) || running.mask.dataUrl !== running.sceneProtection.mask.dataUrl)
-                    throw new Error("局部场景编辑缺少完整原图与可信独立蒙版");
-                const source = await imageReferenceToDataUrl(submissionReferences[0], "scene.png", origin, authContext);
-                await validateSceneEditProtection(Buffer.from(source.split(",")[1], "base64"), running.sceneProtection);
+                if (nativeScene) {
+                    const source = Buffer.from(submissionReferences[0].dataUrl.split(",")[1], "base64");
+                    if (source.length !== nativeScene.baseline.bytes) throw new EcommerceReferenceSourceChangedError();
+                    assertEcommerceReferenceContent(source, nativeScene.baseline.sha256);
+                    const mask = await loadPreparedEcommerceReferenceSource({ sourceUrl: nativeScene.sceneProtection.mask.serverUrl, sourceBytes: nativeScene.mask.bytes, contentSha256: nativeScene.mask.sha256 }, origin, authContext);
+                    // Only the provider sees these exact verified bytes. Persisted
+                    // native evidence retains its original owned mask URL.
+                    submissionMask = { ...running.mask, dataUrl: "data:image/png;base64," + mask.toString("base64"), serverUrl: undefined, url: undefined, remoteUrl: undefined };
+                    const currentScene = await nativeSceneSubmissionState(running, task.executionId);
+                    if (!currentScene || !isDeepStrictEqual(currentScene.binding, nativeScene.binding)) throw new Error("场景保护提交身份在原件读取期间已变化");
+                } else {
+                    if (!running.sceneProtection || !ecommerceSceneProtectionReferencesMatch(running.sceneProtection.sourceAssetId, running.references, running.ecommerceExecution) || running.mask.dataUrl !== running.sceneProtection.mask.dataUrl)
+                        throw new Error("局部场景编辑缺少完整原图与可信独立蒙版");
+                    const source = await imageReferenceToDataUrl(submissionReferences[0], "scene.png", origin, authContext);
+                    await validateSceneEditProtection(Buffer.from(source.split(",")[1], "base64"), running.sceneProtection);
+                }
             }
         } catch (error) {
             return { state: "needs_review", reason: error instanceof Error ? error.message : "局部编辑蒙版无法验证", status: running.productProtection ? "product_mask_review_required" : "scene_mask_review_required" };
@@ -97,7 +126,7 @@ export async function createImageTaskUpstreamStep(task: ImageTask, origin: strin
     try {
         // Verified source bytes are used only for this submission. Persisted task
         // references and result/log processing retain the stable owned URLs.
-        const submission = { ...candidate, references: submissionReferences };
+        const submission = { ...candidate, references: submissionReferences, mask: submissionMask };
         const result = customGeminiImageTaskPath(config, candidate.kind)
             ? await runGeminiImageTask(submission, origin, authContext)
             : usesDeclarativeImageProtocol(config.advancedConfig?.protocol)
@@ -115,6 +144,171 @@ export async function createImageTaskUpstreamStep(task: ImageTask, origin: strin
         await updateImageTask(task.id, { attempts, attemptNo: candidate.attemptNo, upstream: undefined, billing: undefined });
         return { state: "failed", error: error.message, status: "failed" };
     }
+}
+
+async function nativeSceneSubmissionState(task: ImageTask, executionId: string | undefined) {
+    let observedParent;
+    try {
+        observedParent = task.runId ? await getAgentRun(task.runId) : null;
+    } catch (error) {
+        throw new EcommerceReferenceValidationUnavailableError("场景父任务暂时无法读取", { cause: error });
+    }
+    if (!observedParent?.ecommerceSnapshot?.processing?.sceneSelection && !task.sceneProtection?.mask.serverUrl) return;
+    if (!task.runId) throw new Error("场景保护缺少当前父任务");
+    const [record, parentRecord] = await Promise.all([getStoredGenerationTaskRecord("image", task.id), getStoredGenerationTaskRecord("agent", task.runId)]);
+    const parent = parentRecord?.payload as AgentRun | undefined;
+    const current = record?.payload as ImageTask | undefined;
+    const automaticRetry =
+        record?.lastUpstreamStatus === "automatic_retry_after_upstream_failure" &&
+        !record.queryPath &&
+        Object.keys(record.resultPayload ?? {}).length === 0 &&
+        current?.attemptNo === 1 &&
+        current.attempts?.length === 1 &&
+        current.attempts[0].attemptNo === 1 &&
+        current.attempts[0].status === "failed" &&
+        current.attempts[0].completedAt !== undefined &&
+        current.retryable === false &&
+        current.candidateConfigs?.length === 0;
+    const now = Date.now();
+    if (
+        !parent ||
+        !parentRecord ||
+        !record ||
+        !current ||
+        parentRecord.expiresAt <= now ||
+        parentRecord.status !== "running" ||
+        parentRecord.id !== parent.id ||
+        parentRecord.userId !== parent.userId ||
+        parentRecord.conversationId !== parent.conversationId ||
+        parentRecord.surface !== parent.surface ||
+        parentRecord.projectId !== parent.projectId ||
+        parent.status !== "running" ||
+        parent.cancellation ||
+        parent.userId !== task.userId ||
+        parent.id !== task.runId ||
+        parent.conversationId !== task.conversationId ||
+        parent.surface !== task.surface ||
+        parent.projectId !== task.projectId ||
+        !record.workerId ||
+        !executionId ||
+        current.executionId !== executionId ||
+        record.expiresAt <= now ||
+        !(Number(record.leaseUntil) > now) ||
+        record.userId !== task.userId ||
+        record.runId !== current.runId ||
+        record.conversationId !== current.conversationId ||
+        record.surface !== current.surface ||
+        record.projectId !== current.projectId ||
+        record.parentTaskId !== current.parentTaskId ||
+        record.clientRequestId !== current.clientRequestId ||
+        record.attemptNo !== current.attemptNo ||
+        record.status !== "running" ||
+        current.status !== record.status ||
+        record.executionPhase !== "created" ||
+        record.submittedAt !== undefined ||
+        record.upstreamTaskId ||
+        current.upstream ||
+        current.billing ||
+        current.result ||
+        current.nativeResults ||
+        current.nativeAcquisition ||
+        current.resultProcessing ||
+        (current.attempts?.length && !automaticRetry) ||
+        !isDeepStrictEqual(nativeSceneImageIdentity(current), nativeSceneImageIdentity(task))
+    )
+        throw new Error("场景保护缺少当前图片任务的有效提交身份");
+    const evidence = await readCompletedEcommerceSceneProtection(parent);
+    const { state, sceneProtection } = evidence;
+    const logical = state.task;
+    const checkpoint = state.checkpoint;
+    const children = logical.childTasks?.filter((child) => child.id === current.id) || [];
+    const child = children[0];
+    const fence = current.referenceDispatch;
+    const logicalReferences = logical.references || [];
+    if (
+        state.snapshot.qualityCheck ||
+        current.kind !== "edit" ||
+        current.productProtection ||
+        current.parentTaskId !== parent.id ||
+        logical.type !== "image" ||
+        logical.status !== "running" ||
+        children.length !== 1 ||
+        !child ||
+        child.attempt !== logical.attempts ||
+        (child.status !== "pending" && child.status !== "needs_review") ||
+        !logical.taskIds?.includes(current.id) ||
+        !fence?.executionId.trim() ||
+        checkpoint.version !== "ecommerce-reference-checkpoint.v1" ||
+        checkpoint.state !== "resolved" ||
+        checkpoint.analysisStage.state !== "completed" ||
+        fence.inputId !== checkpoint.inputId ||
+        fence.decisionId !== checkpoint.decisionId ||
+        fence.analysisRequestId !== checkpoint.analysisStage.requestId ||
+        !Number.isSafeInteger(fence.copy) ||
+        fence.copy < 1 ||
+        fence.copy > logical.count ||
+        current.clientRequestId !== `${parent.clientRequestId}:${logical.id}:${child.attempt}:${fence.copy}` ||
+        current.prompt !== logical.prompt ||
+        logicalReferences.length !== current.references.length ||
+        logicalReferences.some(
+            (reference, index) =>
+                reference.assetId !== current.references[index].id ||
+                reference.ecommerceRole !== current.references[index].ecommerceRole ||
+                originalImageSourceUrl(reference.url) !== originalImageSourceUrl(current.references[index].url || current.references[index].serverUrl || current.references[index].remoteUrl || ""),
+        ) ||
+        !ecommerceSceneProtectionReferencesMatch(sceneProtection.sourceAssetId, current.references, current.ecommerceExecution) ||
+        !isDeepStrictEqual(current.ecommerceExecution, evidence.execution) ||
+        !isDeepStrictEqual(logical.sceneProtection, sceneProtection) ||
+        !isDeepStrictEqual(current.sceneProtection, sceneProtection) ||
+        !isDeepStrictEqual(current.mask, sceneProtection.mask)
+    )
+        throw new Error("场景保护与当前父任务、确认选区或图片副本不一致");
+    return {
+        baseline: state.receipt.baseline,
+        mask: evidence.mask,
+        sceneProtection,
+        binding: {
+            image: nativeSceneImageIdentity(current),
+            workerId: record.workerId,
+            parentExecutionId: parent.executionId,
+            parentClientRequestId: parent.clientRequestId,
+            plan: state.plan,
+            referenceCheckpoint: checkpoint,
+            receipt: state.receipt,
+            logicalTaskId: logical.id,
+            logicalReferences,
+            logicalAttempt: logical.attempts,
+            count: logical.count,
+            child,
+            stage: evidence.stage,
+            sourceRegistration: evidence.sourceRegistration,
+            maskRegistration: evidence.maskRegistration,
+        },
+    };
+}
+
+function nativeSceneImageIdentity(task: ImageTask) {
+    return {
+        id: task.id,
+        userId: task.userId,
+        runId: task.runId,
+        conversationId: task.conversationId,
+        surface: task.surface,
+        projectId: task.projectId,
+        parentTaskId: task.parentTaskId,
+        clientRequestId: task.clientRequestId,
+        referenceDispatch: task.referenceDispatch,
+        status: task.status,
+        executionId: task.executionId,
+        attemptNo: task.attemptNo,
+        attempts: task.attempts,
+        config: task.config,
+        prompt: task.prompt,
+        references: task.references,
+        mask: task.mask,
+        sceneProtection: task.sceneProtection,
+        ecommerceExecution: task.ecommerceExecution,
+    };
 }
 
 class EcommerceReferenceValidationUnavailableError extends Error {}
@@ -233,6 +427,9 @@ export async function queryCancelledImageTaskUpstreamStep(task: ImageTask, origi
 export async function persistImageTaskResult(task: ImageTask, origin: string, resultUrl: string, cookie = "", workerUserId = "") {
     const authContext = cookie || maintenanceWorkerContext(workerUserId || task.userId);
     const current = (await getImageTask(task.id)) || task;
+    if (current.status === "success") return current;
+    const resultClaim = usesImageTaskResultProcessing(current) ? await imageTaskResultClaim(task) : undefined;
+    if (current.nativeResults && resultClaim) return persistNativeImageTaskResult(current, resultClaim);
     let results = persistedImageTaskResults(current);
     if (results.length || current.result?.batchEvidence) return completeImageResult(current, results);
 
@@ -241,6 +438,13 @@ export async function persistImageTaskResult(task: ImageTask, origin: string, re
     if (!inlineDataUrl && !remoteUrl) throw new GenerationSubmissionSafeFailure("图片任务缺少可持久化结果");
     const legacyResults = current.result?.results?.length ? current.result.results : [{ dataUrl: inlineDataUrl, remoteUrl }];
     const normalizedResults = legacyResults.map((item, index) => (index === 0 ? { ...item, dataUrl: inlineDataUrl || item.dataUrl, remoteUrl: remoteUrl || item.remoteUrl } : item));
+    if (resultClaim) {
+        const captured = await captureProviderNativeResult(task, { ...normalizedResults[0], results: normalizedResults }, origin, authContext, resultClaim);
+        if (captured.state !== "native_ready") throw new Error("Native image result acquisition did not retain the current image claim");
+        const sealed = await getImageTask(current.id);
+        if (!sealed) throw new Error("Native image task disappeared before result processing");
+        return persistNativeImageTaskResult(sealed, resultClaim);
+    }
     let prepared: Awaited<ReturnType<typeof prepareImageTaskResults>>;
     try {
         prepared = await prepareImageTaskResults(current, { ...normalizedResults[0], results: normalizedResults }, origin, authContext);
@@ -312,6 +516,14 @@ async function handleImageProviderResult(task: ImageTask, result: ImageTaskRunRe
         });
         return { state: "pending", upstream: result.pending, status: "submitted" };
     }
+    if (usesImageTaskResultProcessing(task)) {
+        const captured = await captureProviderNativeResult(task, result, origin, authContext, await imageTaskResultClaim(task));
+        if (captured.state === "needs_review") return captured;
+        if (captured.state !== "native_ready") throw new Error("Native image provider result lost its original image claim");
+        const first = captured.nativeResults.slots.find((slot) => slot.status === "stored");
+        if (!first || first.status !== "stored") throw new Error("Native image provider result has no stored slot");
+        return { state: "result_ready", resultUrl: `/api/reference-assets/${first.storageKey.split("/").map(encodeURIComponent).join("/")}`, status: "native_ready" };
+    }
     let prepared: Awaited<ReturnType<typeof prepareImageTaskResults>>;
     try {
         prepared = await prepareImageTaskResults(task, result, origin, authContext);
@@ -333,6 +545,46 @@ async function handleImageProviderResult(task: ImageTask, result: ImageTaskRunRe
         return { state: "failed", error: error instanceof Error ? error.message : "上游返回的图片文件无效或保存失败", status: "failed" };
     }
     return readyImageStep({ ...task, result: { ...(first || { dataUrl: "" }), ...prepared } }, first?.serverUrl || first?.dataUrl || "");
+}
+
+type ImageTaskResultClaim = { taskId: string; workerId: string; executionId: string };
+
+async function imageTaskResultClaim(task: ImageTask): Promise<ImageTaskResultClaim> {
+    const record = await getStoredGenerationTaskRecord("image", task.id);
+    if (!record) throw new Error("Image result processing requires its current generation claim");
+    const current = record.payload as ImageTask;
+    const now = Date.now();
+    if (
+        !record.workerId ||
+        typeof task.executionId !== "string" ||
+        record.userId !== task.userId ||
+        current.id !== task.id ||
+        current.userId !== task.userId ||
+        (record.status !== "pending" && record.status !== "running") ||
+        current.status !== record.status ||
+        record.expiresAt <= now ||
+        !(Number(record.leaseUntil) > now) ||
+        current.executionId !== task.executionId ||
+        current.attemptNo !== task.attemptNo ||
+        (record.upstreamTaskId ?? null) !== (task.upstream?.id ?? null) ||
+        (current.upstream?.id ?? null) !== (task.upstream?.id ?? null)
+    )
+        throw new Error("Image result processing requires its current generation claim");
+    return { taskId: task.id, workerId: record.workerId, executionId: task.executionId };
+}
+
+async function captureProviderNativeResult(task: ImageTask, result: ImageTaskRunResult, origin: string, authContext: string, identity: ImageTaskResultClaim) {
+    return captureImageTaskNativeResults({ ...identity, attemptNo: task.attemptNo || 1, upstreamTaskId: task.upstream?.id || null, result, origin, authContext });
+}
+
+async function persistNativeImageTaskResult(task: ImageTask, identity: ImageTaskResultClaim) {
+    const outcome = await ensureImageTaskResultProcessing(identity);
+    if (outcome.state === "ownership_lost") throw new Error("Image result processing lost its current generation claim");
+    if (outcome.state === "ready") {
+        const consumed = await consumeCompletedImageTaskResultProcessing(identity);
+        if (consumed.state !== "completed") throw new Error("Image result consumption lost its current generation claim");
+    }
+    return getImageTask(task.id);
 }
 
 async function readyImageStep(task: ImageTask, resultUrl: string): Promise<ImageUpstreamStep> {

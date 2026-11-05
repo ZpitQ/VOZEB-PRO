@@ -1,4 +1,5 @@
-import { readJsonDataFile, writeJsonDataFile } from "@/lib/server/data-adapter";
+import { isDeepStrictEqual } from "node:util";
+import { readJsonDataFile, withJsonDataFileLock, writeJsonDataFile } from "@/lib/server/data-adapter";
 import { ensurePostgresSchema, getDatabaseProvider, postgresQuery, type QueryExecutor } from "@/lib/server/database";
 import type { LocalMediaClass, LocalMediaType } from "@/lib/local-media-storage-contract";
 import { isManagedMediaType, isMediaSourceGroup } from "@/lib/media-management-contract";
@@ -107,6 +108,20 @@ export async function getLocalMediaRegistration(storageKey: string) {
         return result.rows[0] ? mapRegistration(result.rows[0]) : null;
     }
     return (await readRegistry()).assets.find((item) => item.storageKey === key) || null;
+}
+
+export async function promoteFileLocalMediaAssets(expected: LocalMediaRegistration[], beforePersist: () => void) {
+    const keys = new Set(expected.map((asset) => asset.storageKey));
+    await mutateRegistry((db) => {
+        const now = Date.now();
+        for (const asset of expected) {
+            const current = db.assets.find((item) => item.storageKey === asset.storageKey);
+            if (!current || !isDeepStrictEqual(normalizeRegistration(current), asset)) throw new Error("Image result artifact registration changed before promotion");
+            if (isLocalMediaRegistrationExpired(current, now)) throw new Error("Image result artifact expired before promotion");
+        }
+        beforePersist();
+        return { ...db, assets: db.assets.map((asset) => (keys.has(asset.storageKey) ? { ...asset, storageClass: "permanent" as const, expiresAt: undefined } : asset)) };
+    });
 }
 
 export async function getLocalMediaRegistrations(storageKeys: string[], options: { ownerUserId?: string; executor?: QueryExecutor; forUpdate?: boolean } = {}) {
@@ -330,7 +345,7 @@ function mapRegistration(row: Record<string, unknown>): LocalMediaRegistration {
         storageKey: String(row.storage_key || ""),
         scope: row.scope === "generation" ? "generation" : "reference",
         storageClass: row.storage_class === "temporary" ? "temporary" : "permanent",
-        type: row.type === "video" || row.type === "audio" ? row.type : "image",
+        type: row.type === "video" || row.type === "audio" || row.type === "attachment" ? row.type : "image",
         ownerUserId: String(row.owner_user_id || ""),
         originalName: optionalText(row.original_name, 260),
         source: String(row.source || ""),
@@ -470,7 +485,7 @@ function readRegistry() {
 }
 
 function mutateRegistry(mutator: (db: RegistryDatabase) => RegistryDatabase) {
-    const operation = mutationQueue.then(async () => writeJsonDataFile(FILE_NAME, mutator(await readRegistry())));
+    const operation = mutationQueue.then(() => withJsonDataFileLock(FILE_NAME, async () => writeJsonDataFile(FILE_NAME, mutator(await readRegistry()))));
     mutationQueue = operation.catch(() => undefined);
     return operation;
 }

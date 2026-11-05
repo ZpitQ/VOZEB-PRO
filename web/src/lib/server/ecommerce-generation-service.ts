@@ -6,37 +6,27 @@ import type { CreativeAsset, CreativeGenerationPreferences, CreativeSurface } fr
 import { fetchInternalApi } from "@/lib/server/internal-origin";
 import { maintenanceWorkerContextHeaders } from "@/lib/server/maintenance-auth";
 import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
+import { buildWhiteBackgroundProductMaskPixels, EcommerceProductSegmentationError } from "../image-processing/core";
+import { buildLocalEditMask } from "../image-processing/protection-masks";
 
 import { ecommerceCanvasSize, validateEcommerceDimensions, type EcommerceCanvasInput, type EcommerceDimensions, type EcommerceEditPlan } from "./ecommerce-edit-plan";
 import { normalizeGeneratedImageBytes } from "./generated-image-normalizer";
 import { ECOMMERCE_IMAGE_MAX_INPUT_PIXELS } from "./ecommerce-vision-image";
 import type { EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
 import type { EcommerceResolvedLocalEditTarget } from "./ecommerce-edit-planner";
-import { buildProductProtectionRegions, buildSceneProductProtectionRegions, buildSceneEditProtection, type SceneEditProtection, type ProductProtectionRectangle, type ProductProtectionRegions } from "./ecommerce-product-regions";
+import { buildProductProtectionRegions, buildSceneProductProtectionRegions, type SceneEditProtection, type ProductProtectionRectangle, type ProductProtectionRegions } from "./ecommerce-product-regions";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
 import type { AgentRun, AgentRunTask } from "./agent-run-store";
-import { getCreativeAssetsByIds } from "./creative-runtime-store";
 import { assetAccessUrl } from "./agent-run-surface-policy";
-import { ecommerceSceneSelectionTask } from "./ecommerce-generation-snapshot";
 import { assertEcommerceReferenceContent, EcommerceReferenceSourceReadError } from "./ecommerce-reference-recovery";
 
-const WHITE_BACKGROUND_MIN_CHANNEL = 240;
-const TRANSPARENT_BACKGROUND_MAX_ALPHA = 24;
-const MIN_BORDER_BACKGROUND_RATIO = 0.9;
-const MIN_SUBJECT_PIXELS = 16;
-const SECOND_SUBJECT_RATIO = 0.05;
 const HALO_RATIO = 0.08;
 
 export type EcommerceProgressStage = "identifying_product" | "planning_scene" | "generating_image" | "checking_result";
 export type EcommerceRolloutStage = "default" | "shadow" | "internal" | "canary";
 export type EcommerceRolloutSettings = { mode?: unknown; canaryUserIds?: unknown };
 
-export class EcommerceProductSegmentationError extends Error {
-    constructor(message: string) {
-        super(message);
-        this.name = "EcommerceProductSegmentationError";
-    }
-}
+export { EcommerceProductSegmentationError };
 
 export function isEcommerceImageRequest(run: { generationPreferences?: CreativeGenerationPreferences }, selectedModelCapabilities: string[] = [], hasReferenceImage = false): boolean {
     const explicitMode = run.generationPreferences?.mode;
@@ -170,47 +160,14 @@ export async function buildWhiteBackgroundProductProtection(source: Buffer, anal
     }
     const { width, height, channels } = decoded.info;
     if (!width || !height || channels !== 4) throw new EcommerceProductSegmentationError("商品图片像素格式无效");
-    const pixels = width * height;
-    const transparent = reference.visualEvidence.transparentBackground;
-    const backgroundCandidate = (index: number) => {
-        const offset = index * channels;
-        const alpha = decoded.data[offset + 3];
-        if (alpha <= TRANSPARENT_BACKGROUND_MAX_ALPHA) return true;
-        if (transparent) return false;
-        const red = decoded.data[offset];
-        const green = decoded.data[offset + 1];
-        const blue = decoded.data[offset + 2];
-        return Math.min(red, green, blue) >= WHITE_BACKGROUND_MIN_CHANNEL && Math.max(red, green, blue) - Math.min(red, green, blue) <= 10;
-    };
-    const border = borderIndexes(width, height);
-    const borderRatio = border.filter(backgroundCandidate).length / border.length;
-    if (borderRatio < 0.1) throw new EcommerceProductSegmentationError("商品图边界不是可信白色或透明背景");
-
-    const background = floodBackground(width, height, backgroundCandidate);
-    const components = connectedComponents(width, height, (index) => !background[index] && decoded.data[index * channels + 3] > TRANSPARENT_BACKGROUND_MAX_ALPHA);
-    const minimumArea = Math.max(MIN_SUBJECT_PIXELS, Math.ceil(pixels * 0.005));
-    const eligible = components.filter((component) => component.length >= minimumArea).sort((left, right) => right.length - left.length);
-    if (!eligible.length) throw new EcommerceProductSegmentationError("没有检测到商品主体");
-    if (eligible.slice(1).some((component) => component.length >= eligible[0].length * SECOND_SUBJECT_RATIO)) {
-        throw new EcommerceProductSegmentationError("检测到多个独立主体，需要人工复核");
-    }
-
-    const subject = eligible[0];
-    const subjectSet = new Set(subject);
-    const bounds = componentBounds(subject, width);
-    if (bounds.x === 0 || bounds.y === 0 || bounds.x + bounds.width === width || bounds.y + bounds.height === height) {
-        throw new EcommerceProductSegmentationError("商品主体接触图片边缘，无法生成可信保护蒙版");
-    }
-    if (borderRatio < MIN_BORDER_BACKGROUND_RATIO) throw new EcommerceProductSegmentationError("商品图边界不是可信白色或透明背景");
+    const bounds = buildWhiteBackgroundProductMaskPixels(decoded.data, width, height, reference.visualEvidence.transparentBackground);
     const halo = expand(bounds, width, height);
     const normalizedAnalysis: EcommerceVisualAnalysis = {
         ...analysis,
         references: [{ ...reference, productCore: normalize(bounds, width, height), fusionHalo: normalize(halo, width, height) }],
     };
     const regions = buildProductProtectionRegions(normalizedAnalysis, { width, height });
-    const maskBytes = Buffer.alloc(pixels * 4, 255);
-    for (let index = 0; index < pixels; index += 1) maskBytes[index * 4 + 3] = subjectSet.has(index) ? 255 : 0;
-    const mask = await sharp(maskBytes, { raw: { width, height, channels: 4 } })
+    const mask = await sharp(decoded.data, { raw: { width, height, channels: 4 } })
         .png()
         .toBuffer();
     regions.editableBackground.mask = {
@@ -238,22 +195,8 @@ export async function buildLocalEditProductProtection(source: Buffer, analysis: 
     const { width, height, channels } = decoded.info;
     if (!width || !height || channels !== 4) throw new EcommerceProductSegmentationError("当前场景图片像素格式无效");
     const regions = buildSceneProductProtectionRegions(analysis, sourceAssetId, productAnchorId, { width, height });
-    const targetRectangle = normalizedRectangle(target.region, width, height);
     const protectedRectangles = [...regions.productCore.rectangles, ...regions.fusionHalo.rectangles];
-    const pixels = width * height;
-    const maskBytes = Buffer.alloc(pixels * 4, 255);
-    let editablePixels = 0;
-    for (let y = targetRectangle.y; y < targetRectangle.y + targetRectangle.height; y += 1) {
-        for (let x = targetRectangle.x; x < targetRectangle.x + targetRectangle.width; x += 1) {
-            if (protectedRectangles.some((rectangle) => containsPixel(rectangle, x, y))) continue;
-            maskBytes[(y * width + x) * 4 + 3] = 0;
-            editablePixels += 1;
-        }
-    }
-    if (!editablePixels) throw new EcommerceProductSegmentationError("局部编辑目标完全位于商品保护区域内");
-    const mask = await sharp(maskBytes, { raw: { width, height, channels: 4 } })
-        .png()
-        .toBuffer();
+    const mask = await buildLocalEditMask({ width, height }, target.region, protectedRectangles);
     regions.editableBackground.mask = {
         trust: "trusted",
         provider: "local-edit-target.v1",
@@ -463,29 +406,6 @@ function assertReadyEcommerceExecution(plan: EcommerceEditPlan, execution: Ecomm
     }
 }
 
-export async function prepareEcommerceSceneSelectionResume(run: AgentRun, selection: unknown, origin: string, cookie: string, actorUserId: string): Promise<AgentRunTask[]> {
-    const plan = run.ecommerceSnapshot?.plan;
-    const task = ecommerceSceneSelectionTask(run);
-    if (!plan || !task?.ecommerceExecution) throw new Error("当前任务不能确认编辑区域");
-    if (!actorUserId?.trim() || !selection || typeof selection !== "object") throw new Error("请在原图上确认允许编辑的区域，包含新增物体及其接触阴影");
-    const input = selection as { baselineAssetId?: unknown; region?: ProductProtectionRectangle };
-    if (input.baselineAssetId !== plan.source.currentSceneBaselineId || !input.region) throw new Error("选区与任务的原图基线不匹配");
-    const ids = task.ecommerceExecution.referenceRoles.map((reference) => reference.assetId);
-    const assets = await getCreativeAssetsByIds(ids, run.userId);
-    if (ids.some((id) => !assets.some((asset) => asset.id === id && asset.userId === run.userId && asset.conversationId === run.conversationId && asset.type === "image" && asset.status === "ready" && assetAccessUrl(asset))))
-        throw new Error("参考图片不可用或没有访问权限");
-    const baseline = assets.find((asset) => asset.id === input.baselineAssetId && asset.userId === run.userId && asset.conversationId === run.conversationId && asset.type === "image" && asset.status === "ready");
-    const url = baseline ? assetAccessUrl(baseline) : undefined;
-    if (!baseline || !url) throw new Error("原图不可用或没有访问权限");
-    const source = await loadEcommercePlanningImage(url, origin, cookie);
-    const protection = await buildSceneEditProtection(source, baseline.id, input.region, plan.delta.requestedChanges, "user_selection");
-    protection.confirmation = { actorUserId, confirmedAt: Date.now() };
-    const canvas = plan.canvas;
-    if (!canvas || canvas.mode !== "exact" || canvas.size.width !== protection.sourceSize.width || canvas.size.height !== protection.sourceSize.height) throw new Error("局部编辑必须保持原图画幅，请重新发起符合原图尺寸的请求");
-    const executable = createEcommerceSceneEditTask(run, plan, assets, task.ecommerceExecution, protection);
-    return [{ ...executable, id: task.id, count: task.count, attempts: task.attempts }];
-}
-
 function sceneReferenceAssets(plan: EcommerceEditPlan, assets: CreativeAsset[]) {
     return [...new Set(plan.source.sceneReferenceIds)]
         .filter((id) => id !== plan.source.currentSceneBaselineId && id !== plan.source.productAnchorId)
@@ -503,82 +423,8 @@ function assertCompiledReferences(references: NonNullable<AgentRunTask["referenc
     }
 }
 
-function borderIndexes(width: number, height: number) {
-    const indexes = new Set<number>();
-    for (let x = 0; x < width; x += 1) {
-        indexes.add(x);
-        indexes.add((height - 1) * width + x);
-    }
-    for (let y = 0; y < height; y += 1) {
-        indexes.add(y * width);
-        indexes.add(y * width + width - 1);
-    }
-    return [...indexes];
-}
-
 function decodeProductPixels(source: Buffer) {
     return sharp(source).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-}
-
-function floodBackground(width: number, height: number, candidate: (index: number) => boolean) {
-    const visited = new Uint8Array(width * height);
-    const queue = borderIndexes(width, height).filter(candidate);
-    queue.forEach((index) => (visited[index] = 1));
-    for (let cursor = 0; cursor < queue.length; cursor += 1) {
-        const index = queue[cursor];
-        for (const next of neighbors(index, width, height)) {
-            if (!visited[next] && candidate(next)) {
-                visited[next] = 1;
-                queue.push(next);
-            }
-        }
-    }
-    return visited;
-}
-
-function connectedComponents(width: number, height: number, foreground: (index: number) => boolean) {
-    const visited = new Uint8Array(width * height);
-    const output: number[][] = [];
-    for (let start = 0; start < visited.length; start += 1) {
-        if (visited[start] || !foreground(start)) continue;
-        const component: number[] = [];
-        const queue = [start];
-        visited[start] = 1;
-        for (let cursor = 0; cursor < queue.length; cursor += 1) {
-            const index = queue[cursor];
-            component.push(index);
-            for (const next of neighbors(index, width, height)) {
-                if (!visited[next] && foreground(next)) {
-                    visited[next] = 1;
-                    queue.push(next);
-                }
-            }
-        }
-        output.push(component);
-    }
-    return output;
-}
-
-function neighbors(index: number, width: number, height: number) {
-    const x = index % width;
-    const y = Math.floor(index / width);
-    return [...(x > 0 ? [index - 1] : []), ...(x + 1 < width ? [index + 1] : []), ...(y > 0 ? [index - width] : []), ...(y + 1 < height ? [index + width] : [])];
-}
-
-function componentBounds(component: number[], width: number): ProductProtectionRectangle {
-    let left = width;
-    let top = Number.POSITIVE_INFINITY;
-    let right = -1;
-    let bottom = -1;
-    for (const index of component) {
-        const x = index % width;
-        const y = Math.floor(index / width);
-        left = Math.min(left, x);
-        top = Math.min(top, y);
-        right = Math.max(right, x);
-        bottom = Math.max(bottom, y);
-    }
-    return { x: left, y: top, width: right - left + 1, height: bottom - top + 1 };
 }
 
 function expand(bounds: ProductProtectionRectangle, width: number, height: number) {
@@ -593,17 +439,4 @@ function expand(bounds: ProductProtectionRectangle, width: number, height: numbe
 
 function normalize(bounds: ProductProtectionRectangle, width: number, height: number) {
     return { x: bounds.x / width, y: bounds.y / height, width: bounds.width / width, height: bounds.height / height };
-}
-
-function normalizedRectangle(region: { x: number; y: number; width: number; height: number }, width: number, height: number): ProductProtectionRectangle {
-    const left = Math.round(region.x * width);
-    const top = Math.round(region.y * height);
-    const right = Math.round((region.x + region.width) * width);
-    const bottom = Math.round((region.y + region.height) * height);
-    if (left < 0 || top < 0 || right > width || bottom > height || right <= left || bottom <= top) throw new EcommerceProductSegmentationError("局部编辑目标区域无效");
-    return { x: left, y: top, width: right - left, height: bottom - top };
-}
-
-function containsPixel(rectangle: ProductProtectionRectangle, x: number, y: number) {
-    return x >= rectangle.x && x < rectangle.x + rectangle.width && y >= rectangle.y && y < rectangle.y + rectangle.height;
 }

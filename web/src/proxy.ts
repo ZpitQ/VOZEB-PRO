@@ -29,7 +29,8 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-    matcher: "/((?!_next/static|_next/image|favicon.ico).*)",
+    // Output Routes verify Worker identity themselves; bypass proxy body cloning for large artifacts.
+    matcher: "/((?!_next/static|_next/image|favicon.ico|api/maintenance/image-processing/[^/]+/outputs/[^/]+/?$).*)",
 };
 
 function securedNextResponse(requestHeaders: Headers, contentSecurityPolicy: string) {

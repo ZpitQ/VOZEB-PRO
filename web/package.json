@@ -8,7 +8,7 @@
         "build": "node scripts/production-build.mjs",
         "start": "node --env-file-if-exists=.env.local scripts/start-standalone.mjs",
         "start:standalone": "node --env-file-if-exists=.env.local scripts/start-standalone.mjs",
-        "worker:generation": "node --env-file-if-exists=.env.local scripts/generation-worker.mjs",
+        "worker:generation": "node scripts/build-image-processing.mjs && node --env-file-if-exists=.env.local scripts/generation-worker.mjs",
         "backup:disaster": "node --env-file-if-exists=.env.local scripts/disaster-backup.mjs",
         "restore:disaster": "node --env-file-if-exists=.env.local scripts/disaster-restore.mjs",
         "test": "vitest run",

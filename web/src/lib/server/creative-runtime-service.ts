@@ -15,6 +15,8 @@ import { writePersistentMediaDataUrl } from "@/lib/server/reference-asset-store"
 import { deleteCreativeConversationAggregates } from "@/lib/server/creative-entity-deletion-store";
 import { deleteUserMediaAssetsCascade } from "@/lib/server/user-media-deletion-service";
 import { publicImageResultEnhancement, type ImageResultEnhancementInput } from "@/lib/image-enhancement-contract";
+import type { RuntimeFileDatabase } from "./creative-runtime-repository";
+import type { QueryExecutor } from "./database";
 
 export class CreativeRuntimeServiceError extends Error {
     constructor(
@@ -48,8 +50,8 @@ export function listConversationsForUser(userId: string, input: { surface?: stri
     return listCreativeConversations(userId, { surface: surface || undefined, source: source || undefined, projectId, status, limit: Number(input.limit), offset: Number(input.offset) });
 }
 
-export async function getConversationForUser(userId: string, id: string) {
-    const conversation = await getCreativeConversation(id, userId);
+export async function getConversationForUser(userId: string, id: string, executor?: QueryExecutor) {
+    const conversation = await getCreativeConversation(id, userId, executor);
     if (!conversation || conversation.userId !== userId) throw new CreativeRuntimeServiceError("创作会话不存在", 404);
     return conversation;
 }
@@ -137,9 +139,11 @@ export async function registerGenerationTaskAssetsForUser(
         title: string;
         assets: Array<{ type: "image" | "video" | "audio"; url: string; mimeType?: string; width?: number; height?: number; durationMs?: number; bytes?: number } & ImageResultEnhancementInput>;
     },
+    fileDb?: RuntimeFileDatabase,
+    executor?: QueryExecutor,
 ) {
     if (!input.conversationId || !input.assets.length) return [];
-    await getConversationForUser(userId, input.conversationId);
+    await getConversationForUser(userId, input.conversationId, executor);
     return registerCreativeAssets(
         input.assets.map((asset, ordinal) => {
             const remoteUrl = /^https?:\/\//i.test(asset.url) ? asset.url : undefined;
@@ -163,6 +167,8 @@ export async function registerGenerationTaskAssetsForUser(
                 metadata: { surface: input.surface, projectId: input.projectId, ...(asset.type === "image" ? publicImageResultEnhancement(asset) : {}) },
             };
         }),
+        executor,
+        fileDb,
     );
 }
 

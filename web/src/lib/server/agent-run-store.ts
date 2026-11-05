@@ -1,3 +1,6 @@
+import { commitAgentImageProcessingFact, repairAgentImageProcessingFacts, type AgentImageProcessingFact, type AgentImageProcessingObservation } from "./agent-run-image-processing-projection";
+import type { ReviewFrozenMedia, RunMutation } from "./creative-runtime-repository";
+import { reviewContextDigest } from "./ecommerce-visual-review-identity";
 import { nanoid } from "nanoid";
 import { isDeepStrictEqual } from "node:util";
 import type { CreativeFoundation, CreativeReview } from "@/lib/creative-agent-contract";
@@ -41,6 +44,7 @@ export type AgentRunChildTask = {
     id: string;
     status: "pending" | "needs_review" | "completed" | "failed" | "cancelled";
     attempt: number;
+    imageProcessingFact?: AgentImageProcessingFact;
     result?: unknown;
     error?: string;
 };
@@ -571,14 +575,24 @@ export async function updateAgentRunById(
     allowedStatuses?: AgentRunStatus[],
     expectedExecutionId?: string,
     expectedTasks?: AgentRunTask[],
-    expectedReview?: { attempts: number; reviewed: boolean },
+    expectedReview?: { attempts: number; reviewed: boolean; contextDigest?: string; currentContextDigest?: string; sources?: ReviewFrozenMedia[]; claim?: { workerId: string; executionId: string } },
 ) {
     return mutateCreativeRun<AgentRun>(
         id,
         TTL,
-        (current) => {
-            if (expectedTasks && JSON.stringify(current.tasks) !== JSON.stringify(expectedTasks)) return null;
+        (current, context) => {
+            if (expectedTasks && !isDeepStrictEqual(current.tasks, expectedTasks)) return null;
             if (expectedReview && ((current.reviewAttempts || 0) !== expectedReview.attempts || Boolean(current.reviewed) !== expectedReview.reviewed)) return null;
+            if (expectedReview?.contextDigest && current.ecommerceSnapshot?.visualReview?.contextDigest !== expectedReview.contextDigest) return null;
+            if (
+                expectedReview?.currentContextDigest &&
+                expectedReview.claim &&
+                reviewContextDigest(
+                    current,
+                    context.persistedChildren.filter((child) => child.type === "image").map((child) => child.payload as ImageTask),
+                ) !== expectedReview.currentContextDigest
+            )
+                return null;
             const next = { ...current, ...patch, status: patch.status || current.status };
             return {
                 run: next,
@@ -589,57 +603,77 @@ export async function updateAgentRunById(
         },
         allowedStatuses,
         expectedExecutionId,
+        expectedReview?.claim ? { reviewClaim: expectedReview.claim, ...(expectedReview.sources ? { reviewSources: expectedReview.sources } : {}) } : undefined,
     );
 }
 
-export async function updateAgentRunTaskById(id: string, taskId: string, patch: Partial<AgentRunTask>, eventType: string, expectedExecutionId: string) {
-    return mutateCreativeRun<AgentRun>(
-        id,
-        TTL,
-        (current) => {
-            const tasks = current.tasks.map((task) => (task.id === taskId ? mergeAgentTaskPatch(task, patch) : task));
-            const taskIndex = tasks.findIndex((item) => item.id === taskId);
-            const task = tasks[taskIndex];
-            if (!task) return null;
-            const output = current.surface === "canvas" ? taskCanvasEventOps(id, taskIndex, task, eventType, patch.childTasks?.[0]?.id) : null;
-            const assetIds = Array.from(new Set([...current.assetIds, ...(task.assetIds || [])]));
-            const now = Date.now();
-            const completed = tasks.filter((item) => item.status === "completed");
-            const completedChildren = task.childTasks?.filter((child) => child.status === "completed").length || 0;
-            const failedChildren = task.childTasks?.filter((child) => child.status === "failed").length || 0;
-            const totalChildren = Math.max(resolveAgentTaskCountForEvent(task), task.childTasks?.length || 0);
-            const timings: AgentRunTimings = {
-                ...(current.timings || { requestAcceptedAt: current.createdAt }),
-                ...(eventType === "task.created" && !current.timings?.firstTaskSubmittedAt ? { firstTaskSubmittedAt: now } : {}),
-                ...((eventType === "task.completed" || eventType === "task.child.completed") && !current.timings?.firstResultReadyAt ? { firstResultReadyAt: now } : {}),
-                ...(eventType === "task.completed" && completed.length === tasks.length ? { allResultsReadyAt: now } : {}),
-            };
-            return {
-                run: { ...current, tasks, assetIds, timings },
-                event: {
-                    type: eventType,
-                    data: {
-                        taskId,
-                        taskNodeId: `task-${id}-${taskIndex}`,
-                        outputNodeIds: output?.nodeIds,
-                        ops: output?.ops,
-                        assetIds: task.assetIds,
-                        title: task.title,
-                        type: task.type,
-                        status: task.status,
-                        attempts: task.attempts,
-                        error: task.error,
-                        completedCount: completedChildren,
-                        failedCount: failedChildren,
-                        totalCount: totalChildren,
-                        message: eventType === "task.completed" ? agentTaskCompletionMessage(task, current.surface) : undefined,
-                    },
-                },
-            };
+export async function updateAgentRunTaskById(id: string, taskId: string, patch: Partial<AgentRunTask>, eventType: string, expectedExecutionId: string, observed?: AgentImageProcessingObservation) {
+    if (observed) {
+        if (!observed.fact || observed.runId !== id || observed.taskId !== taskId || observed.fact.eventType !== eventType) return null;
+        const updated = await commitAgentImageProcessingFact(
+            id,
+            { observation: observed, executionId: expectedExecutionId, ttlMs: TTL, mutate: (current) => agentTaskMutation(current, taskId, patch, eventType)?.run || null },
+            projectAgentImageProcessingFact,
+        );
+        return updated ? reconcileAgentRunImageProcessingFacts(updated) : null;
+    }
+    return mutateCreativeRun<AgentRun>(id, TTL, (current) => agentTaskMutation(current, taskId, patch, eventType), ["running"], expectedExecutionId);
+}
+
+export function reconcileAgentRunImageProcessingFacts(run: AgentRun) {
+    return repairAgentImageProcessingFacts(run, projectAgentImageProcessingFact);
+}
+
+function projectAgentImageProcessingFact(run: AgentRun, observed: AgentImageProcessingObservation & { fact: AgentImageProcessingFact }) {
+    const taskIndex = run.tasks.findIndex((task) => task.id === observed.taskId);
+    const event = agentTaskEvent(run, taskIndex, run.tasks[taskIndex], observed.fact.eventType, observed.imageId);
+    const metadata = { assetIds: run.assetIds, taskIds: Array.from(new Set(run.tasks.flatMap((task) => task.taskIds || (task.taskId ? [task.taskId] : [])))) };
+    const assistant = run.status === "completed" ? { status: "completed" as const, metadata } : assistantUpdate(run, event) || { status: "running" as const, metadata };
+    return { run, event, assistant };
+}
+
+function agentTaskMutation(current: AgentRun, taskId: string, patch: Partial<AgentRunTask>, eventType: string): RunMutation<AgentRun> | null {
+    const tasks = current.tasks.map((task) => (task.id === taskId ? mergeAgentTaskPatch(task, patch) : task));
+    const taskIndex = tasks.findIndex((item) => item.id === taskId);
+    const task = tasks[taskIndex];
+    if (!task) return null;
+    const assetIds = Array.from(new Set([...current.assetIds, ...(task.assetIds || [])]));
+    const now = Date.now();
+    const completed = tasks.filter((item) => item.status === "completed");
+    const timings: AgentRunTimings = {
+        ...(current.timings || { requestAcceptedAt: current.createdAt }),
+        ...(eventType === "task.created" && !current.timings?.firstTaskSubmittedAt ? { firstTaskSubmittedAt: now } : {}),
+        ...((eventType === "task.completed" || eventType === "task.child.completed") && !current.timings?.firstResultReadyAt ? { firstResultReadyAt: now } : {}),
+        ...(eventType === "task.completed" && completed.length === tasks.length ? { allResultsReadyAt: now } : {}),
+    };
+    const run = { ...current, tasks, assetIds, timings };
+    return { run, event: agentTaskEvent(run, taskIndex, task, eventType, patch.childTasks?.[0]?.id) };
+}
+
+function agentTaskEvent(run: AgentRun, taskIndex: number, task: AgentRunTask, eventType: string, childId?: string) {
+    const output = run.surface === "canvas" ? taskCanvasEventOps(run.id, taskIndex, task, eventType, childId) : null;
+    const completedChildren = task.childTasks?.filter((child) => child.status === "completed").length || 0;
+    const failedChildren = task.childTasks?.filter((child) => child.status === "failed").length || 0;
+    const totalChildren = Math.max(resolveAgentTaskCountForEvent(task), task.childTasks?.length || 0);
+    return {
+        type: eventType,
+        data: {
+            taskId: task.id,
+            taskNodeId: `task-${run.id}-${taskIndex}`,
+            outputNodeIds: output?.nodeIds,
+            ops: output?.ops,
+            assetIds: task.assetIds,
+            title: task.title,
+            type: task.type,
+            status: task.status,
+            attempts: task.attempts,
+            error: task.error,
+            completedCount: completedChildren,
+            failedCount: failedChildren,
+            totalCount: totalChildren,
+            message: eventType === "task.completed" ? agentTaskCompletionMessage(task, run.surface) : undefined,
         },
-        ["running"],
-        expectedExecutionId,
-    );
+    };
 }
 
 function resolveAgentTaskCountForEvent(task: AgentRunTask) {
@@ -679,6 +713,7 @@ function assistantUpdate(run: AgentRun, event?: { type: string; data?: unknown }
         const reviewText = (typeof data.error === "string" ? data.error : run.tasks.find((task) => task.status === "needs_review")?.error)?.trim();
         if (reviewText) return { status: "running" as const, content: reviewText };
     }
+    if (run.status === "running" && event?.type === "ecommerce.progress" && typeof data.text === "string") return { status: "running" as const, content: data.text };
     if (event?.type === "run.retry.requested") return { status: "running" as const, content: "正在重新分析并执行这次请求…" };
     if (run.status === "running" && event?.type === "task.retry.requested") return { status: "running" as const, content: "正在重新生成失败任务…" };
     if (run.status === "completed") {

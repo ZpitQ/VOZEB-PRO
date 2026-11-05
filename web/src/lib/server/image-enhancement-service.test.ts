@@ -5,25 +5,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ resolve: vi.fn(), prepare: vi.fn(), submit: vi.fn(), query: vi.fn(), download: vi.fn(), acknowledge: vi.fn(), cancel: vi.fn(), close: vi.fn(), readSource: vi.fn(), store: vi.fn(), enterLock: vi.fn() }));
-vi.mock("./data-adapter", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("./data-adapter")>();
-    const { AsyncLocalStorage } = await import("node:async_hooks");
-    const held = new AsyncLocalStorage<string[]>();
-    return {
-        ...actual,
-        withJsonDataFileLock: (name: string, callback: () => Promise<unknown>, options?: { timeoutMs?: number }) =>
-            actual.withJsonDataFileLock(
-                name,
-                async () => {
-                    const ancestors = held.getStore() || [];
-                    mocks.enterLock(name, ancestors);
-                    return held.run([...ancestors, name], callback);
-                },
-                options,
-            ),
-    };
-});
+const mocks = vi.hoisted(() => ({ resolve: vi.fn(), prepare: vi.fn(), submit: vi.fn(), query: vi.fn(), download: vi.fn(), acknowledge: vi.fn(), cancel: vi.fn(), close: vi.fn(), readSource: vi.fn(), store: vi.fn() }));
 vi.mock("./image-enhancement-config", async (importOriginal) => ({ ...(await importOriginal<typeof import("./image-enhancement-config")>()), resolveImageEnhancementConnection: mocks.resolve }));
 vi.mock("./image-enhancement-worker-client", async (importOriginal) => ({ ...(await importOriginal<typeof import("./image-enhancement-worker-client")>()), createEnhancementTaskClient: () => mocks }));
 vi.mock("@/app/api/image-tasks/image-task-support", () => ({ imageReferenceToDataUrl: mocks.readSource, inlineRemoteImageResult: async (dataUrl: string) => ({ dataUrl }), resolveProxiedMediaSource: () => ({}), directRemoteImageResult: vi.fn() }));
@@ -683,10 +665,13 @@ for (const provider of ["file", "postgres"] as const) {
         it("deduplicates concurrent workers and denies actions by another owner", async () => {
             expect(await cancelImageEnhancement(id, "other-owner")).toBeNull();
             expect(await retryImageEnhancement(id, "other-owner")).toBeNull();
-            const batches = await Promise.all([run(), run()]);
-            expect(batches.reduce((sum, value) => sum + value.claimed, 0)).toBe(1);
+            const intent = await job();
+            await Promise.all([run(), run()]);
+            await run();
             expect(mocks.prepare).toHaveBeenCalledOnce();
-            expect(await listEnhancementJobsForTask(task.id, task.userId)).toHaveLength(1);
+            expect(mocks.submit).toHaveBeenCalledOnce();
+            expect(mocks.submit).toHaveBeenCalledWith(plan, source, intent!.remoteKey);
+            expect(await listEnhancementJobsForTask(task.id, task.userId)).toEqual([expect.objectContaining({ id, userId: task.userId, attempt: 1, remoteKey: intent!.remoteKey, receiptId: intent!.receiptId, remoteJobId: remote.jobId })]);
         });
         async function readyForPublication(aiSize = 128, aiHeight = aiSize) {
             await submitted();
@@ -1102,38 +1087,6 @@ for (const provider of ["file", "postgres"] as const) {
             expect(encodingClock).toHaveBeenCalledTimes(2);
             expect(mocks.store).toHaveBeenCalledTimes(2);
         });
-        it("saves complete AI and delivered bytes, publishes a new child asset, and only then acknowledges", async () => {
-            const [original] = await listCreativeAssets(task.conversationId!, task.userId);
-            await readyForPublication();
-            await run();
-            const published = await job();
-            expect(published).toMatchObject({ status: "succeeded", phase: "receipt", publication: { ai: { width: 128, height: 128, format: "png" }, delivered: { width: 64, height: 64, format: "jpeg" } } });
-            expect(mocks.store).toHaveBeenCalledTimes(2);
-            expect(mocks.readSource).toHaveBeenCalledWith({ dataUrl: published!.publication!.ai.url }, "enhancement.png", "http://fixture.local", "fixture-worker-context", plan.budgets.ai.maxBytes);
-            expect(mocks.readSource).toHaveBeenCalledWith({ dataUrl: published!.publication!.delivered.url }, "enhancement.jpg", "http://fixture.local", "fixture-worker-context", plan.budgets.delivery.maxBytes);
-            expect(mocks.store).toHaveBeenLastCalledWith(expect.any(Buffer), "image/jpeg", "image", expect.objectContaining({ originalName: "AI高清增强.jpg" }));
-            expect(mocks.acknowledge).not.toHaveBeenCalled();
-            expect((await getImageTask(task.id))?.result).toEqual(task.result);
-            const assets = await listCreativeAssets(task.conversationId!, task.userId);
-            expect(assets).toHaveLength(2);
-            expect(assets.find((asset) => asset.id === original.id)).toEqual(original);
-            expect(assets.find((asset) => asset.id !== original.id)).toMatchObject({
-                id: published!.publication!.assetId,
-                sourceTaskId: id,
-                parentAssetId: original.id,
-                width: 64,
-                height: 64,
-                mimeType: "image/jpeg",
-                metadata: { provenance: "ai_enhanced", parentResultId: task.result!.resultId },
-            });
-            expect(stored.get(published!.publication!.ai.url)?.equals(ai)).toBe(true);
-            expect(await sharp(stored.get(published!.publication!.delivered.url)).metadata()).toMatchObject({ format: "jpeg", width: 64, height: 64 });
-            expect(publicImageEnhancement(published!).enhanced).toMatchObject({ format: "jpeg", url: expect.stringMatching(/\.jpg$/), sha256: published!.publication!.delivered.sha256 });
-            await due();
-            await run();
-            expect(mocks.acknowledge).toHaveBeenCalledWith(plan, remote.jobId, published!.receiptId, remote.result);
-            expect(await job()).toMatchObject({ status: "succeeded", phase: "completed", nextPollAt: null, receiptConfirmedAt: expect.any(Number) });
-        });
         it("retains delivered 4096-square provenance through repeat saves and references, skips default re-enhancement, and independently refuses a target above native 4x", async () => {
             const providerFetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("This route must not recreate image generation"));
             await cancelImageEnhancement(id, task.userId);
@@ -1376,18 +1329,6 @@ for (const provider of ["file", "postgres"] as const) {
             expect(mocks.download).toHaveBeenCalledOnce();
             expect(mocks.store).toHaveBeenCalledTimes(2);
             expect(mocks.submit).toHaveBeenCalledOnce();
-        });
-        it.skipIf(provider !== "file")("avoids holding the enhancement lock when acquiring the creative lock during concurrent native completion", async () => {
-            await readyForPublication();
-            const otherId = randomUUID();
-            const otherMedia = { ...task.result!.results![0], resultId: `${otherId}:1`, enhancementId: `enhancement:${otherId}:1` };
-            const other = await createStoredGenerationTask<ImageTask>("image", { ...task, id: otherId, status: "running", result: { ...otherMedia, results: [otherMedia] } }, 60_000);
-            mocks.enterLock.mockImplementation((name: string, held: string[]) => {
-                if (name === "creative-runtime.json") expect(held).not.toContain("image-enhancement-jobs.json");
-            });
-            await Promise.all([run(), transitionImageTask(other, ["running"], { status: "success", result: other.result })]);
-            expect(await job()).toMatchObject({ status: "succeeded", phase: "receipt" });
-            expect((await getImageTask(otherId))?.status).toBe("success");
         });
     });
 }

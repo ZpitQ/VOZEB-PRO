@@ -1,33 +1,44 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import assert from "node:assert/strict";
+import { prepareAdvisoryReview, recoverAdvisoryReview } from "./ecommerce-visual-review.test-fixture";
+import { randomUUID } from "node:crypto";
+import { completeClaimedImageProcessingFixture, completeImageTaskResultFixture } from "./image-processing.test-fixture";
+import { routeEcommerceRole } from "./ecommerce-model-routing";
+import { toSystemGenerationChannel } from "./generation-channel";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ImageTask } from "./image-task-store";
+import type { AgentRun } from "./agent-run-store";
+import type { LocalMediaRegistration } from "./local-media-registry";
 
-const transport = vi.hoisted(() => ({ request: vi.fn(), settings: {} as never }));
+const transport = vi.hoisted(() => ({ request: vi.fn(), create: vi.fn(), poll: vi.fn(), settings: {} as never }));
 vi.mock("./database", async (original) => ({ ...(await original<typeof import("./database")>()), getDatabaseProvider: () => "file" }));
 vi.mock("@/lib/auth/store", () => ({ getAuthSettings: async () => transport.settings, refundUserPoints: vi.fn() }));
-vi.mock("./internal-origin", () => ({ fetchInternalApi: transport.request }));
+vi.mock("./internal-origin", async (original) => ({ ...(await original<typeof import("./internal-origin")>()), fetchInternalApi: transport.request }));
 vi.mock("./safe-outbound-fetch", () => ({
     fetchSafeOutbound: () => {
         throw new Error("fixture forbids external requests");
     },
 }));
-vi.mock("./generation-task-scheduler", async (original) => ({ ...(await original<typeof import("./generation-task-scheduler")>()), scheduleGenerationTask: vi.fn() }));
-vi.mock("./generation-log-store", () => ({ attachEcommerceTraceToGenerationLogs: async () => ({ updated: 1 }) }));
+vi.mock("@/app/api/image-tasks/image-task-support", async (original) => ({ ...(await original<typeof import("@/app/api/image-tasks/image-task-support")>()), imageSubmissionFetch: transport.create, pollOpenAiImageTask: transport.poll }));
 
-import { createAgentRun, getAgentRun, selectCurrentSceneBaseline, updateAgentRunById } from "./agent-run-store";
-import { executeAgentRun } from "./agent-run-executor";
-import { processAgentRunReview } from "./agent-run-execution";
-import { createCreativeConversation, getCreativeAssetsByIds, listCreativeRunEvents, registerCreativeAssets } from "./creative-runtime-store";
-import { createStoredGenerationTask } from "./generation-task-store";
-import { getImageTask } from "./image-task-store";
-import { ECOMMERCE_QUALITY_CHECK_KEYS } from "./ecommerce-quality-check";
-import { prepareEcommerceSceneSelectionResume } from "./ecommerce-generation-service";
-import { compileEcommerceImageRequest } from "./ecommerce-image-compiler";
-import { compositeSceneEdit } from "./ecommerce-product-regions";
-import { referenceUsesFromEcommerceDecision } from "./ecommerce-reference-purpose";
+let createAgentRun: typeof import("./agent-run-store").createAgentRun;
+let getAgentRun: typeof import("./agent-run-store").getAgentRun;
+let selectCurrentSceneBaseline: typeof import("./agent-run-store").selectCurrentSceneBaseline;
+let updateAgentRunById: typeof import("./agent-run-store").updateAgentRunById;
+let executeAgentRun: typeof import("./agent-run-executor").executeAgentRun;
+let createCreativeConversation: typeof import("./creative-runtime-store").createCreativeConversation;
+let getCreativeAssetsByIds: typeof import("./creative-runtime-store").getCreativeAssetsByIds;
+let listCreativeRunEvents: typeof import("./creative-runtime-store").listCreativeRunEvents;
+let registerCreativeAssets: typeof import("./creative-runtime-store").registerCreativeAssets;
+let createImageTask: typeof import("./image-task-store").createImageTask;
+let getImageTask: typeof import("./image-task-store").getImageTask;
+let ECOMMERCE_QUALITY_CHECK_KEYS: typeof import("./ecommerce-quality-check").ECOMMERCE_QUALITY_CHECK_KEYS;
+let createEcommerceSceneEditTask: typeof import("./ecommerce-generation-service").createEcommerceSceneEditTask;
+let compileEcommerceImageRequest: typeof import("./ecommerce-image-compiler").compileEcommerceImageRequest;
+let buildSceneEditProtection: typeof import("./ecommerce-product-regions").buildSceneEditProtection;
+let referenceUsesFromEcommerceDecision: typeof import("./ecommerce-reference-purpose").referenceUsesFromEcommerceDecision;
 import { settings } from "./agent-run-executor.test-fixtures";
 
 describe("scene continuity with real services and file persistence", () => {
@@ -37,7 +48,11 @@ describe("scene continuity with real services and file persistence", () => {
     let submissions: Array<{ id: string; body: Record<string, unknown> }>;
     let interruptAfterSubmission: boolean;
     let adjustment: boolean;
-    let storedMedia: Map<string, Buffer>;
+    let scheduler: typeof import("./generation-task-scheduler");
+    let tasks: typeof import("./generation-task-store");
+    let mediaRegistry: typeof import("./local-media-registry");
+    let mediaStorage: typeof import("./local-media-storage");
+    let processing: typeof import("./image-processing-service");
     const structure = [{ objectId: "cabinet", feature: "drawers", count: 3, certainty: "confirmed", evidenceRegion: { x: 20, y: 25, width: 60, height: 45 } }] as const;
     const photography = {
         materials: [{ objectId: "cabinet", textureDirection: "vertical", textureScale: "fine", roughness: "matte", gloss: "low" }],
@@ -45,13 +60,18 @@ describe("scene continuity with real services and file persistence", () => {
         composition: { focalSubject: "cabinet", depth: "existing room depth", negativeSpace: "above cabinet" },
     };
     beforeEach(async () => {
+        vi.resetModules();
         directory = await mkdtemp(join(tmpdir(), "vozeb-scene-continuity-"));
         vi.stubEnv("VOZEB_PRO_DATA_DIR", directory);
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "off");
+        vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_MEMORY_MB", "8192");
+        vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_HEAP_MB", "64");
+        vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB", "6144");
+        vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_HEAP_MB", "384");
+        vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_CONCURRENCY", "1");
         submissions = [];
         interruptAfterSubmission = false;
         adjustment = false;
-        storedMedia = new Map();
         bytes = await sharp(
             Buffer.from(
                 '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80"><rect width="100" height="80" fill="#ddd"/><rect x="20" y="25" width="60" height="45" fill="#987654"/><path d="M20 40H80M20 55H80M45 33H55M45 48H55M45 63H55" stroke="#432"/></svg>',
@@ -71,34 +91,49 @@ describe("scene continuity with real services and file persistence", () => {
         configured.systemChannels.find((channel) => channel.id === "image-channel")!.models = ["gpt-image-2.5-flare"];
         configured.logicalModels.find((model) => model.id === "image-model")!.bindings[0].upstreamModel = "gpt-image-2.5-flare";
         transport.settings = configured as never;
+        ({ createAgentRun, getAgentRun, selectCurrentSceneBaseline, updateAgentRunById } = await import("./agent-run-store"));
+        ({ executeAgentRun } = await import("./agent-run-executor"));
+        ({ createCreativeConversation, getCreativeAssetsByIds, listCreativeRunEvents, registerCreativeAssets } = await import("./creative-runtime-store"));
+        ({ createImageTask, getImageTask } = await import("./image-task-store"));
+        ({ ECOMMERCE_QUALITY_CHECK_KEYS } = await import("./ecommerce-quality-check"));
+        ({ createEcommerceSceneEditTask } = await import("./ecommerce-generation-service"));
+        ({ compileEcommerceImageRequest } = await import("./ecommerce-image-compiler"));
+        ({ buildSceneEditProtection } = await import("./ecommerce-product-regions"));
+        ({ referenceUsesFromEcommerceDecision } = await import("./ecommerce-reference-purpose"));
+        [scheduler, tasks, mediaRegistry, mediaStorage, processing] = await Promise.all([
+            import("./generation-task-scheduler"),
+            import("./generation-task-store"),
+            import("./local-media-registry"),
+            import("./local-media-storage"),
+            import("./image-processing-service"),
+        ]);
+        transport.create.mockReset().mockImplementation(async (_config, _url, init) => {
+            expect(init.method).toBe("POST");
+            return Response.json({ id: "fixture-upstream-" + randomUUID(), status: "pending" });
+        });
+        transport.poll.mockReset().mockImplementation(async () => ({ dataUrl: "data:image/png;base64," + bytes.toString("base64") }));
         transport.request.mockReset().mockImplementation(async (url: string, init?: RequestInit) => {
             try {
-                if (/\/api\/(reference-assets|generation-log-assets)\//.test(url))
-                    return new Response(new Uint8Array(storedMedia.get(new URL(url).pathname) || (url.endsWith("/style-scene-upload.png") ? styleBytes : bytes)), { headers: { "content-type": "image/png" } });
+                if (/\/api\/(reference-assets|generation-log-assets)\//.test(url)) {
+                    const media = await readFixtureMedia(url);
+                    return new Response(new Uint8Array(media.bytes), { headers: { "content-type": media.mimeType } });
+                }
                 if (init?.method === "POST" && url.endsWith("/api/image-tasks")) {
                     const body = JSON.parse(String(init.body));
-                    const id = `fixture-image-${submissions.length + 1}`;
-                    submissions.push({ id, body });
-                    const baseline = body.sceneProtection ? (await getCreativeAssetsByIds([body.sceneProtection.sourceAssetId], "scene-user"))[0] : undefined;
-                    const baselineBytes = (baseline?.serverUrl && storedMedia.get(baseline.serverUrl)) || bytes;
-                    const composite = body.sceneProtection ? await compositeSceneEdit(baselineBytes, bytes, body.sceneProtection) : undefined;
-                    storedMedia.set(`/api/generation-log-assets/${id}.png`, composite?.bytes || bytes);
-                    storedMedia.set(`/api/generation-log-assets/${id}-native.png`, bytes);
-                    const image = {
-                        id,
+                    const { prepareEcommerceImageTask, schedulePreparedImageTask } = await import("./ecommerce-image-task-orchestration");
+                    const { reviewReason, ...prepared } = prepareEcommerceImageTask({ ...body, compatibleConfigs: [{ ...body.config, ...toSystemGenerationChannel(routeEcommerceRole(transport.settings, "image_generation")!) }] });
+                    expect(reviewReason).toBe("");
+                    const child = await createImageTask({
+                        ...body,
+                        ...body.context,
                         userId: "scene-user",
-                        status: "success",
-                        config: body.config,
-                        createdAt: Date.now(),
-                        updatedAt: Date.now(),
-                        result: {
-                            dataUrl: `/api/generation-log-assets/${id}.png`,
-                            serverUrl: `/api/generation-log-assets/${id}.png`,
-                            canvasEvidence: { constraint: body.ecommerceExecution.canvas, nativeSize: { width: 100, height: 80 }, storedSize: { width: 100, height: 80 }, nativeUrl: `/api/generation-log-assets/${id}-native.png`, normalization: "none" },
-                            ...(composite ? { sceneProtectionEvidence: composite.evidence } : {}),
-                        },
-                    } as ImageTask;
-                    await createStoredGenerationTask("image", image, 60_000);
+                        username: "scene-fixture",
+                        displayName: "Scene Fixture",
+                        ...prepared,
+                    });
+                    const id = child.id;
+                    submissions.push({ id, body });
+                    expect(await schedulePreparedImageTask(child, reviewReason)).toEqual({ needsReview: false });
                     return Response.json({ task: { id } });
                 }
                 if (url.includes("/api/image-tasks/")) {
@@ -106,7 +141,19 @@ describe("scene continuity with real services and file persistence", () => {
                         interruptAfterSubmission = false;
                         return new Response("temporarily unavailable", { status: 503 });
                     }
-                    const child = await getImageTask(url.split("/").at(-1)!);
+                    const child = await completeImageTaskResultFixture(url.split("/").at(-1)!, { origin: "http://fixture.local", cookie: "session=fixture", directory });
+                    const parent = child.runId ? await getAgentRun(child.runId) : null;
+                    if (parent?.ecommerceSnapshot?.plan?.planVersion === "ecommerce-edit.v6") {
+                        expect(child.nativeResults?.slots).toMatchObject([{ status: "stored" }]);
+                        assert.ok(child.resultProcessing);
+                        expect(await tasks.getStoredGenerationTaskRecord("image_processing", child.resultProcessing.jobId)).toMatchObject({
+                            status: "success",
+                            executionPhase: "completed",
+                            parentTaskId: child.id,
+                            runId: child.runId,
+                            payload: { operation: "process_result" },
+                        });
+                    }
                     return Response.json({ task: child });
                 }
                 const body = JSON.parse(String(init?.body));
@@ -204,6 +251,114 @@ describe("scene continuity with real services and file persistence", () => {
         await rm(directory, { recursive: true, force: true });
     });
 
+    async function registerFixtureMedia(scope: "reference" | "generation", storageKey: string, source: Buffer, context: Pick<LocalMediaRegistration, "conversationId" | "runId" | "taskId">) {
+        const filePath = join(scope === "reference" ? mediaStorage.REFERENCE_MEDIA_ROOT : mediaStorage.GENERATION_MEDIA_ROOT, storageKey);
+        await mkdir(dirname(filePath), { recursive: true });
+        await writeFile(filePath, source, { flag: "wx" });
+        await mediaRegistry.registerLocalMediaAsset({
+            storageKey,
+            scope,
+            storageClass: "permanent",
+            type: "image",
+            ownerUserId: "scene-user",
+            originalName: storageKey,
+            source: "fixture-scene-continuity",
+            mimeType: "image/png",
+            bytes: source.length,
+            ...context,
+        });
+    }
+
+    async function readFixtureMedia(url: string) {
+        const pathname = new URL(url, "http://fixture.local").pathname;
+        const scope = pathname.startsWith("/api/reference-assets/") ? "reference" : "generation";
+        const prefix = scope === "reference" ? "/api/reference-assets/" : "/api/generation-log-assets/";
+        const storageKey = pathname.slice(prefix.length).split("/").map(decodeURIComponent).join("/");
+        const registration = await mediaRegistry.getLocalMediaRegistration(storageKey);
+        assert(registration, "Continuity HTTP must read actual registered media");
+        expect(registration).toMatchObject({ ownerUserId: "scene-user", scope, storageProvider: "local" });
+        const source = await readFile(join(scope === "reference" ? mediaStorage.REFERENCE_MEDIA_ROOT : mediaStorage.GENERATION_MEDIA_ROOT, storageKey));
+        expect(source.length).toBe(registration.bytes);
+        return { bytes: source, mimeType: registration.mimeType };
+    }
+
+    async function registerSources(assets: Parameters<typeof registerCreativeAssets>[0]) {
+        const registered = await Promise.all(
+            assets.map(async (asset) => {
+                assert(asset.serverUrl);
+                const storageKey = asset.serverUrl.slice("/api/reference-assets/".length);
+                const source = asset.id === "style-scene-upload" ? styleBytes : bytes;
+                await registerFixtureMedia("reference", storageKey, source, { conversationId: asset.conversationId, runId: asset.sourceRunId, taskId: asset.sourceTaskId });
+                expect((await readFixtureMedia(asset.serverUrl)).bytes).toEqual(source);
+                return { ...asset, storageKey };
+            }),
+        );
+        return registerCreativeAssets(registered);
+    }
+
+    async function claimAndExecute(runId: string) {
+        const parent = await tasks.getStoredGenerationTaskRecord("agent", runId);
+        assert(parent);
+        expect(parent.workerId).toBeUndefined();
+        expect(parent.leaseUntil).toBeUndefined();
+        expect(parent.nextPollAt).toBeGreaterThan(0);
+        const workerId = `scene-continuity-parent-${randomUUID()}`;
+        expect(await scheduler.claimDueGenerationTasks({ workerId, taskIds: [runId], limit: 1 })).toMatchObject([{ id: runId, workerId }]);
+        const current = await getAgentRun(runId);
+        assert(current);
+        await executeAgentRun(current, "http://fixture.local", "session=fixture");
+        const saved = await getAgentRun(runId);
+        assert(saved);
+        return saved;
+    }
+
+    async function completePrepare(jobId: string) {
+        const { imageProcessingResourceConfig } = await import("../image-processing/resource-config");
+        const workerId = "scene-continuity-native-worker";
+        const claimed = await processing.claimImageProcessingTasks({ workerId, profileVersion: imageProcessingResourceConfig(process.env).profileVersion, availableMemoryBytes: 1024 * 1024 * 1024, slots: 1 });
+        expect(claimed.tasks).toHaveLength(1);
+        const task = claimed.tasks[0];
+        expect(task.id).toBe(jobId);
+        assert(task.payload.operation === "prepare_reference");
+        const identity = { workerId, executionId: task.executionId };
+        const { manifest: completedManifest, receipt } = await completeClaimedImageProcessingFixture(task, workerId, directory);
+        expect(receipt.parentRescheduled).toBe(true);
+        expect(completedManifest.artifacts).toHaveLength(1);
+        expect(completedManifest.artifacts[0].kind).toBe("analysis");
+        const saved = await tasks.getStoredGenerationTaskRecord("image_processing", jobId);
+        assert(saved);
+        expect(saved).toMatchObject({
+            status: "success",
+            executionPhase: "completed",
+            payload: { executionId: identity.executionId },
+            resultPayload: { executionId: identity.executionId, manifest: completedManifest, manifestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        });
+        expect(saved.workerId).toBeUndefined();
+        expect(saved.leaseUntil).toBeUndefined();
+    }
+
+    async function executeWithPreparedReferences(run: AgentRun) {
+        await scheduler.scheduleGenerationTask("agent", run.id, { executionPhase: "created", nextPollAt: Date.now() });
+        let current = await claimAndExecute(run.id);
+        const completed = new Set<string>();
+        while (current.ecommerceSnapshot?.processing?.waitingFor) {
+            const waiting = current.ecommerceSnapshot.processing.waitingFor;
+            expect(completed.has(waiting.jobId)).toBe(false);
+            completed.add(waiting.jobId);
+            const stage = await tasks.getStoredGenerationTaskRecord("image_processing", waiting.jobId);
+            assert(stage);
+            expect(stage).toMatchObject({ userId: "scene-user", runId: run.id, parentTaskId: run.id, status: "pending", executionPhase: "created", payload: { operation: "prepare_reference", inputDigest: waiting.inputDigest } });
+            expect(current.executionId).toBeUndefined();
+            const released = await tasks.getStoredGenerationTaskRecord("agent", run.id);
+            assert(released);
+            expect(released.workerId).toBeUndefined();
+            expect(released.leaseUntil).toBeUndefined();
+            expect(released.nextPollAt).toBeUndefined();
+            await completePrepare(waiting.jobId);
+            current = await claimAndExecute(run.id);
+        }
+    }
+
     async function confirmLocalScene(runId: string) {
         const waiting = (await getAgentRun(runId))!;
         expect(waiting).toMatchObject({
@@ -211,13 +366,24 @@ describe("scene continuity with real services and file persistence", () => {
             ecommerceSnapshot: { fallback: { reason: "scene_selection_required" }, plan: { planVersion: "ecommerce-edit.v6", protection: { scope: "local" } } },
             tasks: [{ attempts: 0, status: "needs_review" }],
         });
-        const tasks = await prepareEcommerceSceneSelectionResume(
-            waiting,
-            { baselineAssetId: waiting.ecommerceSnapshot!.plan!.source.currentSceneBaselineId, region: { x: 40, y: 5, width: 20, height: 20 } },
-            "http://fixture.local",
-            "session=fixture",
-            "scene-user",
+        // Controlled post-confirmation continuity fixture. This uses the Web builder
+        // and does not qualify the new receipt or native protection lifecycle.
+        const plan = waiting.ecommerceSnapshot?.plan;
+        const original = waiting.tasks[0];
+        const execution = original.ecommerceExecution;
+        const baselineId = plan?.source.currentSceneBaselineId;
+        if (!plan || !execution || !baselineId) throw new Error("scene continuity fixture missing");
+        const assets = await getCreativeAssetsByIds(
+            execution.referenceRoles.map((reference) => reference.assetId),
+            waiting.userId,
         );
+        const baseline = assets.find((asset) => asset.id === baselineId);
+        if (!baseline?.serverUrl) throw new Error("scene continuity baseline missing");
+        const sceneBytes = (await readFixtureMedia(baseline.serverUrl)).bytes;
+        const protection = await buildSceneEditProtection(sceneBytes, baselineId, { x: 40, y: 5, width: 20, height: 20 }, plan.delta.requestedChanges, "user_selection");
+        protection.confirmation = { actorUserId: "scene-user", confirmedAt: Date.now() };
+        const executable = createEcommerceSceneEditTask(waiting, plan, assets, execution, protection);
+        const tasks = [{ ...executable, id: original.id, count: original.count, attempts: original.attempts }];
         const confirmed = (await updateAgentRunById(runId, { status: "running", tasks }, undefined, ["paused"], undefined, waiting.tasks))!;
         expect(confirmed.tasks[0]).toMatchObject({ id: waiting.tasks[0].id, attempts: 0, sceneProtection: { selectionSource: "user_selection", confirmation: { actorUserId: "scene-user" } } });
         return confirmed;
@@ -225,7 +391,7 @@ describe("scene continuity with real services and file persistence", () => {
 
     it("preserves an explicit historical scene while applying its authorized new style reference", async () => {
         const conversation = await createCreativeConversation("scene-user", { surface: "chat" });
-        const [root, style] = await registerCreativeAssets([
+        const [root, style] = await registerSources([
             { id: "old-root", userId: "scene-user", conversationId: conversation.id, sourceRunId: "upload", sourceTaskId: "old-upload", ordinal: 0, type: "image", title: "old scene", serverUrl: "/api/reference-assets/old-root.png", metadata: {} },
             {
                 id: "style-scene-upload",
@@ -241,7 +407,7 @@ describe("scene continuity with real services and file persistence", () => {
             },
         ]);
         const first = (await createAgentRun("scene-user", { clientRequestId: "old-scene", conversationId: conversation.id, surface: "chat", prompt: "改成午后阳光", assetIds: [root.id], skillIds: [], modelIds: [] })).run;
-        await executeAgentRun(first, "http://fixture.local", "session=fixture");
+        await executeWithPreparedReferences(first);
         const completedFirst = (await getAgentRun(first.id))!;
         expect(completedFirst.status, completedFirst.ecommerceSnapshot?.qualityCheck?.internalReason).toBe("completed");
         expect(completedFirst).toMatchObject({ status: "completed", ecommerceSnapshot: { qualityPolicy: "disabled", technicalCheck: { status: "passed" } } });
@@ -260,10 +426,10 @@ describe("scene continuity with real services and file persistence", () => {
             })
         ).run;
 
-        await executeAgentRun(branch, "http://fixture.local", "session=fixture");
+        await executeWithPreparedReferences(branch);
 
         const completedBranch = (await getAgentRun(branch.id))!;
-        expect(completedBranch).toMatchObject({ status: "completed", tasks: [{ status: "completed", attempts: 1, taskIds: ["fixture-image-2"] }], ecommerceSnapshot: { qualityPolicy: "disabled", technicalCheck: { status: "passed" } } });
+        expect(completedBranch).toMatchObject({ status: "completed", tasks: [{ status: "completed", attempts: 1, taskIds: [submissions[1].id] }], ecommerceSnapshot: { qualityPolicy: "disabled", technicalCheck: { status: "passed" } } });
         expect(completedBranch.ecommerceSnapshot).not.toHaveProperty("fallback");
         expect(submissions).toHaveLength(2);
         expect(completedBranch.ecommerceSnapshot).toMatchObject({
@@ -315,13 +481,14 @@ describe("scene continuity with real services and file persistence", () => {
     it("persists two scene rounds, recovers the submitted child and branches from adjustment evidence", async () => {
         transport.settings = { ...(transport.settings as Record<string, unknown>), ecommerceVisualQualityCheckEnabled: true } as never;
         const conversation = await createCreativeConversation("scene-user", { surface: "chat" });
-        const [root] = await registerCreativeAssets([
+        const [root] = await registerSources([
             { id: "scene-root", userId: "scene-user", conversationId: conversation.id, sourceRunId: "upload", sourceTaskId: "scene-upload", ordinal: 0, type: "image", title: "scene", serverUrl: "/api/reference-assets/scene-root.png", metadata: {} },
         ]);
         const create = async (prompt: string, ids: string[] = []) => (await createAgentRun("scene-user", { clientRequestId: prompt, conversationId: conversation.id, surface: "chat", prompt, assetIds: ids, skillIds: [], modelIds: [] })).run;
         const first = await create("改成午后阳光", [root.id]);
-        await executeAgentRun(first, "http://fixture.local", "session=fixture");
-        await processAgentRunReview((await getAgentRun(first.id))!, "http://fixture.local", "session=fixture");
+        await executeWithPreparedReferences(first);
+        await prepareAdvisoryReview(first.id, { origin: "http://fixture.local", cookie: "session=fixture", directory });
+        await recoverAdvisoryReview(first.id);
         const completedFirst = (await getAgentRun(first.id))!;
         expect(completedFirst).toMatchObject({
             status: "completed",
@@ -336,19 +503,20 @@ describe("scene continuity with real services and file persistence", () => {
         expect(firstAsset.metadata).toMatchObject({ ecommerceContinuity: { sceneRootAssetId: root.id } });
         const unchangedFirst = JSON.stringify(completedFirst.ecommerceSnapshot);
         const second = await create("再加一个花瓶");
-        await executeAgentRun(second, "http://fixture.local", "session=fixture");
+        await executeWithPreparedReferences(second);
         expect(submissions).toHaveLength(1);
         const confirmedSecond = await confirmLocalScene(second.id);
         interruptAfterSubmission = true;
         await executeAgentRun(confirmedSecond, "http://fixture.local", "session=fixture");
         const waiting = (await getAgentRun(second.id))!;
-        expect(waiting).toMatchObject({ status: "running", tasks: [{ taskIds: ["fixture-image-2"] }] });
+        expect(waiting).toMatchObject({ status: "running", tasks: [{ taskIds: [submissions[1].id] }] });
         expect(submissions).toHaveLength(2);
         const disk = JSON.parse(await readFile(join(directory, "generation-tasks.json"), "utf8"));
-        expect(disk.find((task: { id: string }) => task.id === second.id).payload.tasks[0].taskIds).toEqual(["fixture-image-2"]);
+        expect(disk.find((task: { id: string }) => task.id === second.id).payload.tasks[0].taskIds).toEqual([submissions[1].id]);
         adjustment = true;
         await executeAgentRun(waiting, "http://fixture.local", "session=fixture");
-        await processAgentRunReview((await getAgentRun(second.id))!, "http://fixture.local", "session=fixture");
+        await prepareAdvisoryReview(second.id, { origin: "http://fixture.local", cookie: "session=fixture", directory });
+        await recoverAdvisoryReview(second.id);
         const completedSecond = (await getAgentRun(second.id))!;
         expect(submissions).toHaveLength(2);
         expect(completedSecond).toMatchObject({
@@ -366,7 +534,7 @@ describe("scene continuity with real services and file persistence", () => {
         expect(JSON.stringify(secondAsset.metadata)).not.toContain("vase is too large");
         const branch = await create("修改图片1，继续调整花瓶", [secondAsset.id]);
         adjustment = false;
-        await executeAgentRun(branch, "http://fixture.local", "session=fixture");
+        await executeWithPreparedReferences(branch);
         expect((await getAgentRun(branch.id))!.ecommerceSnapshot!.referenceDecision).toMatchObject({
             state: "resolved",
             editTargetId: secondAsset.id,
@@ -375,7 +543,8 @@ describe("scene continuity with real services and file persistence", () => {
         });
         const confirmedBranch = await confirmLocalScene(branch.id);
         await executeAgentRun(confirmedBranch, "http://fixture.local", "session=fixture");
-        await processAgentRunReview((await getAgentRun(branch.id))!, "http://fixture.local", "session=fixture");
+        await prepareAdvisoryReview(branch.id, { origin: "http://fixture.local", cookie: "session=fixture", directory });
+        await recoverAdvisoryReview(branch.id);
         const completedBranch = (await getAgentRun(branch.id))!;
         expect(completedBranch.status).toBe("completed");
         expect(completedBranch.ecommerceSnapshot?.continuity).toMatchObject({
@@ -384,7 +553,8 @@ describe("scene continuity with real services and file persistence", () => {
             parentQualityCheck: { status: "needs_adjustment", checks: expect.arrayContaining([expect.objectContaining({ reason: "vase is too large" })]) },
         });
         expect(JSON.stringify((await getAgentRun(first.id))!.ecommerceSnapshot)).toBe(unchangedFirst);
-        expect(submissions.map((submission) => submission.id)).toEqual(["fixture-image-1", "fixture-image-2", "fixture-image-3"]);
+        expect(submissions.map((submission) => submission.id)).toEqual([completedFirst.tasks[0].taskIds![0], completedSecond.tasks[0].taskIds![0], completedBranch.tasks[0].taskIds![0]]);
+        expect(new Set(submissions.map((submission) => submission.id)).size).toBe(3);
         for (const current of [completedFirst, completedSecond, completedBranch]) {
             expect(submissions.filter((submission) => current.tasks[0].taskIds!.includes(submission.id))).toHaveLength(1);
             const events = await listCreativeRunEvents(current.id);
@@ -398,11 +568,11 @@ describe("scene continuity with real services and file persistence", () => {
         expect(completedFirst.tasks[0].taskIds).not.toEqual(completedSecond.tasks[0].taskIds);
         expect(await selectCurrentSceneBaseline(conversation.id, secondAsset.id, "other-user")).toBeNull();
         expect(await selectCurrentSceneBaseline("other-conversation", secondAsset.id, "scene-user")).toBeNull();
-    });
+    }, 30_000);
 
     it("recovers an already-started v1 child without upgrading its immutable plan or compiler", async () => {
         const conversation = await createCreativeConversation("scene-user", { surface: "chat" });
-        const [root] = await registerCreativeAssets([
+        const [root] = await registerSources([
             {
                 id: "legacy-scene-root",
                 userId: "scene-user",
@@ -417,7 +587,7 @@ describe("scene continuity with real services and file persistence", () => {
             },
         ]);
         const first = (await createAgentRun("scene-user", { clientRequestId: "current-seed", conversationId: conversation.id, surface: "chat", prompt: "改成午后阳光", assetIds: [root.id], skillIds: [], modelIds: [] })).run;
-        await executeAgentRun(first, "http://fixture.local", "session=fixture");
+        await executeWithPreparedReferences(first);
         const completedFirst = (await getAgentRun(first.id))!;
         expect(completedFirst.status).toBe("completed");
         const legacy = (await createAgentRun("scene-user", { clientRequestId: "started-v1-fixture", conversationId: conversation.id, surface: "chat", prompt: "恢复旧任务", assetIds: [], skillIds: [], modelIds: [] })).run;
@@ -433,9 +603,10 @@ describe("scene continuity with real services and file persistence", () => {
         delete legacySnapshot.qualityPolicy;
         delete legacySnapshot.technicalCheck;
         delete legacySnapshot.visualAnalysis;
+        delete legacySnapshot.referenceCheckpoint;
+        delete legacySnapshot.processing;
         const legacyTask = structuredClone(completedFirst.tasks[0]);
         legacyTask.status = "running";
-        legacyTask.childTasks = [{ id: "fixture-image-1", status: "pending", attempt: 1 }];
         legacyTask.assetIds = [];
         legacyTask.ecommerceExecution = compileEcommerceImageRequest(legacySnapshot.plan!, {
             profileId: "gpt-image-2.5-flare",
@@ -444,9 +615,42 @@ describe("scene continuity with real services and file persistence", () => {
             modelSnapshot: legacyTask.ecommerceExecution!.modelSnapshot,
         });
         legacyTask.prompt = legacyTask.ecommerceExecution.prompt;
+        const seed = (await getImageTask(submissions[0].id))!;
+        const original = await createImageTask({
+            userId: "scene-user",
+            username: "scene-fixture",
+            displayName: "Scene Fixture",
+            kind: "edit",
+            source: seed.source,
+            config: seed.config,
+            prompt: legacyTask.prompt,
+            references: seed.references,
+            ecommerceExecution: legacyTask.ecommerceExecution,
+            runId: legacy.id,
+            parentTaskId: legacy.id,
+            conversationId: conversation.id,
+            surface: legacy.surface,
+            clientRequestId: `${legacy.clientRequestId}:${legacyTask.id}:1:1`,
+        });
+        legacyTask.taskId = original.id;
+        legacyTask.taskIds = [original.id];
+        legacyTask.childTasks = [{ id: original.id, status: "pending", attempt: 1 }];
         const frozenPlan = JSON.stringify(legacySnapshot.plan);
         const frozenExecution = JSON.stringify(legacyTask.ecommerceExecution);
         const savedLegacy = (await updateAgentRunById(legacy.id, { status: "running", tasks: [legacyTask], ecommerceSnapshot: legacySnapshot }, undefined, ["planning"]))!;
+        const runtime = await import("./image-task-runtime");
+        const { schedulePreparedImageTask } = await import("./ecommerce-image-task-orchestration");
+        await schedulePreparedImageTask(original, "");
+        const originalWorker = "scene-continuity-original-v1";
+        const claim = (await scheduler.claimDueGenerationTasks({ workerId: originalWorker, taskIds: [original.id], limit: 1 }))[0];
+        assert.ok(claim?.executionId);
+        const claimed = (await getImageTask(original.id))!;
+        expect(await runtime.createImageTaskUpstreamStep(claimed, "http://fixture.local", "http://fixture.local", "session=fixture")).toMatchObject({ state: "pending" });
+        const submitted = (await getImageTask(original.id))!;
+        assert.ok(submitted.upstream);
+        expect(submitted).toMatchObject({ status: "running", runId: legacy.id, attempts: [{ attemptNo: 1, status: "running" }] });
+        await scheduler.releaseGenerationTaskLease("image", original.id, originalWorker, { executionPhase: "submitted", upstreamTaskId: submitted.upstream.id, nextPollAt: Date.now() }, { executionId: claim.executionId });
+        const createCount = transport.create.mock.calls.length;
         await executeAgentRun(savedLegacy, "http://fixture.local", "session=fixture");
         const recoveredLegacy = (await getAgentRun(legacy.id))!;
         expect(recoveredLegacy.status).toBe("completed");
@@ -456,5 +660,8 @@ describe("scene continuity with real services and file persistence", () => {
         expect(recoveredLegacy.ecommerceSnapshot!.qualityCheck).not.toHaveProperty("observations");
         expect(recoveredLegacy.ecommerceSnapshot!.continuity).not.toHaveProperty("sceneRootAssetId");
         expect(submissions).toHaveLength(1);
+        expect(transport.create).toHaveBeenCalledTimes(createCount);
+        expect(await getImageTask(original.id)).toMatchObject({ status: "success", runId: legacy.id, upstream: submitted.upstream, attempts: [{ attemptNo: 1, status: "succeeded" }] });
+        expect(recoveredLegacy.tasks[0].taskIds).toEqual([original.id]);
     });
 });

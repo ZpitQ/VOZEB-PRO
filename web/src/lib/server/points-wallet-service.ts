@@ -191,9 +191,10 @@ export async function consumePoints(input: ConsumePointsInput): Promise<PointsWa
     return mutateAuthDb((db) => consumeFilePoints(db, { ...input, amount, idempotencyKey, requestFingerprint }, walletClock(input)));
 }
 
-export async function refundPoints(input: RefundPointsInput): Promise<PointsWalletRefundResult> {
+export async function refundPoints(input: RefundPointsInput, executor?: QueryExecutor): Promise<PointsWalletRefundResult> {
     const idempotencyKey = requiredIdempotencyKey(input.idempotencyKey);
     if (!input.sourceRecordId?.trim() && !input.sourceIdempotencyKey?.trim()) throw new AuthInputError("退款缺少原消费记录");
+    if (executor) return refundPostgresPoints({ ...input, idempotencyKey }, executor);
     if (isPostgresDatabaseEnabled()) return refundPostgresPoints({ ...input, idempotencyKey });
     return mutateAuthDb((db) => refundFilePoints(db, { ...input, idempotencyKey }, walletClock(input)));
 }
@@ -326,9 +327,9 @@ async function consumePostgresPoints(input: ConsumePointsInput & { amount: numbe
     });
 }
 
-async function refundPostgresPoints(input: RefundPointsInput & { idempotencyKey: string }) {
-    await ensurePostgresSchema();
-    return withPostgresTransaction(async (client) => {
+async function refundPostgresPoints(input: RefundPointsInput & { idempotencyKey: string }, executor?: QueryExecutor) {
+    if (!executor) await ensurePostgresSchema();
+    const refund = async (client: QueryExecutor) => {
         const repos = createPostgresRepositories(client);
         const user = await repos.users.getById(input.userId, true);
         if (!user) throw new AuthInputError("用户不存在");
@@ -371,7 +372,8 @@ async function refundPostgresPoints(input: RefundPointsInput & { idempotencyKey:
             createdAt: context.clock.now.toISOString(),
         });
         return { snapshot, record, applied: true, ...restored };
-    });
+    };
+    return executor ? refund(executor) : withPostgresTransaction(refund);
 }
 
 async function settlePostgresWallet(client: QueryExecutor, user: UserRecord, clock: WalletClock): Promise<PostgresWalletContext> {

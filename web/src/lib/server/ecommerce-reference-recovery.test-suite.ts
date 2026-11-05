@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -10,8 +11,9 @@ import type { AgentRun, AgentRunTask } from "./agent-run-store";
 import type { AuthSettings } from "@/lib/auth/store";
 import type { CreativeMessage, CreativeReferenceRecovery, CreativeRunEvent } from "@/lib/creative-runtime-contract";
 import type { StoredGenerationTaskRecord } from "./generation-task-types";
+import type { CompletedImageProcessingStage, ImageProcessingPayload } from "./image-processing-service";
 import type { EcommerceReferenceDispatchFence } from "./ecommerce-reference-dispatch";
-import { referenceSourceTuple, unsubmittedReferenceCheckpoint } from "./ecommerce-reference-recovery";
+import { referenceAssetVersion, referenceSourceTuple, unsubmittedReferenceCheckpoint } from "./ecommerce-reference-recovery";
 import { createProtocolFixtureServer } from "../../../scripts/protocol-fixture-server.mjs";
 
 const nextContext = vi.hoisted(() => ({ cookie: "" }));
@@ -21,6 +23,7 @@ vi.mock("next/server", async (original) => ({ ...(await original<typeof import("
 type Stage = { phase: string; pid: number; runId: string; backendPid?: number };
 type ProcessResult = {
     pid: number;
+    nativeEvidence?: { jobId: string; operation: "prepare_reference" | "build_protection"; actorPid: number; nativePid: number; exitCode: number | null; completion: CompletedImageProcessingStage };
     outcome?: { status?: number; body?: { task?: { id: string } } } | null;
     run: AgentRun;
     messages: CreativeMessage[];
@@ -59,6 +62,7 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
         const results = new Map<string, ProcessResult>();
         const gates = new Map<string, Gate>();
         const commands = new Map<ChildProcess, Promise<void>>();
+        const completedNativeStages = new Map<string, StoredGenerationTaskRecord>();
         const handlers = new Set<Promise<void>>();
         const ownedRuns = new Set<string>();
         const handlerErrors: unknown[] = [];
@@ -74,6 +78,11 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
             vi.stubEnv("VOZEB_PRO_PRIVATE_UPSTREAM_HOSTS", "127.0.0.1");
             vi.stubEnv("VOZEB_PRO_ENCRYPTION_KEY", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
             vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+            vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_MEMORY_MB", "1536");
+            vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_HEAP_MB", "64");
+            vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB", "1024");
+            vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_HEAP_MB", "384");
+            vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_CONCURRENCY", "1");
             [database, auth, stores, runtime, tasks, scheduler] = await Promise.all([
                 import("./database"),
                 import("@/lib/auth/store"),
@@ -277,6 +286,7 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
             }
             await clearAgentReservations();
             ownedRuns.clear();
+            completedNativeStages.clear();
             if (handlerErrors.length) throw new AggregateError(handlerErrors.splice(0), "Fixture handlers failed");
         }, 120_000);
         afterAll(async () => {
@@ -362,9 +372,11 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
             commands.set(child, exited);
             void exited.finally(() => commands.delete(child));
             void completed.catch(() => {});
+            const settled = action === "execute" || action === "recover" ? (completed as Promise<ProcessResult>).then(completeNativeDependencies) : completed;
+            void settled.catch(() => {});
             return {
                 key,
-                completed: completed as Promise<ProcessResult>,
+                completed: settled as Promise<ProcessResult>,
                 phase: async (phase: string) =>
                     Promise.race([
                         gates.get(`${key}:${phase}`)!.arrived,
@@ -375,6 +387,66 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
                 release: (phase: string) => gates.get(`${key}:${phase}`)!.release(),
             };
         }
+        async function completeNativeDependencies(initial: ProcessResult): Promise<ProcessResult> {
+            let current = initial;
+            const visited = new Set<string>();
+            while (current.run.ecommerceSnapshot?.processing?.waitingFor) {
+                const waiting = current.run.ecommerceSnapshot.processing.waitingFor;
+                expect(visited.has(waiting.jobId)).toBe(false);
+                visited.add(waiting.jobId);
+                const pending = await tasks.getStoredGenerationTaskRecord("image_processing", waiting.jobId);
+                assert(pending);
+                const payload = pending.payload as ImageProcessingPayload;
+                expect(pending).toMatchObject({ id: waiting.jobId, runId: current.run.id, userId, status: "pending", executionPhase: "created", payload: { inputDigest: waiting.inputDigest } });
+                expect(["prepare_reference", "build_protection"]).toContain(payload.operation);
+                expect(pending.parentTaskId).toBe(payload.operation === "prepare_reference" ? current.run.id : current.run.ecommerceSnapshot.plan?.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene");
+                const native = await command(current.run, "native", { jobId: waiting.jobId }).completed;
+                const evidence = native.nativeEvidence;
+                assert(evidence);
+                expect(evidence).toMatchObject({ jobId: waiting.jobId, operation: payload.operation, actorPid: native.pid, exitCode: 0, completion: { jobId: waiting.jobId, inputDigest: waiting.inputDigest, parentRescheduled: true } });
+                expect(evidence.nativePid).toBeGreaterThan(0);
+                expect(evidence.nativePid).not.toBe(evidence.actorPid);
+                expect(evidence.actorPid).not.toBe(current.pid);
+                const saved = await tasks.getStoredGenerationTaskRecord("image_processing", waiting.jobId);
+                assert(saved);
+                const manifest = evidence.completion.manifest;
+                expect(saved).toMatchObject({
+                    id: waiting.jobId,
+                    type: "image_processing",
+                    runId: current.run.id,
+                    userId,
+                    parentTaskId: pending.parentTaskId,
+                    status: "success",
+                    executionPhase: "completed",
+                    payload: { inputDigest: waiting.inputDigest, executionId: evidence.completion.executionId },
+                    resultPayload: { executionId: evidence.completion.executionId, manifest, manifestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) },
+                });
+                expect(saved.workerId).toBeUndefined();
+                expect(saved.leaseUntil).toBeUndefined();
+                expect(manifest).toMatchObject({ jobId: saved.id, executionId: evidence.completion.executionId });
+                expect(manifest.sourceIdentities).toHaveLength(1);
+                const source = manifest.sourceIdentities[0];
+                expect(source.decodeError).toBeUndefined();
+                expect(source).toMatchObject({ assetId: payload.inputs[0].assetId, assetVersion: payload.inputs[0].assetVersion, sha256: payload.inputs[0].expectedSha256 });
+                expect(payload.resource.facts.encodedInputs).toMatchObject([{ inputIndex: 0, assetId: source.assetId, assetVersion: source.assetVersion, sha256: source.sha256, bytes: source.bytes }]);
+                const snapshot = native.run.ecommerceSnapshot;
+                assert(snapshot?.referenceCheckpoint && snapshot.processing);
+                const checkpoint = snapshot.referenceCheckpoint;
+                const asset = checkpoint.assets.find((item) => item.asset.id === source.assetId);
+                assert(asset);
+                expect(asset).toMatchObject({ contentSha256: source.sha256, asset: { userId, conversationId: current.run.conversationId, width: source.width, height: source.height } });
+                expect(asset.assetVersion).toBe(referenceAssetVersion(asset.asset, source.sha256));
+                const reference = payload.operation === "prepare_reference" ? snapshot.processing.prepareReferences.find((item) => item.jobId === saved.id) : snapshot.processing.protection;
+                expect(reference).toMatchObject({ jobId: saved.id, inputDigest: payload.inputDigest, manifest });
+                expect(snapshot.processing.waitingFor).toBeUndefined();
+                completedNativeStages.set(saved.id, structuredClone(saved));
+                const resumed = await command(native.run, "recover").completed;
+                expect(resumed.pid).not.toBe(native.pid);
+                current = resumed;
+            }
+            return current;
+        }
+
         async function seed(retry = false, count = 1) {
             const conversation = await runtime.createCreativeConversation(userId, { surface: "chat" });
             const { writeReferenceImageDataUrl } = await import("./reference-asset-store");
@@ -511,9 +583,16 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
             }))!;
         }
         async function durableChildren(run: AgentRun) {
-            if (provider === "postgres") return (await database.postgresQuery<{ id: string }>("SELECT id FROM generation_tasks WHERE run_id = $1 AND user_id = $2 AND task_type <> 'agent'", [run.id, userId])).rows;
-            const { readJsonDataFile } = await import("./data-adapter");
-            return (await readJsonDataFile<StoredGenerationTaskRecord[]>("generation-tasks.json", [])).filter((task) => task.type !== "agent" && task.runId === run.id && task.userId === userId);
+            const children =
+                provider === "postgres"
+                    ? (await database.postgresQuery<{ id: string }>("SELECT id FROM generation_tasks WHERE run_id = $1 AND user_id = $2 AND task_type <> 'agent'", [run.id, userId])).rows
+                    : (await (await import("./data-adapter")).readJsonDataFile<StoredGenerationTaskRecord[]>("generation-tasks.json", [])).filter((task) => task.type !== "agent" && task.runId === run.id && task.userId === userId);
+            const proven = [...completedNativeStages.values()].filter((stage) => stage.runId === run.id && stage.userId === userId);
+            for (const stage of proven) {
+                expect(children.some((child) => child.id === stage.id)).toBe(true);
+                expect(await tasks.getStoredGenerationTaskRecord("image_processing", stage.id)).toEqual(stage);
+            }
+            return children.filter((child) => !proven.some((stage) => stage.id === child.id));
         }
         function visionPosts() {
             return fixture.requests.filter((request: { method: string; body: Buffer }) => request.method === "POST" && request.body.toString("utf8").includes('"analyze_ecommerce_references"')).length;

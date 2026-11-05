@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 
 import type { EcommercePlanningInput } from "./ecommerce-generation-snapshot";
 import type { EcommerceRoleCandidate } from "./ecommerce-model-routing";
-import { analyzeEcommerceReferences, normalizeEcommerceVisualAnalysis, validateEcommerceVisualAnalysisV4, visualAnalysisDebugSummary, type EcommerceVisualReferenceV4 } from "./ecommerce-visual-analysis";
+import { analyzeEcommerceReferences, normalizeEcommerceVisualAnalysis, validateEcommerceVisualAnalysisV4, visualAnalysisDebugSummary, type EcommerceVisualReferenceV4, type EcommerceVisualSourceIdentity } from "./ecommerce-visual-analysis";
 import { requestStructuredText, type TextPlanningCandidate } from "./text-planning-runtime";
 import { authorizedWorkerUserId, maintenanceWorkerContext } from "./maintenance-auth";
 import { createEcommerceReferenceCheckpoint, referenceSourcesLoaded } from "./ecommerce-reference-recovery";
@@ -351,6 +351,74 @@ describe("ecommerce visual analysis", () => {
         });
     });
 
+    it.each([
+        {
+            id: "F03",
+            makeSource: () =>
+                sharp({ create: { width: 8000, height: 6000, channels: 3, background: "#203040" } })
+                    .jpeg()
+                    .toBuffer(),
+            originalMetadata: { width: 8000, height: 6000, format: "jpeg" },
+            sourceSize: { width: 8000, height: 6000 },
+            modelSize: { width: 2048, height: 1536 },
+        },
+        {
+            id: "F04",
+            makeSource: () =>
+                sharp({ create: { width: 8000, height: 6000, channels: 3, background: "#203040" } })
+                    .withMetadata({ orientation: 6 })
+                    .jpeg()
+                    .toBuffer(),
+            originalMetadata: { width: 8000, height: 6000, format: "jpeg", orientation: 6 },
+            sourceSize: { width: 6000, height: 8000 },
+            modelSize: { width: 1536, height: 2048 },
+        },
+    ])("sends the bounded original $id scene through the actual model POST and retains its source identity", async ({ makeSource, originalMetadata, sourceSize, modelSize }) => {
+        const fixture = await visionSourceFixture(["image/png", "image/jpeg"]);
+        const actual = await vi.importActual<typeof import("./text-planning-runtime")>("./text-planning-runtime");
+        mockedRequest.mockImplementation(actual.requestStructuredText);
+        try {
+            fixture.bytes[1] = await makeSource();
+            const originalHash = createHash("sha256").update(fixture.bytes[1]).digest("hex");
+            const originalInput = structuredClone(fixture.input.planningInput);
+            const identities: EcommerceVisualSourceIdentity[][] = [];
+            const analysis = await analyzeEcommerceReferences(
+                {
+                    ...requestInput(),
+                    ...fixture.input,
+                    analysisVersion: "ecommerce-visual-analysis.v4",
+                    onSourcesLoaded: async (sources) => {
+                        identities.push(sources);
+                    },
+                },
+                role("vision_analysis", [candidate("large-scene-post")]),
+            );
+
+            expect(fixture.reads).toEqual(["product", "scene"]);
+            expect(fixture.posts).toHaveLength(1);
+            const outgoingImages = fixture.posts[0].messages
+                .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+                .filter((content) => content.type === "image_url")
+                .map((content) => Buffer.from(content.image_url!.url.split(",")[1], "base64"));
+            expect(outgoingImages).toHaveLength(2);
+            expect(outgoingImages[1].length).toBeLessThanOrEqual(4194304);
+            const decoded = await sharp(outgoingImages[1], { failOn: "error" }).raw().toBuffer({ resolveWithObject: true });
+            expect(decoded.info).toMatchObject({ ...modelSize, channels: 3 });
+            expect(identities).toEqual([
+                [
+                    { assetId: "product", contentSha256: createHash("sha256").update(fixture.bytes[0]).digest("hex"), sourceSize: { width: 100, height: 100 } },
+                    { assetId: "scene", contentSha256: originalHash, sourceSize },
+                ],
+            ]);
+            expect(analysis.references[1].sourceSize).toEqual(sourceSize);
+            expect(createHash("sha256").update(fixture.bytes[1]).digest("hex")).toBe(originalHash);
+            expect(await sharp(fixture.bytes[1]).metadata()).toMatchObject(originalMetadata);
+            expect(fixture.input.planningInput).toEqual(originalInput);
+        } finally {
+            await fixture.close();
+        }
+    });
+
     it("classifies unreadable input media independently from exhausted vision service failures", async () => {
         const input = requestInput();
         const error = await analyzeEcommerceReferences(
@@ -567,7 +635,7 @@ function requestInput() {
     };
 }
 
-async function visionSourceFixture() {
+async function visionSourceFixture(mimeTypes = ["image/png", "image/png"]) {
     const bytes = await Promise.all(
         ["white", "blue"].map((background) =>
             sharp({ create: { width: 100, height: 100, channels: 3, background } })
@@ -586,7 +654,7 @@ async function visionSourceFixture() {
                 return;
             }
             reads.push(assetId);
-            response.writeHead(200, { "content-type": "image/png" }).end(bytes[index]);
+            response.writeHead(200, { "content-type": mimeTypes[index] }).end(bytes[index]);
             return;
         }
         const chunks: Buffer[] = [];

@@ -1,3 +1,4 @@
+import { reviewSourceRegistrationsMatch } from "./creative-runtime-repository";
 import { nanoid } from "nanoid";
 
 import { creativeConversationSourceForSurface, type CreativeAsset, type CreativeConversation, type CreativeConversationContext, type CreativeConversationSource, type CreativeMessage, type CreativeSurface } from "@/lib/creative-runtime-contract";
@@ -97,10 +98,11 @@ export async function listCreativeConversations(userId: string, input: { surface
         .slice(offset, offset + limit);
 }
 
-export async function getCreativeConversation(id: string, userId: string) {
+export async function getCreativeConversation(id: string, userId: string, executor?: QueryExecutor) {
     if (getDatabaseProvider() === "postgres") {
-        await ensurePostgresSchema();
-        const result = await postgresQuery("SELECT * FROM creative_conversations WHERE id = $1 AND user_id = $2", [id, userId]);
+        if (!executor) await ensurePostgresSchema();
+        const query: QueryExecutor["query"] = executor ? executor.query.bind(executor) : postgresQuery;
+        const result = await query("SELECT * FROM creative_conversations WHERE id = $1 AND user_id = $2", [id, userId]);
         return result.rows[0] ? mapConversation(result.rows[0]) : null;
     }
     return (await readRuntimeFile()).conversations.find((item) => item.id === id && item.userId === userId) || null;
@@ -407,14 +409,20 @@ export async function mutateCreativeRun<T extends AgentRunBase>(
                 const current = tasks[index].payload as T & { executionId?: string };
                 if (allowedStatuses && !allowedStatuses.includes(current.status)) return { tasks, result: null };
                 if (expectedExecutionId && current.executionId !== expectedExecutionId) return { tasks, result: null };
-                const mutation = mutate(current, { persistedChildren: options?.referenceRecovery ? tasks.filter((task) => task.type !== "agent" && task.runId === current.id && task.userId === current.userId).map(({ id }) => ({ id })) : [] });
+                const claim = options?.reviewClaim;
+                const ownsReview = () => !claim || (tasks[index].workerId === claim.workerId && current.executionId === claim.executionId && Number(tasks[index].leaseUntil) > Date.now() && tasks[index].expiresAt > Date.now());
+                if (!ownsReview()) return { tasks, result: null };
+                if (options?.reviewSources && !(await reviewSourceRegistrationsMatch(current.userId, options.reviewSources))) return { tasks, result: null };
+
+                const mutation = mutate(current, { persistedChildren: options?.resumeWithChildren || options?.reviewClaim ? tasks.filter((task) => task.type !== "agent" && task.runId === current.id && task.userId === current.userId) : [] });
                 if (!mutation) return { tasks, result: null };
                 const now = Date.now();
                 const run = { ...mutation.run, id: current.id, userId: current.userId, createdAt: current.createdAt, updatedAt: now };
                 const db = await readRuntimeFile();
                 const nextDb = applyRuntimeMutation(db, run, mutation, now);
-                if (options?.referenceRecovery || mutation.schedule) preimage = db;
+                if (options?.resumeWithChildren || mutation.schedule || claim) preimage = db;
                 await writeRuntimeFile(nextDb);
+                if (!ownsReview()) throw new CreativeStoreConflict("视觉复核执行身份或租约已失效", 409);
                 const nextTasks = [...tasks];
                 nextTasks[index] = {
                     ...tasks[index],
@@ -423,7 +431,7 @@ export async function mutateCreativeRun<T extends AgentRunBase>(
                     updatedAt: now,
                     expiresAt: now + ttlMs,
                     ...mutation.schedule,
-                    ...(options?.referenceRecovery ? { executionPhase: "created" as const, nextPollAt: now, lastUpstreamStatus: "created", workerId: undefined, leaseUntil: undefined } : {}),
+                    ...(options?.resumeWithChildren ? { executionPhase: "created" as const, nextPollAt: now, lastUpstreamStatus: "created", workerId: undefined, leaseUntil: undefined } : {}),
                 };
                 return { tasks: nextTasks, result: run };
             });

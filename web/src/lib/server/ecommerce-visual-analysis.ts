@@ -21,6 +21,8 @@ import {
     type EcommerceManualRegion,
 } from "./ecommerce-edit-plan";
 import { decodeEcommerceCanvasSize } from "./ecommerce-generation-service";
+import { loadPreparedEcommerceReference, type PreparedEcommerceReference } from "./ecommerce-reference-preparation";
+import { EcommerceReferenceSourceChangedError } from "./ecommerce-reference-recovery";
 import type { EcommercePlanningAssetCandidate, EcommercePlanningInput } from "./ecommerce-generation-snapshot";
 import type { EcommerceRoleCandidate, EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 import { boundEcommerceVisionImage } from "./ecommerce-vision-image";
@@ -99,6 +101,7 @@ export type EcommerceVisualAnalysisRequest = {
     userId: string;
     requestId: string;
     planningInput: EcommercePlanningInput;
+    preparedReferences?: PreparedEcommerceReference[];
     onSourcesLoaded?: (sources: EcommerceVisualSourceIdentity[]) => Promise<void>;
 };
 
@@ -154,8 +157,17 @@ export async function analyzeEcommerceReferences(
     }
     let images: Awaited<ReturnType<typeof normalizePlanningImage>>[];
     try {
-        images = await Promise.all(assets.map((asset) => normalizePlanningImage(asset.url!, input.origin, input.cookie)));
+        const prepared = input.preparedReferences;
+        images = await Promise.all(
+            assets.map((asset) => {
+                if (!prepared) return normalizePlanningImage(asset.url!, input.origin, input.cookie);
+                const reference = prepared.find((item) => item.assetId === asset.id);
+                if (!reference) throw new EcommerceVisualAnalysisError("参考预处理工件不完整", 400);
+                return loadPreparedEcommerceReference(reference, input.origin, input.cookie);
+            }),
+        );
     } catch (error) {
+        if (error instanceof EcommerceReferenceSourceChangedError) throw error;
         throw new EcommerceVisualAnalysisError(error instanceof Error ? error.message : "无法读取视觉分析图片", error instanceof EcommerceVisualAnalysisError ? error.status : 400, { analysisVersion, kind: "input_media", attempts: [] });
     }
     // This callback commits the phase and original source bytes before any model

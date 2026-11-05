@@ -50,6 +50,7 @@ export type CreativeAgentRun = {
     ecommerceSceneSelection?: { action: "confirm_scene_selection"; baselineAssetId: string; url: string; width: number; height: number };
     ecommerceReferenceReview?: CreativeReferenceReview | null;
     canCheckStatus?: boolean;
+    imageProcessingRecovery?: { reason: "resource_failure"; canResume: boolean; message: string };
     createdAt?: number;
     updatedAt?: number;
     assetIds: string[];
@@ -76,7 +77,7 @@ export type CreativeAgentRun = {
 
 export type CreativeSceneSelection = { baselineAssetId: string; region: { x: number; y: number; width: number; height: number } };
 export type CreativeAgentRunSnapshot = Pick<CreativeAgentRun, "id" | "status"> &
-    Partial<Pick<CreativeAgentRun, "tasks" | "assetIds" | "ecommerceQualityStatus" | "ecommerceQualityReview" | "ecommerceSceneSelection" | "ecommerceReferenceReview" | "canCheckStatus" | "cancellation" | "updatedAt">>;
+    Partial<Pick<CreativeAgentRun, "tasks" | "assetIds" | "ecommerceQualityStatus" | "ecommerceQualityReview" | "ecommerceSceneSelection" | "ecommerceReferenceReview" | "canCheckStatus" | "imageProcessingRecovery" | "cancellation" | "updatedAt">>;
 
 type ApiResponse<T> = { code: number; data: T; msg: string };
 
@@ -342,6 +343,7 @@ function publicRunSnapshot(run: CreativeAgentRunSnapshot): CreativeAgentRunSnaps
         ecommerceSceneSelection: run.ecommerceSceneSelection,
         ecommerceReferenceReview: run.ecommerceReferenceReview ?? null,
         canCheckStatus: run.canCheckStatus,
+        imageProcessingRecovery: run.imageProcessingRecovery ? { reason: run.imageProcessingRecovery.reason, canResume: run.imageProcessingRecovery.canResume, message: run.imageProcessingRecovery.message } : undefined,
         cancellation: run.cancellation,
         updatedAt: run.updatedAt,
     };

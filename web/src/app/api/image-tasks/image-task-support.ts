@@ -276,11 +276,11 @@ export function withImageOutputInstructions(config: ImageTaskConfig, prompt: str
     return `${prompt}\n\n输出要求：只保留参考图中的目标元素，去除裁切范围外的背景，输出带真实透明 Alpha 的 PNG。不要补画背景、文字、装饰或其他元素，不要改变目标元素的颜色、结构、比例和边缘。`;
 }
 
-export async function parseImagePayloadOrPoll(config: ImageTaskConfig, payload: ImageApiResponse, mediaBaseUrl: string, cookie: string, pollBaseUrl = mediaBaseUrl, singleStep = false): Promise<ImageTaskResult> {
+export async function parseImagePayloadOrPoll(config: ImageTaskConfig, payload: ImageApiResponse, mediaBaseUrl: string, cookie: string, pollBaseUrl = mediaBaseUrl, singleStep = false, declaredData?: ImageApiResponse["data"]): Promise<ImageTaskResult> {
     const payloadError = readImagePayloadError(payload);
     if (payloadError) throw new ImageUpstreamTerminalError(payloadError);
-    const images = findImageResults(payload, mediaBaseUrl, config);
-    if (images.length) return imageTaskResultFromMedia(images);
+    const image = declaredData === undefined ? findImageResult(payload, mediaBaseUrl, config) : imageTaskResultFromDeclaredData(declaredData, mediaBaseUrl, config);
+    if (image) return image;
 
     const taskId = readImageTaskId(payload);
     if (!taskId) throw new GenerationSubmissionUncertainError("图片接口没有返回图片或任务 ID，创建结果待确认");
@@ -308,10 +308,10 @@ export async function pollOpenAiImageTask(config: ImageTaskConfig, taskId: strin
             }
             const payload = await parseImageQueryJson(response);
             const baseUrl = response.headers.get("x-vozeb-pro-upstream-url") || mediaBaseUrl || pollUrl;
-            const image = parseImagePayloadCompat(payload, baseUrl, config);
-            if (image) return image;
             const error = readImagePayloadError(payload);
             if (error) throw new ImageUpstreamTerminalError(error);
+            const image = Array.isArray(payload.data) ? imageTaskResultFromDeclaredData(payload.data, baseUrl, config) : findImageResult(payload, baseUrl, config);
+            if (image) return image;
             payload.status = readImageTaskStatus(payload) || payload.status;
             if (!isPendingImageStatus(payload.status)) throw new ImageUpstreamTerminalError("图片任务完成但没有返回图片");
         }
@@ -381,6 +381,12 @@ function collectImageResults(value: unknown, baseUrl: string, config: ImageTaskC
         if (image) images.push(image);
     }
     for (const key of IMAGE_CONTAINER_KEYS) collectImageResults(record[key], baseUrl, config, depth + 1, images);
+}
+
+function imageTaskResultFromDeclaredData(data: NonNullable<ImageApiResponse["data"]>, baseUrl: string, config: ImageTaskConfig): ImageTaskResult | null {
+    const results = data.map((item) => findImageResults({ b64_json: item?.b64_json, url: item?.url, image_url: item?.image_url }, baseUrl, config)[0] ?? { dataUrl: "" });
+    const firstImage = results.find((image) => image.dataUrl);
+    return firstImage ? { ...firstImage, results } : null;
 }
 
 function imageTaskResultFromMedia(images: ImageTaskMediaResult[]): ImageTaskResult {

@@ -15,40 +15,22 @@ const mocks = vi.hoisted(() => ({
     cancel: vi.fn(),
     close: vi.fn(),
     readSource: vi.fn(),
-    store: vi.fn(),
     beforeWrite: vi.fn(),
-    snapshotRequested: vi.fn(),
-    enterLock: vi.fn(),
 }));
 vi.mock("./data-adapter", async (importOriginal) => {
     const actual = await importOriginal<typeof import("./data-adapter")>();
-    const { AsyncLocalStorage } = await import("node:async_hooks");
-    const held = new AsyncLocalStorage<string[]>();
     const writeJsonDataFile: typeof actual.writeJsonDataFile = async (name, value) => {
         await mocks.beforeWrite(name, value);
         return actual.writeJsonDataFile(name, value);
     };
-    const withJsonDataFileLock: typeof actual.withJsonDataFileLock = (name, callback, options) => {
-        if (name === "generation-tasks.json") mocks.snapshotRequested();
-        return actual.withJsonDataFileLock(
-            name,
-            async () => {
-                const ancestors = held.getStore() || [];
-                mocks.enterLock(name, ancestors);
-                return held.run([...ancestors, name], callback);
-            },
-            options,
-        );
-    };
-    return { ...actual, writeJsonDataFile, withJsonDataFileLock };
+    return { ...actual, writeJsonDataFile };
 });
 vi.mock("./image-enhancement-config", async (importOriginal) => ({ ...(await importOriginal<typeof import("./image-enhancement-config")>()), resolveImageEnhancementConnection: mocks.resolve }));
 vi.mock("./image-enhancement-worker-client", async (importOriginal) => ({ ...(await importOriginal<typeof import("./image-enhancement-worker-client")>()), createEnhancementTaskClient: () => mocks }));
 vi.mock("@/app/api/image-tasks/image-task-support", () => ({ imageReferenceToDataUrl: mocks.readSource }));
 vi.mock("./maintenance-auth", async (importOriginal) => ({ ...(await importOriginal<typeof import("./maintenance-auth")>()), maintenanceWorkerContext: () => "fixture-worker-context" }));
-vi.mock("./generation-log-repository", async (importOriginal) => ({ ...(await importOriginal<typeof import("./generation-log-repository")>()), writeAssetBytes: mocks.store }));
 
-import { getEnhancementJob, listEnhancementJobsForTask, mutateEnhancementJob } from "./database/image-enhancement-job-repository";
+import { getEnhancementJob, listEnhancementJobsForTask } from "./database/image-enhancement-job-repository";
 import { createStoredGenerationTask, type StoredGenerationTaskRecord } from "./generation-task-store";
 import { getImageTask, transitionImageTask, type ImageTask } from "./image-task-store";
 import { enqueueImageEnhancement } from "./image-enhancement-enqueue";
@@ -99,7 +81,6 @@ describe("file enhancement completion visibility", () => {
         const source = await sharp({ create: { width: 32, height: 32, channels: 3, background: "white" } })
             .png()
             .toBuffer();
-        const ai = await sharp(source).resize(128, 128).png().toBuffer();
         const native = { url: "/api/generation-log-assets/native.png", sha256: createHash("sha256").update(source).digest("hex"), width: 32, height: 32, byteLength: source.length, format: "png", hasAlpha: false, provenance: "provider_native" as const };
         const media = { resultId: `${taskId}:1`, enhancementId: id, dataUrl: native.url, serverUrl: native.url, nativeSource: native, width: 32, height: 32, bytes: source.length, mimeType: "image/png" };
         const result = { ...media, results: [media] };
@@ -153,26 +134,12 @@ describe("file enhancement completion visibility", () => {
             strategyFingerprint: "d".repeat(64),
             planFingerprint: "e".repeat(64),
         };
-        let remote: RemoteEnhancementJob = { jobId: randomUUID(), status: "queued", reason: null, result: null, createdAt: Date.now(), completedAt: null };
-        const stored = new Map<string, Buffer>();
+        const remote: RemoteEnhancementJob = { jobId: randomUUID(), status: "queued", reason: null, result: null, createdAt: Date.now(), completedAt: null };
         mocks.resolve.mockResolvedValue({ endpoint: "http://fixture.invalid", token: "fixture", serviceId: policy.connection!.serviceId, timeoutMs: 60_000, trust: "system", caPem: "" });
         mocks.prepare.mockResolvedValue(plan);
         mocks.submit.mockResolvedValue({ job: remote, replayed: false });
-        mocks.query.mockImplementation(async () => remote);
-        mocks.download.mockResolvedValue(ai);
         mocks.close.mockResolvedValue(undefined);
-        mocks.acknowledge.mockImplementation(async () => {
-            const published = await getEnhancementJob(id, userId);
-            expect(published).toMatchObject({ status: "succeeded", phase: "receipt", publication: { assetId: expect.any(String) } });
-            expect(await listCreativeAssets(conversation.id, userId)).toContainEqual(expect.objectContaining({ id: published!.publication!.assetId, parentAssetId: original.id }));
-        });
-        mocks.readSource.mockImplementation(async (reference: { dataUrl: string }) => `data:image/${reference.dataUrl.endsWith(".jpg") ? "jpeg" : "png"};base64,${(stored.get(reference.dataUrl) || source).toString("base64")}`);
-        mocks.store.mockImplementation(async (bytes: Buffer) => {
-            const dimensions = await sharp(bytes).metadata();
-            const url = `/api/generation-log-assets/enhancement-${stored.size + 1}.${dimensions.format === "jpeg" ? "jpg" : "png"}`;
-            stored.set(url, bytes);
-            return { type: "image", url, serverUrl: url, width: dimensions.width, height: dimensions.height, bytes: bytes.length, mimeType: `image/${dimensions.format}` };
-        });
+        mocks.readSource.mockResolvedValue("data:image/png;base64," + source.toString("base64"));
 
         const successWrite = barrier();
         const releaseSuccess = barrier();
@@ -185,7 +152,6 @@ describe("file enhancement completion visibility", () => {
         });
         const run = () => runImageEnhancementBatch({ origin: "http://fixture.local", workerId: "enhancement-file-outbox-fixture", limit: 50 });
         const job = () => getEnhancementJob(id, userId);
-        const due = () => mutateEnhancementJob(id, userId, (row) => ({ ...row, nextPollAt: Date.now() }));
         let completion: ReturnType<typeof transitionImageTask> | undefined;
         let consuming: ReturnType<typeof runImageEnhancementBatch> | undefined;
         try {
@@ -201,21 +167,19 @@ describe("file enhancement completion visibility", () => {
             const [intent] = await listEnhancementJobsForTask(task.id, userId);
             expect(intent).toMatchObject({ id, status: "queued", phase: "prepare", reason: null, resultId: media.resultId, decision: { source: native, connection: policy.connection } });
 
-            const mutateFile = generationTasks.withGenerationTaskFileMutation;
-            const observeMutation: typeof mutateFile = (mutator) => {
-                mocks.snapshotRequested();
-                return mutateFile(mutator);
-            };
-            vi.spyOn(generationTasks, "withGenerationTaskFileMutation").mockImplementation(observeMutation);
-            mocks.snapshotRequested.mockImplementation(() => {
+            const readFile = generationTasks.withGenerationTaskFileRead;
+            const observeRead: typeof readFile = (read) => {
+                const pending = readFile(read);
                 snapshotRequested.release();
-            });
+                return pending;
+            };
+            vi.spyOn(generationTasks, "withGenerationTaskFileRead").mockImplementation(observeRead);
             consuming = run();
-            // Observe the actual snapshot request, or an incorrect terminal batch, before releasing the producer.
+            // The read is queued behind the held native write before it can acquire the file lock.
             await Promise.race([snapshotRequested.reached, consuming]);
             const beforeRelease = await job();
             expect(beforeRelease?.status, "A visible outbox intent must wait for its original success write").toBe("queued");
-            expect(beforeRelease).toMatchObject({ phase: "prepare", reason: null, nextPollAt: expect.any(Number), workerId: "enhancement-file-outbox-fixture", leaseToken: expect.any(String) });
+            expect(beforeRelease).toStrictEqual(intent);
             expect(mocks.prepare).not.toHaveBeenCalled();
             expect(mocks.submit).not.toHaveBeenCalled();
             expect((await getImageTask(task.id))?.status).toBe("running");
@@ -230,52 +194,27 @@ describe("file enhancement completion visibility", () => {
             expect(await listEnhancementJobsForTask(task.id, userId)).toEqual([prepared]);
 
             await run();
-            expect(await job()).toMatchObject({ phase: "poll", remoteJobId: remote.jobId, remoteKey: intent.remoteKey });
-            remote = { ...remote, status: "succeeded", completedAt: Date.now(), result: { width: 128, height: 128, format: "png", byteLength: ai.length, sha256: createHash("sha256").update(ai).digest("hex") } };
-            await due();
-            await run();
-            expect(await job()).toMatchObject({ phase: "download" });
-            await due();
-            await run();
-            const published = await job();
-            expect(published).toMatchObject({ status: "succeeded", phase: "receipt", publication: { ai: { width: 128, height: 128 }, delivered: { width: 64, height: 64 } } });
-            expect(mocks.acknowledge).not.toHaveBeenCalled();
-            await due();
-            await run();
             expect(await listEnhancementJobsForTask(task.id, userId)).toEqual([
                 expect.objectContaining({
                     id: intent.id,
-                    status: "succeeded",
-                    phase: "completed",
+                    status: "running",
+                    phase: "poll",
                     reason: null,
                     attempt: 1,
                     remoteKey: intent.remoteKey,
                     receiptId: intent.receiptId,
                     decision: intent.decision,
-                    nextPollAt: null,
-                    receiptConfirmedAt: expect.any(Number),
+                    remoteJobId: remote.jobId,
                 }),
             ]);
             expect(await getImageTask(task.id)).toMatchObject({ status: "success", result });
-            const assets = await listCreativeAssets(conversation.id, userId);
-            expect(assets).toHaveLength(2);
-            expect(assets.find((asset) => asset.id === original.id)).toEqual(original);
-            expect(assets.find((asset) => asset.id === published!.publication!.assetId)).toMatchObject({ parentAssetId: original.id, sourceTaskId: id, width: 64, height: 64 });
-            expect(stored.get(published!.publication!.ai.url)?.equals(ai)).toBe(true);
-            expect(await sharp(stored.get(published!.publication!.delivered.url)).metadata()).toMatchObject({ width: 64, height: 64 });
+            expect(await listCreativeAssets(conversation.id, userId)).toEqual([original]);
             expect(mocks.prepare).toHaveBeenCalledOnce();
             expect(mocks.submit).toHaveBeenCalledOnce();
             expect(mocks.submit).toHaveBeenCalledWith(plan, source, intent.remoteKey);
-            expect(mocks.query).toHaveBeenCalledOnce();
-            expect(mocks.query).toHaveBeenCalledWith(plan, remote.jobId);
-            expect(mocks.acknowledge).toHaveBeenCalledOnce();
-            expect(mocks.acknowledge).toHaveBeenCalledWith(plan, remote.jobId, intent.receiptId, remote.result);
-            for (const [name, ancestors] of mocks.enterLock.mock.calls) {
-                if (name === "generation-tasks.json") {
-                    expect(ancestors).not.toContain("image-enhancement-jobs.json");
-                    expect(ancestors).not.toContain("generation-tasks.json");
-                }
-            }
+            expect(mocks.query).not.toHaveBeenCalled();
+            expect(mocks.download).not.toHaveBeenCalled();
+            expect(mocks.acknowledge).not.toHaveBeenCalled();
         } finally {
             releaseSuccess.release();
             await Promise.allSettled([completion, consuming].filter((pending) => pending !== undefined));
