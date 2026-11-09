@@ -13,7 +13,7 @@ import type { StoredGenerationTaskRecord } from "./generation-task-types";
 type StoredNativeSlot = Extract<NonNullable<ImageTask["nativeResults"]>["slots"][number], { status: "stored" }>;
 
 export function imageTaskRuntimeNativeRecoverySuite(provider: "file" | "postgres") {
-    describe(`${provider} image runtime recovery from sealed native results`, () => {
+    describe.skipIf(provider === "postgres" && process.env.VOZEB_PRO_RUN_ECOMMERCE_POSTGRES_INTEGRATION !== "1")(`${provider} image runtime recovery from sealed native results`, () => {
         let directory: string;
         let userId: string;
         let source: Buffer;

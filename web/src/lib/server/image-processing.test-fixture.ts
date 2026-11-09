@@ -33,7 +33,7 @@ export async function completeClaimedImageProcessingFixture(child: ClaimedImageP
         assert.ok(response.body);
         const stored = await service.writeImageProcessingOutput(child.id, artifact.kind, identity, { mimeType: artifact.mimeType, stream: response.body, ...(artifact.resultId ? { resultId: artifact.resultId } : {}) });
         expect(stored).toMatchObject({ kind: artifact.kind, sha256: artifact.sha256, bytes: artifact.bytes, width: artifact.width, height: artifact.height });
-        artifacts.push(stored);
+        artifacts.push({ ...stored, ...(artifact.layerKind ? { layerKind: artifact.layerKind } : {}) });
     }
     const { metrics, ...result } = outcome.result;
     const manifest = { ...result, artifacts };

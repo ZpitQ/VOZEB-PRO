@@ -16,7 +16,7 @@ vi.mock("@/lib/auth/session", async (original) => ({ ...(await original<typeof i
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 
 export function enhancementProcessingRelationSuite(provider: "file" | "postgres") {
-    describe(`${provider} enhancement CPU publication relation`, () => {
+    describe.skipIf(provider === "postgres" && process.env.VOZEB_PRO_RUN_ECOMMERCE_POSTGRES_INTEGRATION !== "1")(`${provider} enhancement CPU publication relation`, () => {
         let directory: string;
         let userId: string;
         let database: typeof import("./database");

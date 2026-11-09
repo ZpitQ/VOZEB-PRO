@@ -159,7 +159,7 @@ describe("file image task result final upload", () => {
         const result = await operations.executeImageProcessing({ ...payload, jobId: childClaim.id, executionId: childClaim.executionId, inputs: [{ ...input, path: nativePath }], outputDirectory }, () => {});
         expect(result.sourceIdentities).toHaveLength(1);
         expect(result.sourceIdentities[0]).toMatchObject({ assetId: slot.assetId, assetVersion: slot.assetVersion, sha256: slot.sha256, bytes: 95, mimeType: "image/png", width: 2, height: 2 });
-        expect(result.results).toEqual([{ resultId: slot.resultId, resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 0 }]);
+        expect(result.results).toEqual([{ resultId: slot.resultId, resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 0, finalImage: { format: "png", hasAlpha: false } }]);
         expect(result.geometry).toEqual({});
         expect(result.artifacts).toHaveLength(1);
         const final = result.artifacts[0];

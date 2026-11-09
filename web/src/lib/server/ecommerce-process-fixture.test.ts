@@ -1,12 +1,8 @@
 import assert from "node:assert/strict";
-import { createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { pipeline } from "node:stream/promises";
 import { expect, it, vi } from "vitest";
-import { runImageProcessing } from "../../../scripts/image-processing-supervisor.mjs";
-import type { ImageProcessingOperation } from "../image-processing/contracts";
-import type { StoredImageProcessingArtifact } from "./image-processing-service";
+import { completeClaimedImageProcessingFixture } from "./image-processing.test-fixture";
 import type { RuntimeFileDatabase } from "./creative-runtime-repository";
 
 // Only Next request-lifetime plumbing is supplied by this test host. Auth,
@@ -14,8 +10,9 @@ import type { RuntimeFileDatabase } from "./creative-runtime-repository";
 const input = vi.hoisted(
     () =>
         JSON.parse(process.env.VOZEB_PRO_ECOMMERCE_PROCESS_INPUT || "null") as {
-            command: "confirm" | "recover" | "read" | "create_image" | "late_release" | "execute" | "native" | "project_result_copy" | "public_read";
+            command: "confirm" | "recover" | "read" | "create_image" | "late_release" | "execute" | "native" | "consume_result" | "project_result_copy" | "public_read";
             jobId?: string;
+            imageId?: string;
             origin: string;
             cookie: string;
             resultKey: string;
@@ -34,7 +31,7 @@ const input = vi.hoisted(
             workerId?: string;
         } | null,
 );
-const observation = vi.hoisted(() => ({ referenceMutation: false, failedWrite: false, stages: new Set<string>() }));
+const observation = vi.hoisted(() => ({ referenceMutation: false, imageMutation: false, failedWrite: false, stages: new Set<string>() }));
 async function stage(phase: string, evidence: Record<string, unknown> = {}) {
     if (!input?.gatePhases?.includes(phase) || observation.stages.has(phase)) return;
     observation.stages.add(phase);
@@ -48,7 +45,7 @@ vi.mock("./data-adapter", async (original) => {
     return {
         ...actual,
         withJsonDataFileLock: async <T>(file: string, callback: () => Promise<T>, options?: { timeoutMs?: number }) => {
-            const parentLock = file === "generation-tasks.json" && (observation.referenceMutation || input?.command === "create_image");
+            const parentLock = file === "generation-tasks.json" && (observation.referenceMutation || observation.imageMutation);
             const pending = actual.withJsonDataFileLock(
                 file,
                 async () => {
@@ -88,7 +85,7 @@ vi.mock("./database", async (original) => {
                 const observedClient = {
                     ...client,
                     query: async (sql: string, values?: unknown[]) => {
-                        const parentLock = /FROM\s+generation_tasks/i.test(sql) && /FOR UPDATE/i.test(sql) && values?.[0] === input?.runId && (observation.referenceMutation || input?.command === "create_image");
+                        const parentLock = /FROM\s+generation_tasks/i.test(sql) && /FOR UPDATE/i.test(sql) && values?.[0] === input?.runId && (observation.referenceMutation || observation.imageMutation);
                         const pid = parentLock ? await query<{ pid: number }>("SELECT pg_backend_pid() AS pid") : undefined;
                         const pending = query(sql, values);
                         if (parentLock) await stage("parent_lock_attempt", { backendPid: pid!.rows[0].pid });
@@ -124,6 +121,21 @@ vi.mock("./creative-runtime-store", async (original) => {
         },
     };
 });
+vi.mock("./generation-task-store", async (original) => {
+    const actual = await original<typeof import("./generation-task-store")>();
+    return {
+        ...actual,
+        createStoredGenerationTask: async (...args: Parameters<typeof actual.createStoredGenerationTask>) => {
+            if (input?.command !== "create_image" || args[0] !== "image") return actual.createStoredGenerationTask(...args);
+            observation.imageMutation = true;
+            try {
+                return await actual.createStoredGenerationTask(...args);
+            } finally {
+                observation.imageMutation = false;
+            }
+        },
+    };
+});
 vi.mock("./generation-task-scheduler", async (original) => {
     const actual = await original<typeof import("./generation-task-scheduler")>();
     return {
@@ -145,7 +157,10 @@ async function completeNativeStage(runId: string, jobId: string, fixtureDirector
     const pending = await tasks.getStoredGenerationTaskRecord("image_processing", jobId);
     assert(run && pending);
     expect(pending).toMatchObject({ id: jobId, runId, userId: run.userId, status: "pending", executionPhase: "created" });
-    expect(run.ecommerceSnapshot?.processing?.waitingFor).toMatchObject({ jobId, inputDigest: pending.payload.inputDigest });
+    if (pending.payload.operation === "process_result") {
+        const image = await tasks.getStoredGenerationTaskRecord("image", pending.parentTaskId!);
+        expect(image).toMatchObject({ runId, userId: run.userId, payload: { resultProcessing: { jobId, inputDigest: pending.payload.inputDigest } } });
+    } else expect(run.ecommerceSnapshot?.processing?.waitingFor).toMatchObject({ jobId, inputDigest: pending.payload.inputDigest });
     const configuration = imageProcessingResourceConfig(process.env);
     const workerId = "fixture-native:" + process.pid;
     const claimed = await service.claimImageProcessingTasks({ workerId, profileVersion: configuration.profileVersion, availableMemoryBytes: configuration.budgetBytes, slots: 1 });
@@ -153,41 +168,10 @@ async function completeNativeStage(runId: string, jobId: string, fixtureDirector
     const task = claimed.tasks[0];
     expect(task.id).toBe(jobId);
     const payload = task.payload;
-    if (payload.operation !== "prepare_reference" && payload.operation !== "build_protection") throw new Error("Reference actor only drives its prepare or build dependency");
-    const operation: ImageProcessingOperation = payload.operation === "prepare_reference" ? { operation: "prepare_reference", options: {} } : { operation: "build_protection", options: payload.options };
-    const identity = { workerId, executionId: task.executionId };
-    const taskDirectory = await mkdtemp(join(fixtureDirectory, "native-stage-"));
-    try {
-        const inputs = await Promise.all(
-            payload.inputs.map(async (source, index) => {
-                const inputPath = join(taskDirectory, "source-" + index + ".bin");
-                const registered = await service.readImageProcessingInput(jobId, source.assetId, identity);
-                await pipeline(registered.stream, createWriteStream(inputPath, { flags: "wx" }));
-                return { ...source, path: inputPath };
-            }),
-        );
-        const outputDirectory = join(taskDirectory, "outputs");
-        await mkdir(outputDirectory);
-        const outcome = await runImageProcessing({ ...operation, version: "image-processing.v1", jobId, executionId: task.executionId, inputs, outputDirectory }, { taskDirectory, maxHeapMiB: payload.resource.configuration.processHeapMb });
-        expect(outcome).toMatchObject({ status: "completed", jobId, executionId: task.executionId, exitCode: 0, signal: null });
-        expect(outcome.pid).toBeGreaterThan(0);
-        expect(outcome.pid).not.toBe(process.pid);
-        assert(outcome.status === "completed");
-        const { artifacts, metrics, ...manifest } = outcome.result;
-        const storedArtifacts: StoredImageProcessingArtifact[] = [];
-        for (const artifact of artifacts) {
-            const body = new Response(new Uint8Array(await readFile(artifact.path))).body;
-            assert(body);
-            const stored = await service.writeImageProcessingOutput(jobId, artifact.kind, identity, { stream: body, mimeType: artifact.mimeType });
-            expect(stored).toMatchObject({ kind: artifact.kind, sha256: artifact.sha256, bytes: artifact.bytes, width: artifact.width, height: artifact.height });
-            storedArtifacts.push(stored);
-        }
-        const completion = await service.completeImageProcessingTask(jobId, { ...identity, manifest: { ...manifest, artifacts: storedArtifacts }, metrics });
-        expect(completion).toMatchObject({ jobId, inputDigest: payload.inputDigest, executionId: task.executionId, parentRescheduled: true });
-        return { jobId, operation: payload.operation, actorPid: process.pid, nativePid: outcome.pid, exitCode: outcome.exitCode, completion };
-    } finally {
-        await rm(taskDirectory, { recursive: true, force: true });
-    }
+    if (payload.operation !== "prepare_reference" && payload.operation !== "build_protection" && payload.operation !== "process_result") throw new Error("Reference actor only drives its prepare, build or result dependency");
+    const { receipt: completion, metrics } = await completeClaimedImageProcessingFixture(task, workerId, fixtureDirectory);
+    expect(completion).toMatchObject({ jobId, inputDigest: payload.inputDigest, executionId: task.executionId, parentRescheduled: true });
+    return { jobId, operation: payload.operation, actorPid: process.pid, nativePid: metrics.pid, exitCode: 0, completion };
 }
 
 const processIt = input ? it : it.skip;
@@ -247,6 +231,19 @@ processIt(
         } else if (input.command === "native") {
             if (!input.jobId || !input.fixtureDirectory) throw new Error("Native reference job and fixture directory are required");
             nativeEvidence = await completeNativeStage(input.runId, input.jobId, input.fixtureDirectory);
+        } else if (input.command === "consume_result") {
+            if (!input.imageId) throw new Error("Image result task is required");
+            const scheduler = await import("./generation-task-scheduler");
+            const tasks = await import("./generation-task-store");
+            const results = await import("./image-task-result-processing");
+            const workerId = `fixture-result-consumer:${process.pid}`;
+            const previous = await tasks.getStoredGenerationTaskRecord("image", input.imageId);
+            const [claim] = await scheduler.claimDueGenerationTasks({ workerId, taskIds: [input.imageId], limit: 1 });
+            expect(claim).toMatchObject({ id: input.imageId, userId: previous!.userId, payload: { runId: input.runId } });
+            expect(claim.executionId).toBeTruthy();
+            expect(claim.executionId).not.toBe(previous!.payload.executionId);
+            outcome = await results.consumeCompletedImageTaskResultProcessing({ taskId: input.imageId, workerId, executionId: claim.executionId! });
+            expect(outcome).toEqual({ state: "completed" });
         } else if (input.command === "execute") {
             const { executeAgentRun } = await import("./agent-run-executor");
             const run = await getAgentRun(input.runId);

@@ -183,7 +183,8 @@ describe("generation task scheduler", () => {
         expect(String(mocks.transactionQuery.mock.calls[0]?.[0])).toContain("FOR UPDATE SKIP LOCKED");
         expect(mocks.transactionQuery.mock.calls[0]?.[1]).toEqual([new Date(1_000), 20, "worker-one", ["due"], new Date(91_000), ["image", "video", "audio", "text", "agent"]]);
         expect(String(mocks.transactionQuery.mock.calls[1]?.[0])).toContain("FOR UPDATE");
-        expect(mocks.transactionQuery.mock.calls[1]?.[1]).toEqual(["due"]);
+        expect(String(mocks.transactionQuery.mock.calls[1]?.[0])).toContain("task_type = $2");
+        expect(mocks.transactionQuery.mock.calls[1]?.[1]).toEqual(["due", "image"]);
         expect(String(mocks.transactionQuery.mock.calls[2]?.[0])).toContain("worker_id = $3");
         expect(mocks.transactionQuery.mock.calls[2]?.[1]).toHaveLength(16);
         expect(mocks.transactionQuery.mock.calls[2]?.[1]?.[15]).toBe("held-image-execution");

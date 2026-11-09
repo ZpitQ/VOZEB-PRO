@@ -179,7 +179,7 @@ test("image task persists a real media result and reuses the same request identi
     const completed = await pollTask(request, `/api/image-tasks/${firstTask.id}`);
     expect(completed).toMatchObject({ status: "success", result: { width: 64, height: 64, mimeType: "image/png" } });
     const mediaUrl = String((completed.result as { dataUrl?: string }).dataUrl || "");
-    expect(mediaUrl).toMatch(/^\/api\/generation-log-assets\/permanent\/.+\.png$/);
+    expect(mediaUrl).toMatch(/^\/api\/(?:generation-log-assets|reference-assets)\/.+\.png$/);
     const media = await request.get(mediaUrl);
     expect(media.ok()).toBe(true);
     expect(media.headers()["content-type"]).toMatch(/^image\/png/);
@@ -212,7 +212,7 @@ test("unified creative page reaches the local planning and image protocols", asy
         )
         .toBe("completed");
     await expect(page.getByTestId("creative-media-result")).toBeVisible();
-    await expect(page.getByTestId("creative-media-result").getByTestId("creative-primary-result").getByRole("img")).toHaveAttribute("src", /\/api\/generation-log-assets\/permanent\/.+\.png/);
+    await expect(page.getByTestId("creative-media-result").getByTestId("creative-primary-result").getByRole("img")).toHaveAttribute("src", /\/api\/(?:generation-log-assets|reference-assets)\/.+\.png/);
 
     const state = await protocolFixtureState(request);
     expect(state.requests.some((item) => item.method === "POST" && item.path.endsWith("/chat/completions"))).toBe(true);
@@ -249,7 +249,7 @@ test("unified creative entry keeps an image-only execution boundary", async ({ p
     const runId = ((await runResponse.json()) as { data: { run: { id: string } } }).data.run.id;
     await waitForAgentRun(request, runId);
 
-    await expect(page.getByTestId("creative-media-result").getByTestId("creative-primary-result").getByRole("img")).toHaveAttribute("src", /\/api\/generation-log-assets\/permanent\/.+\.png/);
+    await expect(page.getByTestId("creative-media-result").getByTestId("creative-primary-result").getByRole("img")).toHaveAttribute("src", /\/api\/(?:generation-log-assets|reference-assets)\/.+\.png/);
     await expect(page.getByTestId("creative-video-result")).toHaveCount(0);
     await expect(page.getByText(/内部协议(?:图片|视频)执行提示/)).toHaveCount(0);
 

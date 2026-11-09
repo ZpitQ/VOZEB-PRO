@@ -92,7 +92,7 @@ async function decoded(bytes: Buffer) {
     return { width: pixels.info.width, height: pixels.info.height, format: metadata.format, opaque: statistics.isOpaque, byteLength: bytes.length, sha256: sha256(bytes) };
 }
 async function immutableImage(request: APIRequestContext, asset: CreativeAsset) {
-    expect(asset).toMatchObject({ type: "image", status: "ready", serverUrl: expect.stringMatching(/^\/api\/generation-log-assets\/permanent\//) });
+    expect(asset).toMatchObject({ type: "image", status: "ready", serverUrl: expect.stringMatching(/^\/api\/(?:generation-log-assets|reference-assets)\//) });
     const response = await request.get(asset.serverUrl!);
     expect(response.ok()).toBe(true);
     const facts = await decoded(await response.body());
@@ -411,7 +411,7 @@ async function assertScene(request: APIRequestContext, scene: Awaited<ReturnType
     if (source.format === "png") expect(native.sha256).toBe(source.sha256);
     expect(result).toMatchObject({
         serverUrl: scene.output.immutableUrl,
-        canvasEvidence: { nativeSize: sourceSize, storedSize: sourceSize, nativeUrl: expect.stringMatching(/^\/api\/generation-log-assets\/permanent\//), normalization: "none" },
+        canvasEvidence: { nativeSize: sourceSize, storedSize: sourceSize, nativeUrl: expect.stringMatching(/^\/api\/(?:generation-log-assets|reference-assets)\//), normalization: "none" },
         sceneProtectionEvidence: {
             sourceAssetId: source.asset.id,
             sourceDigest: source.sha256,

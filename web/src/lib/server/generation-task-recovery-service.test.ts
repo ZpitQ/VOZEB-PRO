@@ -117,21 +117,22 @@ describe("generation task recovery service", () => {
         const result = await runGenerationTaskRecoveryBatch({ origin: "http://internal", workerId: "worker-one" });
 
         expect(mocks.executeAgentRun).not.toHaveBeenCalled();
-        expect(mocks.release).toHaveBeenCalledWith("agent", "agent-one", "worker-one", expect.objectContaining({ executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "paused" }));
+        expect(mocks.release).toHaveBeenCalledWith("agent", "agent-one", "worker-one", expect.objectContaining({ executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "paused" }), { executionId: "held-agent-execution" });
         expect(result).toMatchObject({ claimed: 1, failed: 1 });
     });
 
     it("runs a completed Agent review from its persistent review lease", async () => {
         const run = { id: "agent-one", userId: "user-one", status: "completed", reviewed: false, reviewStatus: "review_pending", tasks: [], createdAt: 1_000 };
-        mocks.claim.mockResolvedValue([{ ...lease(), status: "success", executionPhase: "review_pending" }]);
+        const reviewLease = { ...lease(), status: "success", executionPhase: "review_pending" };
+        mocks.claim.mockResolvedValue([reviewLease]);
         mocks.getAgentRun.mockResolvedValueOnce(run).mockResolvedValue({ ...run, reviewed: true });
         mocks.processAgentRunReview.mockResolvedValue({ status: "completed", attempts: 1 });
 
         const result = await runGenerationTaskRecoveryBatch({ origin: "http://internal", workerId: "worker-one" });
 
         expect(mocks.executeAgentRun).not.toHaveBeenCalled();
-        expect(mocks.processAgentRunReview).toHaveBeenCalledWith(run, "http://internal", "worker-context:user-one");
-        expect(mocks.release).toHaveBeenCalledWith("agent", "agent-one", "worker-one", { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "review_completed" });
+        expect(mocks.processAgentRunReview).toHaveBeenCalledWith(run, "http://internal", "worker-context:user-one", reviewLease);
+        expect(mocks.release).toHaveBeenCalledWith("agent", "agent-one", "worker-one", { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "review_completed" }, { executionId: "held-agent-execution" });
         expect(result).toMatchObject({ claimed: 1, completed: 1 });
     });
 
@@ -141,7 +142,9 @@ describe("generation task recovery service", () => {
         mocks.getAgentRun.mockResolvedValue(run);
         mocks.processAgentRunReview.mockResolvedValue({ status: "completed", attempts: 1 });
         await runGenerationTaskRecoveryBatch({ origin: "http://internal", workerId: "worker-one" });
-        expect(mocks.release).toHaveBeenCalledWith("agent", "agent-one", "worker-one", expect.objectContaining({ executionPhase: "review_pending", nextPollAt: expect.any(Number), lastUpstreamStatus: "review_pending" }));
+        expect(mocks.release).toHaveBeenCalledWith("agent", "agent-one", "worker-one", expect.objectContaining({ executionPhase: "review_pending", nextPollAt: expect.any(Number), lastUpstreamStatus: "review_pending" }), {
+            executionId: "held-agent-execution",
+        });
     });
 
     it("advances an existing child task before resuming its parent Agent", async () => {
@@ -166,7 +169,7 @@ describe("generation task recovery service", () => {
     });
 
     it("persists a ready image without querying the upstream a second time", async () => {
-        const task = { id: "image-ready", userId: "user-one", status: "running", config: {}, executionId: "held-image-execution" };
+        const task = { id: "image-ready", userId: "user-one", kind: "generation", references: [], status: "running", config: {}, executionId: "held-image-execution" };
         mocks.claim.mockResolvedValue([{ ...imageLease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "persisting", resultPayload: { url: "https://cdn.example.com/result.png" } }]);
         mocks.getImageTask.mockResolvedValue(task);
         mocks.persistImageTaskResult.mockResolvedValue({ status: "success" });
@@ -335,6 +338,8 @@ describe("generation task recovery service", () => {
     it("moves an image with an invalid OpenAI query contract to manual review", async () => {
         const task = {
             id: "image-one",
+            kind: "generation",
+            references: [],
             userId: "user-one",
             status: "running",
             executionId: "held-image-execution",
@@ -367,6 +372,8 @@ describe("generation task recovery service", () => {
     it("releases one explicit upstream image failure as a clean second submission", async () => {
         const task = {
             id: "image-retry",
+            kind: "generation",
+            references: [],
             userId: "user-one",
             status: "running",
             executionId: "held-image-execution",
@@ -397,6 +404,8 @@ describe("generation task recovery service", () => {
     it("stops after the second explicit upstream image failure", async () => {
         const task = {
             id: "image-retry-exhausted",
+            kind: "generation",
+            references: [],
             userId: "user-one",
             status: "running",
             executionId: "held-image-execution",
@@ -419,6 +428,8 @@ describe("generation task recovery service", () => {
     it("recovers an image upstream identity already saved in the task payload", async () => {
         const task = {
             id: "image-one",
+            kind: "generation",
+            references: [],
             userId: "user-one",
             status: "running",
             executionId: "held-image-execution",
@@ -444,6 +455,8 @@ describe("generation task recovery service", () => {
     it("restores a scheduler-only image upstream identity before querying", async () => {
         const task = {
             id: "image-one",
+            kind: "generation",
+            references: [],
             userId: "user-one",
             status: "running",
             executionId: "held-image-execution",
@@ -485,6 +498,8 @@ describe("generation task recovery service", () => {
     it("records why an interrupted image submission requires review", async () => {
         const task = {
             id: "image-interrupted",
+            kind: "generation",
+            references: [],
             userId: "user-one",
             status: "running",
             executionId: "held-image-execution",
@@ -511,6 +526,8 @@ describe("generation task recovery service", () => {
     it("stops repeated image query errors at the configured model deadline", async () => {
         const task = {
             id: "image-query-timeout",
+            kind: "generation",
+            references: [],
             userId: "user-one",
             status: "running",
             executionId: "held-image-execution",
@@ -553,7 +570,7 @@ describe("generation task recovery service", () => {
 
     it("bounds repeated image result persistence by the configured model deadline", async () => {
         const now = Date.now();
-        const task = { id: "image-persist-timeout", userId: "user-one", status: "running", executionId: "held-image-execution", config: { capabilityProfile: { timeoutMs: 30_000 } }, createdAt: now - 200_000 };
+        const task = { id: "image-persist-timeout", userId: "user-one", kind: "generation", references: [], status: "running", executionId: "held-image-execution", config: { capabilityProfile: { timeoutMs: 30_000 } }, createdAt: now - 200_000 };
         mocks.claim.mockResolvedValue([
             {
                 ...imageLease(),
@@ -646,7 +663,7 @@ describe("generation task recovery service", () => {
     });
 
     it("defers an active image from a newer execution without querying, persisting or failing that owner's task", async () => {
-        const task = { id: "image-stale-claim", userId: "user-one", status: "running", executionId: "newer-image-execution", upstream: { id: "upstream-stale-claim" }, config: {} };
+        const task = { id: "image-stale-claim", userId: "user-one", kind: "generation", references: [], status: "running", executionId: "newer-image-execution", upstream: { id: "upstream-stale-claim" }, config: {} };
         mocks.claim.mockResolvedValue([{ ...imageLease(), id: task.id, userId: task.userId, type: "image", status: "running", executionPhase: "polling", upstreamTaskId: task.upstream.id }]);
         mocks.getImageTask.mockResolvedValue(task);
         mocks.queryImageTaskUpstreamStep.mockResolvedValue({ state: "pending", status: "processing" });
@@ -668,10 +685,11 @@ describe("generation task recovery service", () => {
 function lease() {
     return {
         id: "agent-one",
+        executionId: "held-agent-execution",
         userId: "user-one",
         type: "agent",
         status: "pending",
-        payload: {},
+        payload: { executionId: "held-agent-execution" },
         executionPhase: "created",
         nextPollAt: 1,
         createdAt: 1_000,

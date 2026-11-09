@@ -257,6 +257,7 @@ function waitingRun(version = "ecommerce-edit.v4"): AgentRun {
                 planVersion: version,
                 ...(version === "ecommerce-edit.v5" ? { photography: { private: "photography-private" } } : {}),
                 operation: "scene_edit",
+                strategy: "integrated_scene",
                 protection: { scope: "local", preserveOutsideMask: true },
                 source: { currentSceneBaselineId: "scene" },
                 canvas: { mode: "exact", size: { width: 6, height: 4 } },

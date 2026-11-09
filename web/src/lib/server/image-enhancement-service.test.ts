@@ -1,8 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import assert from "node:assert/strict";
+import { createWriteStream } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { performance } from "node:perf_hooks";
+import { dirname, join } from "node:path";
+import { pipeline } from "node:stream/promises";
+import { runImageProcessing } from "../../../scripts/image-processing-supervisor.mjs";
+import { imageProcessingResourceConfig } from "../image-processing/resource-config";
+import { completeClaimedImageProcessingFixture, readImageTaskResultBytesFixture } from "./image-processing.test-fixture";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ resolve: vi.fn(), prepare: vi.fn(), submit: vi.fn(), query: vi.fn(), download: vi.fn(), acknowledge: vi.fn(), cancel: vi.fn(), close: vi.fn(), readSource: vi.fn(), store: vi.fn() }));
@@ -10,30 +15,41 @@ vi.mock("./image-enhancement-config", async (importOriginal) => ({ ...(await imp
 vi.mock("./image-enhancement-worker-client", async (importOriginal) => ({ ...(await importOriginal<typeof import("./image-enhancement-worker-client")>()), createEnhancementTaskClient: () => mocks }));
 vi.mock("@/app/api/image-tasks/image-task-support", () => ({ imageReferenceToDataUrl: mocks.readSource, inlineRemoteImageResult: async (dataUrl: string) => ({ dataUrl }), resolveProxiedMediaSource: () => ({}), directRemoteImageResult: vi.fn() }));
 vi.mock("./maintenance-auth", async (importOriginal) => ({ ...(await importOriginal<typeof import("./maintenance-auth")>()), maintenanceWorkerContext: () => "fixture-worker-context" }));
-vi.mock("./generation-log-repository", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("./generation-log-repository")>()),
-    writeAssetBytes: mocks.store,
-    normalizeAssets: async (inputs: { url: string }[]) => Promise.all(inputs.map((input) => mocks.store(Buffer.from(input.url.split(",")[1], "base64")))),
-}));
-import { claimEnhancementJobs, getEnhancementJob, listEnhancementJobsForTask, mutateEnhancementJob } from "./database/image-enhancement-job-repository";
+let claimEnhancementJobs: (typeof import("./database/image-enhancement-job-repository"))["claimEnhancementJobs"];
+let getEnhancementJob: (typeof import("./database/image-enhancement-job-repository"))["getEnhancementJob"];
+let listEnhancementJobsForTask: (typeof import("./database/image-enhancement-job-repository"))["listEnhancementJobsForTask"];
+let mutateEnhancementJob: (typeof import("./database/image-enhancement-job-repository"))["mutateEnhancementJob"];
 import type { ImageEnhancementJob } from "./database/image-enhancement-job-repository";
-import { readJsonDataFile, writeJsonDataFile } from "./data-adapter";
-import { createStoredGenerationTask, mutateStoredGenerationTask } from "./generation-task-store";
-import { getImageTask, transitionImageTask, updateImageTask, type ImageTask } from "./image-task-store";
-import { cancelImageEnhancement, retryImageEnhancement, runImageEnhancementBatch } from "./image-enhancement-service";
-import { publicImageEnhancement } from "./image-enhancement-public";
-import { planImageTaskEnhancement } from "./image-enhancement-enqueue";
+let readJsonDataFile: (typeof import("./data-adapter"))["readJsonDataFile"];
+let writeJsonDataFile: (typeof import("./data-adapter"))["writeJsonDataFile"];
+let createStoredGenerationTask: (typeof import("./generation-task-store"))["createStoredGenerationTask"];
+let mutateStoredGenerationTask: (typeof import("./generation-task-store"))["mutateStoredGenerationTask"];
+let getImageTask: (typeof import("./image-task-store"))["getImageTask"];
+let transitionImageTask: (typeof import("./image-task-store"))["transitionImageTask"];
+let updateImageTask: (typeof import("./image-task-store"))["updateImageTask"];
+import type { ImageTask } from "./image-task-store";
+let cancelImageEnhancement: (typeof import("./image-enhancement-service"))["cancelImageEnhancement"];
+let retryImageEnhancement: (typeof import("./image-enhancement-service"))["retryImageEnhancement"];
+let runImageEnhancementBatch: (typeof import("./image-enhancement-service"))["runImageEnhancementBatch"];
+let publicImageEnhancement: (typeof import("./image-enhancement-public"))["publicImageEnhancement"];
+let planImageTaskEnhancement: (typeof import("./image-enhancement-enqueue"))["planImageTaskEnhancement"];
 import type { FrozenImageEnhancementPolicy } from "./image-enhancement-config";
 import type { FrozenWorkerEnhancementPlan, RemoteEnhancementJob } from "./image-enhancement-worker-client";
 import type { EnhancementSource } from "./image-enhancement-plan";
 import type { EcommerceEnhancementDelivery } from "./image-enhancement-delivery";
-import { compositeProductEnhancement, type ProductEnhancementProtection } from "./image-enhancement-product-protection";
+let compositeProductEnhancement: (typeof import("./image-enhancement-product-protection"))["compositeProductEnhancement"];
+import type { ProductEnhancementProtection } from "./image-enhancement-product-protection";
 import type { EcommerceResultTechnicalCheck } from "./ecommerce-quality-check";
-import { buildSceneEditProtection, compositeSceneEdit } from "./ecommerce-product-regions";
-import { createCreativeConversation, getCreativeAssetsByIds, listCreativeAssets, registerCreativeAssets } from "./creative-runtime-store";
-import { initializePostgresSchema, postgresQuery } from "./database/postgres";
-import { prepareImageTaskResults } from "./image-task-result-service";
-import * as creativeRuntime from "./creative-runtime-store";
+let buildSceneEditProtection: (typeof import("./ecommerce-product-regions"))["buildSceneEditProtection"];
+let compositeSceneEdit: (typeof import("./ecommerce-product-regions"))["compositeSceneEdit"];
+let createCreativeConversation: (typeof import("./creative-runtime-store"))["createCreativeConversation"];
+let getCreativeAssetsByIds: (typeof import("./creative-runtime-store"))["getCreativeAssetsByIds"];
+let listCreativeAssets: (typeof import("./creative-runtime-store"))["listCreativeAssets"];
+let registerCreativeAssets: (typeof import("./creative-runtime-store"))["registerCreativeAssets"];
+let initializePostgresSchema: (typeof import("./database/postgres"))["initializePostgresSchema"];
+let postgresQuery: (typeof import("./database/postgres"))["postgresQuery"];
+let prepareImageTaskResults: (typeof import("./image-task-result-service"))["prepareImageTaskResults"];
+let creativeRuntime: typeof import("./creative-runtime-store");
 
 const policy: FrozenImageEnhancementPolicy = {
     revision: "policy-one",
@@ -56,8 +72,58 @@ for (const provider of ["file", "postgres"] as const) {
         let plan: FrozenWorkerEnhancementPlan;
         let remote: RemoteEnhancementJob;
         let ai: Buffer;
-        let stored: Map<string, Buffer>;
-        const run = () => runImageEnhancementBatch({ origin: "http://fixture.local", workerId: "enhancement-fixture", limit: 50 });
+        let logs: typeof import("./generation-log-repository");
+        let registry: typeof import("./local-media-registry");
+        let processing: typeof import("./image-processing-service");
+        let cpuFailureExpected: boolean;
+        async function writeFixtureAsset(url: string, bytes: Buffer) {
+            const path = logs.localAssetUrlToPath(url);
+            await mkdir(dirname(path), { recursive: true });
+            await writeFile(path, bytes);
+            const metadata = await sharp(bytes).metadata();
+            await registry.registerLocalMediaAsset({
+                storageKey: new URL(url, "http://fixture.local").pathname.slice("/api/generation-log-assets/".length),
+                scope: "generation",
+                storageClass: "permanent",
+                type: "image",
+                ownerUserId: "enhancement-service-owner",
+                source: "image-workbench",
+                conversationId: task.conversationId,
+                taskId: id,
+                mimeType: `image/${metadata.format}`,
+                bytes: bytes.length,
+            });
+        }
+        const readFixtureAsset = readImageTaskResultBytesFixture;
+        async function run() {
+            const batch = await runImageEnhancementBatch({ origin: "http://fixture.local", workerId: "enhancement-fixture", limit: 50 });
+            const parent = await job();
+            if (parent?.status !== "running" || !parent.publicationProcessing || parent.publicationProcessing.outcome || parent.cancelRequested) return batch;
+            const workerId = "enhancement-cpu-fixture";
+            const { profileVersion, budgetBytes } = imageProcessingResourceConfig(process.env);
+            const claimed = await processing.claimImageProcessingTasks({ workerId, profileVersion, availableMemoryBytes: budgetBytes, slots: 1 });
+            expect(claimed.tasks).toHaveLength(1);
+            const child = claimed.tasks[0];
+            expect(child.id).toBe(parent.publicationProcessing.jobId);
+            if (cpuFailureExpected) {
+                const taskDirectory = await mkdtemp(join(directory, "rejected-cpu-"));
+                const inputs = [];
+                for (const [index, input] of child.payload.inputs.entries()) {
+                    const path = join(taskDirectory, `input-${index}`);
+                    const source = await processing.readImageProcessingInput(child.id, input.assetId, { workerId, executionId: child.executionId });
+                    await pipeline(source.stream, createWriteStream(path, { flags: "wx" }));
+                    inputs.push({ ...input, path });
+                }
+                const outputDirectory = join(taskDirectory, "outputs");
+                await mkdir(outputDirectory);
+                const outcome = await runImageProcessing({ ...child.payload, jobId: child.id, executionId: child.executionId, inputs, outputDirectory }, { taskDirectory, maxHeapMiB: child.payload.resource.configuration.processHeapMb });
+                expect(outcome.status).toBe("rejected");
+                assert.ok(outcome.status === "rejected");
+                await processing.failImageProcessingTask(child.id, { workerId, executionId: child.executionId, failure: outcome });
+            } else await completeClaimedImageProcessingFixture(child, workerId, directory);
+            await runImageEnhancementBatch({ origin: "http://fixture.local", workerId: "enhancement-fixture", limit: 50 });
+            return batch;
+        }
         const job = () => getEnhancementJob(id, task.userId);
         const due = () => mutateEnhancementJob(id, task.userId, (row) => ({ ...row, nextPollAt: Date.now() - 1 }));
         async function submitted() {
@@ -100,6 +166,7 @@ for (const provider of ["file", "postgres"] as const) {
                 } satisfies ImageTask),
                 60_000,
             );
+            await writeFixtureAsset(nativeUrl, source);
             task = (await transitionImageTask(task, ["running"], { status: "success", result: task.result }))!;
             await registerCreativeAssets([
                 {
@@ -120,10 +187,36 @@ for (const provider of ["file", "postgres"] as const) {
             ]);
         }
         beforeEach(async () => {
+            vi.restoreAllMocks();
+            vi.resetModules();
             vi.resetAllMocks();
             directory = await mkdtemp(join(tmpdir(), "vozeb-enhancement-execution-"));
             vi.stubEnv("VOZEB_PRO_DATA_DIR", directory);
             vi.stubEnv("VOZEB_PRO_DATABASE_PROVIDER", provider);
+            vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_MEMORY_MB", "8192");
+            vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_HEAP_MB", "64");
+            vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB", "6144");
+            vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_HEAP_MB", "384");
+            vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_CONCURRENCY", "1");
+            ({ claimEnhancementJobs, getEnhancementJob, listEnhancementJobsForTask, mutateEnhancementJob } = await import("./database/image-enhancement-job-repository"));
+            ({ readJsonDataFile, writeJsonDataFile } = await import("./data-adapter"));
+            ({ createStoredGenerationTask, mutateStoredGenerationTask } = await import("./generation-task-store"));
+            ({ getImageTask, transitionImageTask, updateImageTask } = await import("./image-task-store"));
+            ({ cancelImageEnhancement, retryImageEnhancement, runImageEnhancementBatch } = await import("./image-enhancement-service"));
+            ({ publicImageEnhancement } = await import("./image-enhancement-public"));
+            ({ planImageTaskEnhancement } = await import("./image-enhancement-enqueue"));
+            ({ compositeProductEnhancement } = await import("./image-enhancement-product-protection"));
+            ({ buildSceneEditProtection, compositeSceneEdit } = await import("./ecommerce-product-regions"));
+            ({ createCreativeConversation, getCreativeAssetsByIds, listCreativeAssets, registerCreativeAssets } = await import("./creative-runtime-store"));
+            ({ initializePostgresSchema, postgresQuery } = await import("./database/postgres"));
+            ({ prepareImageTaskResults } = await import("./image-task-result-service"));
+            creativeRuntime = await import("./creative-runtime-store");
+            logs = await import("./generation-log-repository");
+            registry = await import("./local-media-registry");
+            processing = await import("./image-processing-service");
+            mocks.store.mockImplementation(logs.writeEnhancementArtifactFile);
+            vi.spyOn(logs, "writeEnhancementArtifactFile").mockImplementation(mocks.store);
+            cpuFailureExpected = false;
             if (provider === "postgres") {
                 const target = new URL(process.env.DATABASE_URL || "");
                 if (target.hostname !== "127.0.0.1" || !target.pathname.endsWith("_m5_e2e")) throw new Error("An explicitly isolated M5 PostgreSQL fixture is required");
@@ -134,7 +227,6 @@ for (const provider of ["file", "postgres"] as const) {
                 .png()
                 .toBuffer();
             ai = await sharp(source).resize(128, 128).png().toBuffer();
-            stored = new Map();
             await createTask();
             const native = task.result!.nativeSource!;
             plan = {
@@ -156,18 +248,14 @@ for (const provider of ["file", "postgres"] as const) {
             mocks.query.mockImplementation(async () => remote);
             mocks.cancel.mockImplementation(async () => ({ ...remote, status: "cancelled", completedAt: Date.now() }));
             mocks.readSource.mockImplementation(async (reference: { dataUrl: string }) => {
-                const bytes = stored.get(reference.dataUrl) || source;
-                const format = reference.dataUrl.endsWith(".jpg") ? "jpeg" : "png";
-                return `data:image/${format};base64,${bytes.toString("base64")}`;
+                if (reference.dataUrl.startsWith("data:")) return reference.dataUrl;
+                const bytes = await readFixtureAsset(reference.dataUrl);
+                return `data:image/${reference.dataUrl.endsWith(".jpg") ? "jpeg" : "png"};base64,${bytes.toString("base64")}`;
             });
-            mocks.download.mockResolvedValue(ai);
+            mocks.download.mockImplementation(async (_plan, _remoteId, _result, destination: string) => {
+                await writeFile(destination, ai);
+            });
             mocks.acknowledge.mockResolvedValue(undefined);
-            mocks.store.mockImplementation(async (bytes: Buffer) => {
-                const dimensions = await sharp(bytes).metadata();
-                const url = `/api/generation-log-assets/enhancement-${stored.size + 1}.${dimensions.format === "jpeg" ? "jpg" : "png"}`;
-                stored.set(url, bytes);
-                return { type: "image", url, serverUrl: url, width: dimensions.width, height: dimensions.height, bytes: bytes.length, mimeType: `image/${dimensions.format}` };
-            });
             mocks.close.mockResolvedValue(undefined);
         });
         async function legacyRatioSkip(overrides: Partial<ImageEnhancementJob> = {}) {
@@ -265,7 +353,7 @@ for (const provider of ["file", "postgres"] as const) {
         afterEach(async () => {
             vi.restoreAllMocks();
             if (provider === "postgres") {
-                for (const table of ["image_enhancement_jobs", "generation_tasks", "creative_assets", "creative_conversations"]) await postgresQuery(`DELETE FROM ${table} WHERE user_id=$1`, ["enhancement-service-owner"]);
+                for (const table of ["local_media_assets", "image_enhancement_jobs", "generation_tasks", "creative_assets", "creative_conversations"]) await postgresQuery(`DELETE FROM ${table} WHERE user_id=$1`, ["enhancement-service-owner"]);
                 await postgresQuery("DELETE FROM users WHERE id=$1", ["enhancement-service-owner"]);
             }
             vi.unstubAllEnvs();
@@ -306,6 +394,7 @@ for (const provider of ["file", "postgres"] as const) {
             const native = { ...task.result!.nativeSource!, url: "/api/generation-log-assets/f14-native.png" };
             const candidate = { ...task.result!.results![0], resultId: `${taskId}:1`, enhancementId: id, dataUrl: native.url, serverUrl: native.url, nativeSource: native };
             task = await createStoredGenerationTask<ImageTask>("image", { ...task, id: taskId, status: "running", config: { ...task.config, size: "128x128" }, result: { ...candidate, results: [candidate] } }, 60_000);
+            await writeFixtureAsset(native.url, source);
             task = (await transitionImageTask(task, ["running"], { status: "success", result: task.result }))!;
             expect(await listCreativeAssets(task.conversationId!, task.userId)).toEqual([history]);
             plan = { ...plan, source: native, sourceSha256: native.sha256, target: { width: 128, height: 128, format: "png" } };
@@ -365,7 +454,9 @@ for (const provider of ["file", "postgres"] as const) {
             const before = await getImageTask(task.id);
             expect(before?.ecommerceTrace).toHaveProperty("stages.2.output.technicalCheck.canvasEvidence.0.nativeMatches", false);
             expect(before?.result).toEqual(failedResult);
-            mocks.download.mockResolvedValue(ai);
+            mocks.download.mockImplementation(async (_plan, _remoteId, _result, destination: string) => {
+                await writeFile(destination, ai);
+            });
             expect(await sharp(ai).metadata()).toMatchObject({ format: "png", width: 128, height: 128 });
             expect((await sharp(ai).stats()).isOpaque).toBe(true);
             await run();
@@ -399,11 +490,11 @@ for (const provider of ["file", "postgres"] as const) {
             const upstream = await sharp(source).resize(16, 16).png().toBuffer();
             const composite = await compositeSceneEdit(source, upstream, protection);
             expect(composite.evidence).toMatchObject({ normalization: "uniform_scale", nativeSize: { width: 16, height: 16 }, compositeOutsideChangedPixels: 0 });
-            stored.set(baseline.serverUrl!, source);
+            await writeFixtureAsset(baseline.serverUrl!, source);
             const nativeUrl = "/api/generation-log-assets/mapped-upstream.png";
             const maskUrl = "/api/generation-log-assets/mapped-mask.png";
-            stored.set(nativeUrl, upstream);
-            stored.set(maskUrl, Buffer.from(protection.mask.dataUrl.split(",")[1], "base64"));
+            await writeFixtureAsset(nativeUrl, upstream);
+            await writeFixtureAsset(maskUrl, Buffer.from(protection.mask.dataUrl.split(",")[1], "base64"));
             await cancelImageEnhancement(id, task.userId);
             await run();
             source = composite.bytes;
@@ -490,6 +581,7 @@ for (const provider of ["file", "postgres"] as const) {
         it("fails changed native bytes before POST and preserves the original source", async () => {
             await run();
             source = Buffer.from("changed-private-native");
+            await writeFile(logs.localAssetUrlToPath(plan.source.url), source);
             await due();
             await run();
             expect(await job()).toMatchObject({ status: "failed", phase: "submit", reason: "input_digest_mismatch" });
@@ -732,9 +824,9 @@ for (const provider of ["file", "postgres"] as const) {
                 protection,
                 baseline: { url: originalUrl, sha256: createHash("sha256").update(original).digest("hex"), byteLength: original.length, width: 32, height: 32, normalizedSha256: createHash("sha256").update(normalized).digest("hex") },
             };
-            stored.set(originalUrl, original);
-            stored.set(nativeUrl, source);
-            stored.set(baselineUrl, baseline.bytes);
+            await writeFixtureAsset(originalUrl, original);
+            await writeFixtureAsset(nativeUrl, source);
+            await writeFixtureAsset(baselineUrl, baseline.bytes);
             await createTask(4096, 32, nativeUrl, 32, 4096, (value) => {
                 const media = {
                     ...value.result!,
@@ -756,7 +848,9 @@ for (const provider of ["file", "postgres"] as const) {
             const native = task.result!.nativeSource!;
             plan = { ...plan, source: native, sourceSha256: native.sha256, target: { width: 128, height: 128, format: "png" } };
             mocks.prepare.mockResolvedValue(plan);
-            mocks.download.mockResolvedValue(ai);
+            mocks.download.mockImplementation(async (_plan, _remoteId, _result, destination: string) => {
+                await writeFile(destination, ai);
+            });
             mocks.prepare.mockClear();
             mocks.submit.mockClear();
             return { original, rawNative: source, originalUrl, nativeUrl, baselineUrl, baseline, mask, maskPixels, protection };
@@ -769,7 +863,7 @@ for (const provider of ["file", "postgres"] as const) {
                 .withMetadata({ orientation: 6 })
                 .toBuffer();
             const originalUrl = "/api/generation-log-assets/local-source.jpg";
-            stored.set(originalUrl, original);
+            await writeFixtureAsset(originalUrl, original);
             source = await sharp({ create: { width: 16, height: 12, channels: 3, background: "#17b060" } })
                 .png()
                 .toBuffer();
@@ -803,15 +897,19 @@ for (const provider of ["file", "postgres"] as const) {
                     baseline: { url: originalUrl, sha256: createHash("sha256").update(original).digest("hex"), byteLength: original.length, width: 32, height: 24, normalizedSha256: createHash("sha256").update(normalized).digest("hex") },
                 } as unknown as EcommerceEnhancementDelivery;
                 const prepared = await prepareImageTaskResults(value, { dataUrl: `data:image/png;base64,${source.toString("base64")}` }, "http://fixture.local", "fixture");
-                value.result = { ...prepared.results[0], results: prepared.results };
+                // Exercise the retained protected contract; new generation_final publication has its own real HTTP regression.
+                const { enhancementSource: _enhancementSource, ...legacy } = prepared.results[0];
+                value.result = { ...legacy, results: [legacy] };
                 return value;
             });
             const baselineUrl = task.result!.serverUrl!;
-            const baseline = stored.get(baselineUrl)!;
+            const baseline = await readFixtureAsset(baselineUrl);
             const inference = { url: baselineUrl, sha256: createHash("sha256").update(baseline).digest("hex"), byteLength: baseline.length, width: 32, height: 24, format: "png", hasAlpha: false };
             plan = { ...plan, source: inference, sourceSha256: inference.sha256, target: { width: 128, height: 96, format: "png" } };
             mocks.prepare.mockResolvedValue(plan);
-            mocks.download.mockResolvedValue(ai);
+            mocks.download.mockImplementation(async (_plan, _remoteId, _result, destination: string) => {
+                await writeFile(destination, ai);
+            });
             mocks.prepare.mockClear();
             mocks.submit.mockClear();
             return { original, originalUrl, baselineUrl, baseline };
@@ -831,23 +929,25 @@ for (const provider of ["file", "postgres"] as const) {
                 publication: { delivered: { width: 32, height: 24 }, ai: { width: 128, height: 96 }, protection: { version: "scene-enhancement.v1", protectedChangedPixels: 0, allowedPixels: 48, protectedPixels: 720 } },
             });
             expect(mocks.readSource).toHaveBeenCalledWith({ dataUrl: fixture.baselineUrl }, "enhancement-native.png", "http://fixture.local", "fixture-worker-context", plan.budgets.input.maxBytes);
-            const final = stored.get(published.publication!.delivered.url)!;
+            const final = await readFixtureAsset(published.publication!.delivered.url);
             const pixels = await sharp(final).ensureAlpha().raw().toBuffer();
             const before = await sharp(fixture.baseline).ensureAlpha().raw().toBuffer();
             for (let y = 0; y < 24; y++) for (let x = 0; x < 32; x++) if (x < 2 || x >= 10 || y < 2 || y >= 8) expect(pixels.subarray((y * 32 + x) * 4, (y * 32 + x) * 4 + 4)).toEqual(before.subarray((y * 32 + x) * 4, (y * 32 + x) * 4 + 4));
             expect(publicImageEnhancement(published)).toMatchObject({ native: { url: fixture.baselineUrl }, providerNative: { width: 16, height: 12 }, delivery: { scope: "local_edit" } });
-            expect(stored.get(fixture.originalUrl)).toEqual(fixture.original);
+            expect(await readFixtureAsset(fixture.originalUrl)).toEqual(fixture.original);
         });
         it.each(["source", "baseline", "task_mask", "scene", "target"])("rejects changed local %s and retains the qualified original", async (variant) => {
             const fixture = await localTask();
             expect(await job()).toMatchObject({ status: "queued" });
             if (variant === "target") {
                 ai = await sharp(ai).resize(124, 96).png().toBuffer();
-                mocks.download.mockResolvedValue(ai);
+                mocks.download.mockImplementation(async (_plan, _remoteId, _result, destination: string) => {
+                    await writeFile(destination, ai);
+                });
             }
-            await readyForPublication(variant === "target" ? 124 : 128, 96);
-            if (variant === "source") stored.set(fixture.originalUrl, source);
-            if (variant === "baseline") stored.set(fixture.baselineUrl, source);
+            await readyForPublication(128, 96);
+            if (variant === "source") await writeFixtureAsset(fixture.originalUrl, source);
+            if (variant === "baseline") await writeFixtureAsset(fixture.baselineUrl, source);
             if (variant === "task_mask") await mutateStoredGenerationTask<ImageTask>("image", task.id, 60_000, (row) => ({ ...row, mask: { ...row.mask!, remoteUrl: "https://fixture.invalid/bypass.png" } }));
             if (variant === "scene") await mutateStoredGenerationTask<ImageTask>("image", task.id, 60_000, (row) => ({ ...row, sceneProtection: { ...row.sceneProtection!, targetRegion: { ...row.sceneProtection!.targetRegion, x: 0 } } }));
             await run();
@@ -867,20 +967,18 @@ for (const provider of ["file", "postgres"] as const) {
             });
             await run();
             const interrupted = (await job())!;
-            expect(interrupted).toMatchObject({ status: "failed", phase: "publish", staged: { ai: { sha256: remote.result!.sha256 }, delivered: { width: 32, height: 24 } } });
+            expect(interrupted).toMatchObject({ status: "failed", phase: "publish", publicationProcessing: { outcome: { status: "completed" }, promotion: { aiStorageKey: expect.any(String), deliveredStorageKey: expect.any(String) } } });
             if (interruption === "staged_final_replaced") {
-                const previous = interrupted.staged!.delivered!;
-                const replacement = await sharp({ create: { width: previous.width, height: previous.height, channels: 3, background: "#915bea" } })
+                const replacement = await sharp({ create: { width: 32, height: 24, channels: 3, background: "#915bea" } })
                     .png()
                     .toBuffer();
-                stored.set(previous.url, replacement);
-                await mutateEnhancementJob(id, task.userId, (row) => ({ ...row, staged: { ...row.staged, delivered: { ...previous, sha256: createHash("sha256").update(replacement).digest("hex"), byteLength: replacement.length } } }));
+                await writeFile(logs.localAssetUrlToPath("/api/generation-log-assets/" + interrupted.publicationProcessing!.promotion!.deliveredStorageKey), replacement);
             }
             await retryImageEnhancement(id, task.userId);
             await run();
             const recovered = (await job())!;
             if (interruption === "staged_final_replaced") {
-                expect(recovered).toMatchObject({ status: "failed", reason: "protection_invalid" });
+                expect(recovered).toMatchObject({ status: "failed", reason: "output_storage_invalid" });
                 expect(recovered.publication).toBeUndefined();
             } else {
                 expect(recovered).toMatchObject({
@@ -890,8 +988,8 @@ for (const provider of ["file", "postgres"] as const) {
                 });
                 expect(recovered.events.filter((event) => event.stage === "protection_verified")).toHaveLength(1);
             }
-            expect(stored.get(fixture.baselineUrl)).toEqual(fixture.baseline);
-            expect(stored.get(fixture.originalUrl)).toEqual(fixture.original);
+            expect(await readFixtureAsset(fixture.baselineUrl)).toEqual(fixture.baseline);
+            expect(await readFixtureAsset(fixture.originalUrl)).toEqual(fixture.original);
             expect((await getImageTask(task.id))?.status).toBe("success");
             expect((await getImageTask(task.id))?.result).toEqual(original);
             expect(mocks.prepare).toHaveBeenCalledOnce();
@@ -915,7 +1013,7 @@ for (const provider of ["file", "postgres"] as const) {
                     protection: { version: "product-enhancement.v2", sourceSha256: fixture.baseline.evidence.compositeSha256, aiSha256: remote.result!.sha256, protectedChangedPixels: 0, protectedPixels: 960, allowedPixels: 64 },
                 },
             });
-            const final = stored.get(published.publication!.delivered.url)!;
+            const final = await readFixtureAsset(published.publication!.delivered.url);
             const [originalPixels, baselinePixels, nativePixels, finalPixels] = await Promise.all([fixture.original, fixture.baseline.bytes, fixture.rawNative, final].map((bytes) => sharp(bytes).ensureAlpha().raw().toBuffer()));
             for (let offset = 0; offset < finalPixels.length; offset += 4) {
                 if (fixture.maskPixels[offset + 3] === 255) {
@@ -926,8 +1024,8 @@ for (const provider of ["file", "postgres"] as const) {
             expect(nativePixels.subarray((16 * 32 + 16) * 4, (16 * 32 + 16) * 4 + 4)).not.toEqual(originalPixels.subarray((16 * 32 + 16) * 4, (16 * 32 + 16) * 4 + 4));
             expect(finalPixels.subarray(0, 4)).not.toEqual(baselinePixels.subarray(0, 4));
             expect(published.publication!.ai.sha256).not.toBe(published.publication!.delivered.sha256);
-            expect(stored.get(published.publication!.ai.url)).toEqual(ai);
-            expect(stored.get(fixture.baselineUrl)).toEqual(fixture.baseline.bytes);
+            expect(await readFixtureAsset(published.publication!.ai.url)).toEqual(ai);
+            expect(await readFixtureAsset(fixture.baselineUrl)).toEqual(fixture.baseline.bytes);
             const assets = await listCreativeAssets(task.conversationId!, task.userId);
             expect(assets).toHaveLength(2);
             expect(assets.find((asset) => asset.id === published.publication!.assetId)).toMatchObject({
@@ -961,19 +1059,28 @@ for (const provider of ["file", "postgres"] as const) {
             expect(mocks.submit).not.toHaveBeenCalled();
             expect((await getImageTask(task.id))?.status).toBe("success");
         });
-        it.each(["source", "native", "base", "mask_conflict", "candidate_dimensions"] as const)("keeps the qualified product base available after %s validation fails", async (condition) => {
+        it.each([
+            { condition: "source", reason: "Enhancement owned input bytes or MIME differ from its frozen facts" },
+            { condition: "native", reason: "Enhancement owned input bytes or MIME differ from its frozen facts" },
+            { condition: "base", reason: "Enhancement owned input bytes or MIME differ from its frozen facts" },
+            { condition: "mask_conflict", reason: "product_protection_rejected" },
+            { condition: "candidate_dimensions", reason: "Enhancement owned input metadata changed" },
+        ])("keeps the qualified product base available after $condition validation fails", async ({ condition, reason }) => {
             const fixture = await protectedTask(condition === "mask_conflict");
+            cpuFailureExpected = condition === "mask_conflict";
             const original = structuredClone(task.result);
             if (condition === "candidate_dimensions") {
                 ai = await sharp(ai).resize(128, 124).png().toBuffer();
-                mocks.download.mockResolvedValue(ai);
+                mocks.download.mockImplementation(async (_plan, _remoteId, _result, destination: string) => {
+                    await writeFile(destination, ai);
+                });
             }
-            await readyForPublication(128, condition === "candidate_dimensions" ? 124 : 128);
-            if (condition === "source") stored.set(fixture.originalUrl, fixture.rawNative);
-            if (condition === "native") stored.set(fixture.nativeUrl, fixture.original);
-            if (condition === "base") stored.set(fixture.baselineUrl, fixture.rawNative);
+            await readyForPublication();
+            if (condition === "source") await writeFixtureAsset(fixture.originalUrl, fixture.rawNative);
+            if (condition === "native") await writeFixtureAsset(fixture.nativeUrl, fixture.original);
+            if (condition === "base") await writeFixtureAsset(fixture.baselineUrl, fixture.rawNative);
             await run();
-            expect(await job()).toMatchObject({ status: "failed", reason: "protection_invalid" });
+            expect(await job()).toMatchObject({ status: "failed", reason });
             expect((await job())?.publication).toBeUndefined();
             expect((await job())!.events.some((event) => event.stage === "protection_verified")).toBe(false);
             expect((await getImageTask(task.id))?.status).toBe("success");
@@ -982,7 +1089,7 @@ for (const provider of ["file", "postgres"] as const) {
             expect(mocks.acknowledge).not.toHaveBeenCalled();
             expect(mocks.submit).toHaveBeenCalledOnce();
         });
-        it.each(["delivery_storage", "asset_publication", "staged_replacement", "staged_ai_replacement"] as const)("rebuilds protected delivery from staged AI after %s without another inference or download", async (interruption) => {
+        it.each(["delivery_storage", "asset_publication", "staged_replacement", "staged_ai_replacement"] as const)("recovers protected publication from completed CPU output after %s without another inference or download", async (interruption) => {
             const fixture = await protectedTask();
             await readyForPublication();
             if (interruption === "delivery_storage") mocks.store.mockImplementationOnce(mocks.store.getMockImplementation()!).mockRejectedValueOnce(new Error("fixture delivery storage interrupted"));
@@ -995,28 +1102,26 @@ for (const provider of ["file", "postgres"] as const) {
             }
             await run();
             const interrupted = (await job())!;
-            expect(interrupted).toMatchObject({ status: "failed", staged: { ai: { sha256: remote.result!.sha256 } } });
+            expect(interrupted).toMatchObject({ status: "failed", publicationProcessing: { outcome: { status: "completed" }, rawAi: { input: { expectedSha256: remote.result!.sha256 } } } });
             if (interruption === "staged_replacement" || interruption === "staged_ai_replacement") {
                 const role = interruption === "staged_ai_replacement" ? "ai" : "delivered";
-                const previous = interrupted.staged![role]!;
-                const bytes = await sharp({ create: { width: previous.width, height: previous.height, channels: 3, background: "#915bea" } })
+                const bytes = await sharp({ create: { width: role === "ai" ? 128 : 32, height: role === "ai" ? 128 : 32, channels: 3, background: "#915bea" } })
                     .png()
                     .toBuffer();
-                const artifact = { ...previous, byteLength: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
-                stored.set(artifact.url, bytes);
-                await mutateEnhancementJob(id, task.userId, (row) => ({ ...row, staged: { ...row.staged, [role]: artifact } }));
+                const storageKey = role === "ai" ? interrupted.publicationProcessing!.promotion!.aiStorageKey : interrupted.publicationProcessing!.promotion!.deliveredStorageKey;
+                await writeFile(logs.localAssetUrlToPath("/api/generation-log-assets/" + storageKey), bytes);
             }
             await retryImageEnhancement(id, task.userId);
             await run();
             const recovered = (await job())!;
             if (interruption === "staged_replacement" || interruption === "staged_ai_replacement") {
-                expect(recovered).toMatchObject({ status: "failed", reason: interruption === "staged_ai_replacement" ? "output_invalid" : "protection_invalid" });
+                expect(recovered).toMatchObject({ status: "failed", reason: "output_storage_invalid" });
                 expect(recovered.publication).toBeUndefined();
                 expect(await listCreativeAssets(task.conversationId!, task.userId)).toHaveLength(1);
             } else {
                 const expected = await compositeProductEnhancement(fixture.baseline.bytes, ai, fixture.protection, plan.budgets.ai.maxPixels);
                 expect(recovered).toMatchObject({ status: "succeeded", phase: "receipt", publication: { protection: expected.evidence } });
-                expect(stored.get(recovered.publication!.delivered.url)).toEqual(expected.bytes);
+                expect(await readFixtureAsset(recovered.publication!.delivered.url)).toEqual(expected.bytes);
                 expect(recovered.events.filter((event) => event.stage === "protection_verified")).toHaveLength(1);
                 expect(await listCreativeAssets(task.conversationId!, task.userId)).toHaveLength(2);
             }
@@ -1038,33 +1143,33 @@ for (const provider of ["file", "postgres"] as const) {
             const native = task.result!.nativeSource!;
             plan = { ...plan, target: { width: 128, height: 76, format: "png" }, source: native, sourceSha256: native.sha256 };
             mocks.prepare.mockResolvedValue(plan);
-            mocks.download.mockResolvedValue(ai);
+            mocks.download.mockImplementation(async (_plan, _remoteId, _result, destination: string) => {
+                await writeFile(destination, ai);
+            });
             await readyForPublication(128, 76);
             await run();
             const published = (await job())!;
             expect(published).toMatchObject({ status: "succeeded", phase: "receipt", decision: { target: { width: 64, height: 36 } }, publication: { ai: { width: 128, height: 76 }, delivered: { width: 61, height: 36 } } });
-            expect(await sharp(stored.get(published.publication!.delivered.url)).metadata()).toMatchObject({ width: 61, height: 36 });
+            expect(await sharp(await readFixtureAsset(published.publication!.delivered.url)).metadata()).toMatchObject({ width: 61, height: 36 });
             expect((await getImageTask(task.id))?.result).toEqual(original);
             expect(mocks.submit).toHaveBeenCalledOnce();
         });
-        it("persists Worker facts and measures only actual Sharp delivery encoding with a monotonic clock", async () => {
+        it("persists Worker facts and retains measured CPU delivery timing across receipt retries", async () => {
             Object.assign(remote, { timings: { workerQueueMs: 25, workerExecutionMs: 900 } });
             await readyForPublication();
             expect(await job()).toMatchObject({ attempt: 1, timings: { workerQueueMs: 25, workerExecutionMs: 900 } });
             expect(await job()).not.toHaveProperty("timings.deliveryEncodingMs");
-            const encodingClock = vi.spyOn(performance, "now").mockReturnValueOnce(100).mockReturnValueOnce(112.5);
             await run();
-            expect(await job()).toMatchObject({ timings: { workerQueueMs: 25, workerExecutionMs: 900, deliveryEncodingMs: 12.5 }, staged: { delivered: { width: 64, height: 64 } } });
-            expect(encodingClock).toHaveBeenCalledTimes(2);
+            expect(await job()).toMatchObject({ timings: { workerQueueMs: 25, workerExecutionMs: 900, deliveryEncodingMs: expect.any(Number) }, staged: { delivered: { width: 64, height: 64 } } });
             const published = await job();
-            expect(await sharp(stored.get(published!.publication!.delivered.url)).metadata()).toMatchObject({ format: "jpeg", width: 64, height: 64 });
+            expect(published!.timings!.deliveryEncodingMs).toBeGreaterThanOrEqual(0);
+            expect(await sharp(await readFixtureAsset(published!.publication!.delivered.url)).metadata()).toMatchObject({ format: "jpeg", width: 64, height: 64 });
             mocks.acknowledge.mockRejectedValueOnce(new Error("receipt response lost"));
             await due();
             await run();
             await due();
             await run();
-            expect(await job()).toMatchObject({ status: "succeeded", phase: "completed", timings: { workerQueueMs: 25, workerExecutionMs: 900, deliveryEncodingMs: 12.5 } });
-            expect(encodingClock).toHaveBeenCalledTimes(2);
+            expect(await job()).toMatchObject({ status: "succeeded", phase: "completed", timings: { workerQueueMs: 25, workerExecutionMs: 900, deliveryEncodingMs: published!.timings!.deliveryEncodingMs } });
             expect(mocks.download).toHaveBeenCalledOnce();
             expect(mocks.store).toHaveBeenCalledTimes(2);
         });
@@ -1075,16 +1180,14 @@ for (const provider of ["file", "postgres"] as const) {
             plan = { ...plan, target: { width: 128, height: 128, format: "png" } };
             mocks.prepare.mockResolvedValue(plan);
             await readyForPublication();
-            const encodingClock = vi.spyOn(performance, "now");
             await run();
             const published = await job();
             expect(published).toMatchObject({ status: "succeeded", phase: "receipt", publication: { ai: { width: 128, height: 128 }, delivered: { width: 128, height: 128 } } });
             expect(published!.publication!.delivered.url).not.toBe(published!.publication!.ai.url);
             expect(published!.publication!.delivered).toMatchObject({ format: "jpeg", url: expect.stringMatching(/\.jpg$/) });
             expect(published!.publication!.ai.format).toBe("png");
-            expect(await sharp(stored.get(published!.publication!.delivered.url)).metadata()).toMatchObject({ format: "jpeg", width: 128, height: 128 });
+            expect(await sharp(await readFixtureAsset(published!.publication!.delivered.url)).metadata()).toMatchObject({ format: "jpeg", width: 128, height: 128 });
             expect(published!.timings!.deliveryEncodingMs).toBeGreaterThanOrEqual(0);
-            expect(encodingClock).toHaveBeenCalledTimes(2);
             expect(mocks.store).toHaveBeenCalledTimes(2);
         });
         it("retains delivered 4096-square provenance through repeat saves and references, skips default re-enhancement, and independently refuses a target above native 4x", async () => {
@@ -1102,7 +1205,9 @@ for (const provider of ["file", "postgres"] as const) {
                 budgets: { input: { ...plan.budgets.input, maxPixels: 1024 ** 2 }, ai: { ...plan.budgets.ai, maxPixels: 4096 ** 2 }, delivery: { ...plan.budgets.delivery, maxPixels: 4096 ** 2 } },
             };
             mocks.prepare.mockResolvedValue(plan);
-            mocks.download.mockResolvedValue(ai);
+            mocks.download.mockImplementation(async (_plan, _remoteId, _result, destination: string) => {
+                await writeFile(destination, ai);
+            });
             const [original] = await listCreativeAssets(task.conversationId!, task.userId);
             const frozenNative = structuredClone(task.result);
             await readyForPublication(4096);
@@ -1160,7 +1265,7 @@ for (const provider of ["file", "postgres"] as const) {
             expect(assets.find((asset) => asset.id === original.id)).toEqual(original);
             const [available] = await getCreativeAssetsByIds([enhanced.id], task.userId);
             expect(available).toMatchObject({ id: enhanced.id, serverUrl: enhanced.serverUrl, status: "ready", metadata: enhanced.metadata });
-            const bytes = stored.get(available.serverUrl!)!;
+            const bytes = await readFixtureAsset(available.serverUrl!);
             expect(createHash("sha256").update(bytes).digest("hex")).toBe(published!.publication!.delivered.sha256);
             expect(await sharp(bytes).metadata()).toMatchObject({ format: "jpeg", width: 4096, height: 4096 });
             expect(mocks.prepare).toHaveBeenCalledOnce();
@@ -1175,7 +1280,7 @@ for (const provider of ["file", "postgres"] as const) {
             await readyForPublication();
             mocks.store.mockRejectedValueOnce(new Error("private storage error"));
             await run();
-            expect(await job()).toMatchObject({ status: "failed", phase: "download" });
+            expect(await job()).toMatchObject({ status: "failed", phase: "publish", publicationProcessing: { outcome: { status: "completed" } } });
             expect(await listCreativeAssets(task.conversationId!, task.userId)).toHaveLength(1);
             expect(mocks.acknowledge).not.toHaveBeenCalled();
             expect((await getImageTask(task.id))?.status).toBe("success");
@@ -1209,29 +1314,33 @@ for (const provider of ["file", "postgres"] as const) {
             const save = mocks.store.getMockImplementation()!;
             mocks.store.mockImplementationOnce(save).mockRejectedValueOnce(new Error("delivery storage failed"));
             await run();
-            expect(await job()).toMatchObject({ status: "failed", staged: { ai: { width: 128, height: 128 } } });
+            expect(await job()).toMatchObject({ status: "failed", publicationProcessing: { outcome: { status: "completed" }, rawAi: { input: { expectedSha256: remote.result!.sha256 } } } });
             expect(mocks.acknowledge).not.toHaveBeenCalled();
             await retryImageEnhancement(id, task.userId);
             await run();
             expect(await job()).toMatchObject({ status: "succeeded", phase: "receipt" });
-            expect(mocks.store).toHaveBeenCalledTimes(3);
+            expect(mocks.store).toHaveBeenCalledTimes(4);
             expect(mocks.download).toHaveBeenCalledOnce();
         });
-        it("refuses corrupted permanent readback before asset publication or receipt", async () => {
+        it("refuses corrupted CPU artifact bytes before permanent publication or receipt", async () => {
             await readyForPublication();
-            mocks.readSource.mockImplementation(async (reference: { dataUrl: string }) => `data:image/png;base64,${(stored.has(reference.dataUrl) ? Buffer.from("corrupt-storage") : source).toString("base64")}`);
+            const save = mocks.store.getMockImplementation()!;
+            mocks.store.mockImplementationOnce(async (sourcePath: string, ...args) => {
+                await writeFile(sourcePath, Buffer.from("corrupt-storage"));
+                return save(sourcePath, ...args);
+            });
             await run();
-            expect(await job()).toMatchObject({ status: "failed", reason: "output_invalid" });
+            expect(await job()).toMatchObject({ status: "failed", reason: "output_storage_invalid" });
             expect(await listCreativeAssets(task.conversationId!, task.userId)).toHaveLength(1);
             expect(mocks.acknowledge).not.toHaveBeenCalled();
         });
         it.each([false, true])("recovers an existing staged PNG without re-encoding and rejects a false JPEG declaration=%s", async (falseJpeg) => {
             await readyForPublication();
             const bytes = await sharp(ai).resize(64, 64).png().toBuffer();
-            const aiUrl = "/api/generation-log-assets/staged-ai.png";
-            const deliveryUrl = "/api/generation-log-assets/staged-delivery.png";
-            stored.set(aiUrl, ai);
-            stored.set(deliveryUrl, bytes);
+            const aiUrl = "/api/generation-log-assets/permanent/staged-ai.png";
+            const deliveryUrl = "/api/generation-log-assets/permanent/staged-delivery.png";
+            await writeFixtureAsset(aiUrl, ai);
+            await writeFixtureAsset(deliveryUrl, bytes);
             await mutateEnhancementJob(id, task.userId, (row) => ({
                 ...row,
                 phase: "publish",
@@ -1242,14 +1351,15 @@ for (const provider of ["file", "postgres"] as const) {
             }));
             await run();
             if (falseJpeg) {
-                expect(await job()).toMatchObject({ status: "failed", reason: "output_invalid" });
+                expect(await job()).toMatchObject({ status: "failed", reason: "Enhancement owned input bytes or MIME differ from its frozen facts" });
                 expect(await listCreativeAssets(task.conversationId!, task.userId)).toHaveLength(1);
             } else {
                 expect(await job()).toMatchObject({ status: "succeeded", publication: { delivered: { url: deliveryUrl, format: "png" } } });
-                expect(stored.get(deliveryUrl)).toEqual(bytes);
+                expect(await readFixtureAsset(deliveryUrl)).toEqual(bytes);
             }
             expect(mocks.download).not.toHaveBeenCalled();
-            expect(mocks.store).not.toHaveBeenCalled();
+            expect(mocks.store).toHaveBeenCalledTimes(falseJpeg ? 0 : 2);
+            if (!falseJpeg) expect((await job())!.timings?.deliveryEncodingMs).toBeUndefined();
             expect(mocks.acknowledge).not.toHaveBeenCalled();
             expect((await getImageTask(task.id))?.result).toEqual(task.result);
         });
@@ -1304,30 +1414,29 @@ for (const provider of ["file", "postgres"] as const) {
             expect(mocks.submit).toHaveBeenCalledOnce();
             expect(mocks.cancel).toHaveBeenCalledTimes(2);
         });
-        it("recovers an interrupted asset publication using the staged immutable variants and one child identity", async () => {
+        it("recovers an interrupted asset publication from one completed CPU result and stable permanent identities", async () => {
             await readyForPublication();
-            const encodingClock = vi.spyOn(performance, "now").mockReturnValueOnce(200).mockReturnValueOnce(215);
             const register = creativeRuntime.registerCreativeAssets;
             vi.spyOn(creativeRuntime, "registerCreativeAssets").mockImplementationOnce(async (inputs, executor, runtime) => {
                 await register(inputs, executor, runtime);
                 throw new Error("fixture interrupted asset registration");
             });
             await run();
-            expect(await job()).toMatchObject({ status: "failed", phase: "publish", staged: { ai: expect.any(Object), delivered: expect.any(Object) }, timings: { deliveryEncodingMs: 15 } });
-            expect(encodingClock).toHaveBeenCalledTimes(2);
+            expect(await job()).toMatchObject({ status: "failed", phase: "publish", publicationProcessing: { outcome: { status: "completed" } } });
+            const interrupted = (await job())!;
             const beforeRetry = await listCreativeAssets(task.conversationId!, task.userId);
             expect(beforeRetry).toHaveLength(1);
             expect(mocks.acknowledge).not.toHaveBeenCalled();
             await retryImageEnhancement(id, task.userId);
             await run();
             const published = await job();
-            expect(published).toMatchObject({ status: "succeeded", phase: "receipt", timings: { deliveryEncodingMs: 15 } });
-            expect(encodingClock).toHaveBeenCalledTimes(2);
+            expect(published).toMatchObject({ status: "succeeded", phase: "receipt", timings: { deliveryEncodingMs: expect.any(Number) } });
+            expect(published!.publicationProcessing).toEqual(interrupted.publicationProcessing);
             const afterRetry = await listCreativeAssets(task.conversationId!, task.userId);
             expect(afterRetry).toHaveLength(2);
             expect(afterRetry.find((asset) => asset.id === beforeRetry[0].id)).toEqual(beforeRetry[0]);
             expect(mocks.download).toHaveBeenCalledOnce();
-            expect(mocks.store).toHaveBeenCalledTimes(2);
+            expect(mocks.store).toHaveBeenCalledTimes(4);
             expect(mocks.submit).toHaveBeenCalledOnce();
         });
     });

@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
     getSchedule: vi.fn(),
     recover: vi.fn(),
     schedule: vi.fn(),
+    rearm: vi.fn(),
     settings: vi.fn(),
 }));
 
@@ -19,7 +20,7 @@ vi.mock("@/app/api/image-tasks/image-task-reference-urls", () => ({ requestPubli
 vi.mock("@/lib/server/image-task-store", () => ({ getImageTask: mocks.getImageTask, transitionImageTask: vi.fn() }));
 vi.mock("@/lib/server/generation-task-recovery-service", () => ({ runGenerationTaskRecoveryBatch: mocks.recover }));
 vi.mock("@/lib/server/generation-task-store", () => ({ getStoredGenerationTaskRecord: mocks.getSchedule }));
-vi.mock("@/lib/server/generation-task-scheduler", async (original) => ({ ...(await original<typeof import("@/lib/server/generation-task-scheduler")>()), scheduleGenerationTask: mocks.schedule }));
+vi.mock("@/lib/server/generation-task-scheduler", async (original) => ({ ...(await original<typeof import("@/lib/server/generation-task-scheduler")>()), scheduleGenerationTask: mocks.schedule, rearmImageTaskForUser: mocks.rearm }));
 vi.mock("@/lib/server/internal-origin", () => ({ resolveInternalOrigin: vi.fn(() => "http://localhost") }));
 vi.mock("@/lib/server/points-response", () => ({ pointsResponseHeaders: vi.fn(() => new Headers()) }));
 vi.mock("@/lib/server/generation-channel", async (original) => ({ ...(await original<typeof import("@/lib/server/generation-channel")>()), generationModelId: vi.fn(() => "image-model") }));
@@ -168,6 +169,7 @@ describe("POST /api/image-tasks/[id] recover", () => {
         vi.clearAllMocks();
         mocks.currentUser.mockResolvedValue({ id: "user", role: "user" });
         mocks.schedule.mockResolvedValue({ executionPhase: "polling" });
+        mocks.rearm.mockResolvedValue({ executionPhase: "polling" });
         mocks.recover.mockResolvedValue({ claimed: 1 });
     });
 
@@ -228,7 +230,7 @@ describe("POST /api/image-tasks/[id] recover", () => {
         const response = await POST(recoverRequest(), context);
 
         expect(response.status).toBe(200);
-        expect(mocks.schedule).toHaveBeenCalledWith("image", "image-one", expect.objectContaining({ executionPhase: "polling", upstreamTaskId: "upstream-one", queryPath: "/images/upstream-one", submittedAt: 1_000 }));
+        expect(mocks.rearm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "image", id: "image-one", upstreamTaskId: "upstream-one", queryPath: "/images/upstream-one", submittedAt: 1_000 }));
         expect(mocks.recover).toHaveBeenCalledTimes(2);
         expect((await response.json()).task).toMatchObject({ id: "image-one", status: "success", executionPhase: "completed" });
     });
@@ -243,7 +245,7 @@ describe("POST /api/image-tasks/[id] recover", () => {
         const response = await POST(recoverRequest(), context);
 
         expect(response.status).toBe(200);
-        expect(mocks.schedule).toHaveBeenCalledWith("image", "image-one", expect.objectContaining({ upstreamTaskId: "scheduled-upstream", queryPath: "/jobs/scheduled-upstream" }));
+        expect(mocks.rearm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "image", id: "image-one", upstreamTaskId: "scheduled-upstream", queryPath: "/jobs/scheduled-upstream" }));
         expect(mocks.recover).toHaveBeenCalledTimes(1);
     });
 
@@ -255,6 +257,7 @@ describe("POST /api/image-tasks/[id] recover", () => {
 
         expect(response.status).toBe(409);
         expect(mocks.schedule).not.toHaveBeenCalled();
+        expect(mocks.rearm).not.toHaveBeenCalled();
         expect(mocks.recover).not.toHaveBeenCalled();
     });
 });

@@ -253,14 +253,15 @@ describe("real scene producer proof and protected CPU publication", () => {
         const { prepareImageTaskResults } = await import("./image-task-result-service");
         const produced = await prepareImageTaskResults(running, { dataUrl: "data:image/png;base64," + native.toString("base64") }, origin, authContext);
         expect(produced.results).toHaveLength(1);
-        const original = produced.results[0];
+        // Select the supported local_edit contract with the producer's actual native evidence.
+        const { enhancementSource: _enhancementSource, ...original } = produced.results[0];
         assert.ok(original.nativeSource && original.enhancementId && original.sceneProtectionEvidence);
         expect(original.sceneProtectionEvidence).toMatchObject({
             nativeUrl: expect.stringMatching(/^\/api\/generation-log-assets\//),
             compositeUrl: expect.stringMatching(/^\/api\/generation-log-assets\//),
             maskUrl: expect.stringMatching(/^\/api\/generation-log-assets\//),
         });
-        const successful = await images.transitionImageTask(running, ["running"], { status: "success", result: { ...original, results: produced.results } });
+        const successful = await images.transitionImageTask(running, ["running"], { status: "success", result: { ...original, results: [original] } });
         assert.ok(successful);
         const queued = await jobs.getEnhancementJob(original.enhancementId, userId);
         assert.ok(queued?.decision.status === "queued");

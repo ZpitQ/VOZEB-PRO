@@ -1067,7 +1067,7 @@ test("white-product-style-reference:可选场景参考仍以商品为锚点并�
     });
     await expectProductResult(page);
     const resultSource = await page.getByTestId("creative-media-result").last().getByRole("img").getAttribute("src");
-    expect(resultSource).toMatch(/^\/api\/generation-log-assets\/permanent\/.+\.png(?:\?.*)?$/);
+    expect(resultSource).toMatch(/^\/api\/(?:generation-log-assets|reference-assets)\/.+\.png(?:\?.*)?$/);
 
     await page.reload({ waitUntil: "domcontentloaded" });
     await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
@@ -1098,7 +1098,7 @@ test("large-reference:四千八百万像素参考图完成真实创作并刷新�
     expectSuccessfulTrace(trace, { operation: goldenCase.expectedOperation, hardProtections: goldenCase.hardProtections, userRequest: goldenCase.userRequest, sceneReferenceCount: 1 });
     await expectProductResult(page);
     const resultSource = await page.getByTestId("creative-media-result").last().getByRole("img").getAttribute("src");
-    expect(resultSource).toMatch(/^\/api\/generation-log-assets\/permanent\//);
+    expect(resultSource).toMatch(/^\/api\/(?:generation-log-assets|reference-assets)\//);
     await page.reload({ waitUntil: "domcontentloaded" });
     await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
     await expect(page.getByTestId("creative-media-result").last().getByRole("img")).toHaveAttribute("src", resultSource!);
@@ -1966,7 +1966,7 @@ async function waitForRun(request: APIRequestContext, runId: string, expectedSta
 async function expectProductResult(page: Page) {
     const result = page.getByTestId("creative-media-result").last();
     await expect(result).toBeVisible({ timeout: 30_000 });
-    await expect(result.getByTestId("creative-primary-result").getByRole("img")).toHaveAttribute("src", /\/api\/generation-log-assets\/permanent\/.+\.png/);
+    await expect(result.getByTestId("creative-primary-result").getByRole("img")).toHaveAttribute("src", /\/api\/(?:generation-log-assets|reference-assets)\/.+\.png/);
 }
 
 async function expectPublicProgress(request: APIRequestContext, runId: string) {
@@ -2090,8 +2090,8 @@ function expectSuccessfulTrace(
     expect(canvasEvidence).toHaveLength(1);
     const evidence = canvasEvidence[0];
     expect(evidence).toMatchObject({ resultId, constraint: canvas, nativeMatches: true, storedMatches: true, normalization: "none", hardFailures: [] });
-    expect(evidence.nativeUrl).toMatch(/^\/api\/generation-log-assets\/permanent\//);
-    expect(evidence.storedUrl).toMatch(/^\/api\/generation-log-assets\/permanent\//);
+    expect(evidence.nativeUrl).toMatch(/^\/api\/(?:generation-log-assets|reference-assets)\//);
+    expect(evidence.storedUrl).toMatch(/^\/api\/(?:generation-log-assets|reference-assets)\//);
     for (const size of [evidence.nativeSize, evidence.storedSize]) {
         expect(Number.isSafeInteger(size.width) && size.width > 0).toBe(true);
         expect(Number.isSafeInteger(size.height) && size.height > 0).toBe(true);

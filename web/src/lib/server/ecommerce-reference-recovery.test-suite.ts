@@ -23,7 +23,7 @@ vi.mock("next/server", async (original) => ({ ...(await original<typeof import("
 type Stage = { phase: string; pid: number; runId: string; backendPid?: number };
 type ProcessResult = {
     pid: number;
-    nativeEvidence?: { jobId: string; operation: "prepare_reference" | "build_protection"; actorPid: number; nativePid: number; exitCode: number | null; completion: CompletedImageProcessingStage };
+    nativeEvidence?: { jobId: string; operation: "prepare_reference" | "build_protection" | "process_result"; actorPid: number; nativePid: number; exitCode: number | null; completion: CompletedImageProcessingStage };
     outcome?: { status?: number; body?: { task?: { id: string } } } | null;
     run: AgentRun;
     messages: CreativeMessage[];
@@ -284,6 +284,12 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
                 const run = await stores.getAgentRun(id);
                 if (run && ["planning", "running", "paused"].includes(run.status)) await stores.setAgentRunStatus(run, "cancelled");
             }
+            const processing = await import("./image-processing-service");
+            for (const record of records)
+                if (record.type === "image_processing" && (record.status === "pending" || record.status === "running")) {
+                    await processing.cancelImageProcessingTaskForRun({ userId, runId: record.runId!, jobId: record.id });
+                    expect((await tasks.getStoredGenerationTaskRecord("image_processing", record.id))?.status).toBe("cancelled");
+                }
             await clearAgentReservations();
             ownedRuns.clear();
             completedNativeStages.clear();
@@ -335,7 +341,7 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
             await closingServer;
         }
 
-        function command(run: AgentRun, action: string, extra: Record<string, unknown> = {}) {
+        function command(run: AgentRun, action: string, extra: Record<string, unknown> & { taskIds?: string[] } = {}) {
             const key = randomUUID();
             const phases = (extra.gatePhases || []) as string[];
             for (const phase of phases) gates.set(`${key}:${phase}`, gate());
@@ -372,7 +378,7 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
             commands.set(child, exited);
             void exited.finally(() => commands.delete(child));
             void completed.catch(() => {});
-            const settled = action === "execute" || action === "recover" ? (completed as Promise<ProcessResult>).then(completeNativeDependencies) : completed;
+            const settled = action === "execute" || action === "recover" ? (completed as Promise<ProcessResult>).then((result) => completeNativeDependencies(result, !extra.taskIds || extra.taskIds.includes(run.id))) : completed;
             void settled.catch(() => {});
             return {
                 key,
@@ -387,7 +393,7 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
                 release: (phase: string) => gates.get(`${key}:${phase}`)!.release(),
             };
         }
-        async function completeNativeDependencies(initial: ProcessResult): Promise<ProcessResult> {
+        async function completeNativeDependencies(initial: ProcessResult, resumeParent: boolean): Promise<ProcessResult> {
             let current = initial;
             const visited = new Set<string>();
             while (current.run.ecommerceSnapshot?.processing?.waitingFor) {
@@ -443,6 +449,43 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
                 const resumed = await command(native.run, "recover").completed;
                 expect(resumed.pid).not.toBe(native.pid);
                 current = resumed;
+            }
+            return completeImageResultDependencies(current, resumeParent);
+        }
+
+        async function completeImageResultDependencies(initial: ProcessResult, resumeParent: boolean): Promise<ProcessResult> {
+            let current = initial;
+            let completedResult = false;
+            while (true) {
+                const stages = await tasks.listStoredGenerationTaskRecordsByRunIds([current.run.id], [userId]);
+                const pending = stages
+                    .filter((stage) => stage.type === "image_processing" && stage.payload.operation === "process_result" && stage.status === "pending")
+                    .sort((left, right) => Number(left.nextPollAt) - Number(right.nextPollAt) || left.id.localeCompare(right.id))[0];
+                if (!pending) break;
+                const native = await command(current.run, "native", { jobId: pending.id }).completed;
+                const evidence = native.nativeEvidence;
+                assert(evidence);
+                expect(evidence).toMatchObject({ jobId: pending.id, operation: "process_result", actorPid: native.pid, exitCode: 0, completion: { jobId: pending.id, inputDigest: pending.payload.inputDigest, parentRescheduled: true } });
+                expect(evidence.actorPid).not.toBe(current.pid);
+                expect(evidence.nativePid).not.toBe(evidence.actorPid);
+                const saved = await tasks.getStoredGenerationTaskRecord("image_processing", pending.id);
+                assert(saved);
+                expect(saved).toMatchObject({ id: pending.id, userId, runId: current.run.id, parentTaskId: pending.parentTaskId, status: "success", executionPhase: "completed", resultPayload: { manifest: evidence.completion.manifest } });
+                expect(saved.workerId).toBeUndefined();
+                expect(saved.leaseUntil).toBeUndefined();
+                completedNativeStages.set(saved.id, structuredClone(saved));
+                current = await command(native.run, "consume_result", { imageId: pending.parentTaskId }).completed;
+                expect(current.pid).not.toBe(native.pid);
+                expect(await tasks.getStoredGenerationTaskRecord("image", pending.parentTaskId!)).toMatchObject({
+                    status: "success",
+                    executionPhase: "completed",
+                    payload: { resultProcessing: { jobId: pending.id, inputDigest: pending.payload.inputDigest } },
+                });
+                completedResult = true;
+            }
+            if (completedResult && resumeParent) {
+                await scheduler.scheduleGenerationTask("agent", current.run.id, { nextPollAt: Date.now() });
+                current = await command(current.run, "recover").completed;
             }
             return current;
         }
@@ -735,11 +778,11 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
             if (provider === "postgres") expect((await database.postgresQuery<{ blockers: number[] }>("SELECT pg_blocking_pids($1) AS blockers", [waiting.backendPid])).rows[0].blockers).toContain(winner.backendPid);
             else expect(await readFile(path.join(directory, "generation-tasks.json.lock"), "utf8")).toBe("");
             creating.release("parent_lock_acquired");
-            const created = await creating.completed;
-            expect(created.outcome!.status).toBe(200);
             await confirming.phase("parent_lock_acquired");
             confirming.release("parent_lock_acquired");
             expect((await confirming.completed).outcome!.status).toBe(409);
+            const created = await creating.completed;
+            expect(created.outcome!.status).toBe(200);
             expect((await durableChildren(run)).map((task) => task.id)).toEqual([created.outcome!.body!.task!.id]);
         }, 120_000);
 

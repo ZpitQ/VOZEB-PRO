@@ -281,7 +281,7 @@ type RawMediaRow = { storage_key: string; [column: string]: unknown };
     it("P1 stages one real final while preserving the complete image and native rows", async () => {
         const current = await fixture([sourceUrl]);
         const output = await outputAt(current, 0);
-        expect(current.result.results).toEqual([{ resultId: current.image.id + ":1", resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 0 }]);
+        expect(current.result.results).toEqual([{ resultId: current.image.id + ":1", resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 0, finalImage: { format: "png", hasAlpha: false } }]);
         const before = await snapshot(current.slots);
         expect(before.rows).toHaveLength(2);
         expect(before.registry).toHaveLength(1);
@@ -298,8 +298,8 @@ type RawMediaRow = { storage_key: string; [column: string]: unknown };
         const secondOutput = await outputAt(current, 1);
         expect(firstOutput.bytes).toEqual(secondOutput.bytes);
         expect(current.result.results).toEqual([
-            { resultId: current.image.id + ":1", resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 0 },
-            { resultId: current.image.id + ":2", resultIndex: 2, nativeInputIndex: 1, finalArtifactIndex: 1 },
+            { resultId: current.image.id + ":1", resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 0, finalImage: { format: "png", hasAlpha: false } },
+            { resultId: current.image.id + ":2", resultIndex: 2, nativeInputIndex: 1, finalArtifactIndex: 1, finalImage: { format: "png", hasAlpha: false } },
         ]);
         const before = await snapshot(current.slots);
         expect(before.rows).toHaveLength(2);

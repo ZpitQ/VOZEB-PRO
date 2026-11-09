@@ -4533,6 +4533,8 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 ]);
                 expect(delivered.enhancementId).toBe("enhancement:" + copy.taskId + ":1");
                 expect(delivered.nativeSource).toStrictEqual({ url: delivered.serverUrl, sha256: digest(native), byteLength: native.length, width: 1024, height: 1024, format: "png", hasAlpha: false, provenance: "provider_native" });
+                expect(delivered.enhancementSource).toStrictEqual({ url: delivered.serverUrl, sha256: digest(native), byteLength: native.length, width: 1024, height: 1024, format: "png", hasAlpha: false, provenance: "generation_final" });
+                expect(result.published.result.enhancementSource).toStrictEqual(delivered.enhancementSource);
                 expect(delivered.enhancementSkip).toStrictEqual({ status: "skipped", reason: "disabled" });
                 expect(result.published.result.enhancementSkip).toStrictEqual({ status: "skipped", reason: "disabled" });
                 expect(delivered.sceneProtectionEvidence).toBeUndefined();
@@ -4552,12 +4554,13 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                     status: "skipped",
                     phase: "completed",
                     reason: "disabled",
-                    decision: { status: "skipped", reason: "disabled", source: delivered.nativeSource, delivery: { contract: original.enhancementDelivery } },
+                    decision: { status: "skipped", reason: "disabled", source: delivered.enhancementSource, target: { width: 1024, height: 1024 } },
                     nextPollAt: null,
                     workerId: null,
                     leaseToken: null,
                     leaseUntil: null,
                 });
+                expect(enhancementJobs[0].decision).not.toHaveProperty("delivery");
                 expect(enhancementJobs[0].remoteJobId).toBeUndefined();
                 expect(enhancementJobs[0].submittedAt).toBeUndefined();
                 expect(provider === "file" ? await readFile(path.join(directory, "auth.json")) : await postgresAccountSnapshot()).toStrictEqual(chargedAccount);
@@ -5300,14 +5303,44 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                         expect(delivered.sceneProtectionEvidence).toBeUndefined();
                         expect(delivered.productEnhancementEvidence).toBeUndefined();
                         expect(result.published.enhancementDelivery).toBeUndefined();
-                        expect(delivered.enhancementId).toBeUndefined();
-                        expect(delivered.nativeSource).toBeUndefined();
+                        const expectedEnhancement = {
+                            low: { enhancementId: undefined, nativeSource: undefined, enhancementSource: undefined },
+                            "4k": {
+                                enhancementId: "enhancement:" + copy.taskId + ":1",
+                                nativeSource: { url: delivered.serverUrl, sha256: digest(native), byteLength: native.length, width: 1024, height: 1024, format: "png", hasAlpha: false, provenance: "provider_native" },
+                                enhancementSource: { url: delivered.serverUrl, sha256: digest(native), byteLength: native.length, width: 1024, height: 1024, format: "png", hasAlpha: false, provenance: "generation_final" },
+                            },
+                        }[quality];
+                        expect(delivered.enhancementId).toBe(expectedEnhancement.enhancementId);
+                        expect(delivered.nativeSource).toStrictEqual(expectedEnhancement.nativeSource);
+                        expect(delivered.enhancementSource).toStrictEqual(expectedEnhancement.enhancementSource);
                         expect(delivered.enhancementSkip).toStrictEqual(enhancementSkip);
-                        expect(result.published.result.enhancementId).toBeUndefined();
-                        expect(result.published.result.nativeSource).toBeUndefined();
+                        expect(result.published.result.enhancementId).toBe(expectedEnhancement.enhancementId);
+                        expect(result.published.result.nativeSource).toStrictEqual(expectedEnhancement.nativeSource);
+                        expect(result.published.result.enhancementSource).toStrictEqual(expectedEnhancement.enhancementSource);
                         expect(result.published.result.enhancementSkip).toStrictEqual(enhancementSkip);
                         const { listEnhancementJobsForTask } = await import("./database/image-enhancement-job-repository");
-                        expect(await listEnhancementJobsForTask(copy.taskId, userId)).toStrictEqual([]);
+                        const enhancementJobs = await listEnhancementJobsForTask(copy.taskId, userId);
+                        expect(enhancementJobs).toMatchObject(
+                            {
+                                low: [],
+                                "4k": [
+                                    {
+                                        id: expectedEnhancement.enhancementId,
+                                        imageTaskId: copy.taskId,
+                                        resultId: copy.taskId + ":1",
+                                        status: "skipped",
+                                        phase: "completed",
+                                        reason: "disabled",
+                                        decision: { status: "skipped", reason: "disabled", source: expectedEnhancement.enhancementSource, target: { width: 1024, height: 1024 } },
+                                        nextPollAt: null,
+                                        workerId: null,
+                                        leaseToken: null,
+                                        leaseUntil: null,
+                                    },
+                                ],
+                            }[quality],
+                        );
                         expect(result.published.sceneProtection).toBeUndefined();
                         expect(result.published.productProtection).toStrictEqual(original.productProtection);
                         expect(result.published.mask).toStrictEqual(original.mask);
@@ -5389,8 +5422,8 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                         expect(successfulLogs).toHaveLength(1);
                         expect(successfulLogs[0]).toMatchObject({ id: "image-task:" + copy.taskId, taskId: copy.taskId, status: "success", count: 1, successCount: 1, failCount: 0, assets: [{ serverUrl: delivered.serverUrl, width: 1024, height: 1024 }] });
                         expect(successfulLogs[0].assets[0].enhancementSkip).toStrictEqual(enhancementSkip);
-                        expect(successfulLogs[0].assets[0].enhancementId).toBeUndefined();
-                        expect(successfulLogs[0].assets[0].nativeSource).toBeUndefined();
+                        expect(successfulLogs[0].assets[0].enhancementId).toBe(expectedEnhancement.enhancementId);
+                        expect(successfulLogs[0].assets[0].nativeSource).toStrictEqual(expectedEnhancement.nativeSource);
                         expect(captured.charge.cost).toBe(2);
                         const debits = await auth.listPointRecordsPage(userId, { pageSize: 50, direction: "debit" });
                         expect(debits.records).toHaveLength(1);
@@ -5424,7 +5457,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                             await execution.executeTasks(initial.id, imageOrigin, boundary.cookie, parentExecutionId);
                         });
                         expect(await ownedRows(conversation.id)).toStrictEqual(settled);
-                        expect(await listEnhancementJobsForTask(copy.taskId, userId)).toStrictEqual([]);
+                        expect(await listEnhancementJobsForTask(copy.taskId, userId)).toStrictEqual(enhancementJobs);
                         expect(await creative.listMessagesForUser(userId, conversation.id, 0, 100)).toStrictEqual(messages);
                         expect(await auth.listPointRecordsPage(userId, { pageSize: 50, direction: "debit" })).toStrictEqual(debits);
                         expect(await tasks.getStoredGenerationTaskRecord("image_processing", productPrepare.id)).toStrictEqual(productPrepareBefore);
@@ -5640,17 +5673,36 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                     expect(delivered.sceneProtectionEvidence).toBeUndefined();
                     expect(delivered.productEnhancementEvidence).toBeUndefined();
                     expect(result.published.enhancementDelivery).toBeUndefined();
-                    expect(delivered.enhancementId).toBeUndefined();
-                    expect(delivered.nativeSource).toBeUndefined();
+                    expect(delivered.enhancementId).toBe("enhancement:" + copy.taskId + ":1");
+                    expect(delivered.nativeSource).toStrictEqual({ url: delivered.serverUrl, sha256: digest(native), byteLength: native.length, width: 1024, height: 1024, format: "png", hasAlpha: false, provenance: "provider_native" });
+                    expect(delivered.enhancementSource).toStrictEqual({ url: delivered.serverUrl, sha256: digest(native), byteLength: native.length, width: 1024, height: 1024, format: "png", hasAlpha: false, provenance: "generation_final" });
                     expect(delivered.enhancementSkip).toStrictEqual({ status: "skipped", reason: "disabled" });
-                    expect(result.published.result.enhancementId).toBeUndefined();
-                    expect(result.published.result.nativeSource).toBeUndefined();
+                    expect(result.published.result.enhancementId).toBe("enhancement:" + copy.taskId + ":1");
+                    expect(result.published.result.nativeSource).toStrictEqual(delivered.nativeSource);
+                    expect(result.published.result.enhancementSource).toStrictEqual(delivered.enhancementSource);
                     expect(result.published.result.enhancementSkip).toStrictEqual({ status: "skipped", reason: "disabled" });
                     expect(result.published.result.batchEvidence).toStrictEqual([
                         { resultId: copy.taskId + ":1", resultIndex: 1, nativeStatus: "readable", nativeSize: { width: 1024, height: 1024 }, storageStatus: "stored", storedUrl: delivered.serverUrl, storedSize: { width: 1024, height: 1024 } },
                     ]);
                     const { listEnhancementJobsForTask } = await import("./database/image-enhancement-job-repository");
-                    expect(await listEnhancementJobsForTask(copy.taskId, userId)).toStrictEqual([]);
+                    const enhancementJobs = await listEnhancementJobsForTask(copy.taskId, userId);
+                    expect(enhancementJobs).toHaveLength(1);
+                    expect(enhancementJobs[0]).toMatchObject({
+                        id: "enhancement:" + copy.taskId + ":1",
+                        imageTaskId: copy.taskId,
+                        resultId: copy.taskId + ":1",
+                        status: "skipped",
+                        phase: "completed",
+                        reason: "disabled",
+                        decision: { status: "skipped", reason: "disabled", source: delivered.enhancementSource, target: { width: 1024, height: 1024 } },
+                        nextPollAt: null,
+                        workerId: null,
+                        leaseToken: null,
+                        leaseUntil: null,
+                    });
+                    expect(enhancementJobs[0].decision).not.toHaveProperty("delivery");
+                    expect(enhancementJobs[0].remoteJobId).toBeUndefined();
+                    expect(enhancementJobs[0].submittedAt).toBeUndefined();
                     expect(result.published.upstream).toStrictEqual(captured.submitted.upstream);
                     expect(result.published.billing).toStrictEqual(captured.submitted.billing);
                     expect(provider === "file" ? await readFile(path.join(directory, "auth.json")) : await postgresAccountSnapshot()).toStrictEqual(chargedAccount);
@@ -5729,7 +5781,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                         await execution.executeTasks(initial.id, imageOrigin, boundary.cookie, parentExecutionId);
                     });
                     expect(await ownedRows(conversation.id)).toStrictEqual(settled);
-                    expect(await listEnhancementJobsForTask(copy.taskId, userId)).toStrictEqual([]);
+                    expect(await listEnhancementJobsForTask(copy.taskId, userId)).toStrictEqual(enhancementJobs);
                     expect(await tasks.getStoredGenerationTaskRecord("image_processing", prepare.id)).toStrictEqual(prepareBefore);
                     expect(await tasks.getStoredGenerationTaskRecord("image_processing", build.id)).toStrictEqual(buildBefore);
                     expect(await readFile(registeredSource.filePath)).toEqual(source);

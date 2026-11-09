@@ -113,7 +113,9 @@ async function processEnhancement(lease: ImageEnhancementJob, origin: string) {
         if (current.cancelRequested) return await recordRemote(await (await taskClient()).cancel(plan, current.remoteJobId));
         if (current.phase === "poll") return await recordRemote(await (await taskClient()).query(plan, current.remoteJobId));
         if ((current.phase === "download" || current.phase === "publish") && current.remoteResult && task) {
-            if (current.publicationProcessing?.outcome?.status === "completed") return await publishCompletedEnhancement(current);
+            const outcome = current.publicationProcessing?.outcome;
+            if (outcome?.status === "failed") return await finish("failed", outcome.failure.status === "rejected" ? outcome.failure.error.code : outcome.failure.reason);
+            if (outcome?.status === "completed") return await publishCompletedEnhancement(current);
             const remoteJobId = current.remoteJobId;
             const remoteResult = current.remoteResult;
             const prepared = await prepareEnhancementPublication(current, async (destination) => (await taskClient()).download(plan, remoteJobId, remoteResult, destination));
@@ -144,6 +146,7 @@ async function processEnhancement(lease: ImageEnhancementJob, origin: string) {
                 events: [...job.events, { stage: "receipt_deferred", at: Date.now(), attempt: job.attempt, reason }],
             }));
         try {
+            if (published?.cancelRequested && published.publicationProcessing?.outcome?.status === "completed") return await finish("cancelled", "cancelled");
             return await finish("failed", reason);
         } catch (failure) {
             if (failure instanceof EnhancementLeaseLost) return null;

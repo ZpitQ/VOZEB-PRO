@@ -13,7 +13,6 @@ import type { AgentRun } from "./agent-run-store";
 import type { LocalMediaRegistration } from "./local-media-registry";
 
 const transport = vi.hoisted(() => ({ request: vi.fn(), create: vi.fn(), poll: vi.fn(), settings: {} as never }));
-vi.mock("./database", async (original) => ({ ...(await original<typeof import("./database")>()), getDatabaseProvider: () => "file" }));
 vi.mock("@/lib/auth/store", () => ({ getAuthSettings: async () => transport.settings, refundUserPoints: vi.fn() }));
 vi.mock("./internal-origin", async (original) => ({ ...(await original<typeof import("./internal-origin")>()), fetchInternalApi: transport.request }));
 vi.mock("./safe-outbound-fetch", () => ({
@@ -63,6 +62,7 @@ describe("scene continuity with real services and file persistence", () => {
         vi.resetModules();
         directory = await mkdtemp(join(tmpdir(), "vozeb-scene-continuity-"));
         vi.stubEnv("VOZEB_PRO_DATA_DIR", directory);
+        vi.stubEnv("VOZEB_PRO_DATABASE_PROVIDER", "file");
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "off");
         vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_MEMORY_MB", "8192");
         vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_HEAP_MB", "64");
@@ -357,6 +357,19 @@ describe("scene continuity with real services and file persistence", () => {
             await completePrepare(waiting.jobId);
             current = await claimAndExecute(run.id);
         }
+        if (current.status === "running") await completeLinkedResults(current);
+    }
+
+    async function completeLinkedResults(run: AgentRun) {
+        for (const task of run.tasks) {
+            for (const imageId of task.taskIds || []) {
+                await completeImageTaskResultFixture(imageId, { origin: "http://fixture.local", cookie: "session=fixture", directory });
+            }
+        }
+        // Consume the completed CPU fact in a separate parent execution.
+        const current = await getAgentRun(run.id);
+        assert.ok(current);
+        await executeAgentRun(current, "http://fixture.local", "session=fixture");
     }
 
     async function confirmLocalScene(runId: string) {
@@ -514,7 +527,7 @@ describe("scene continuity with real services and file persistence", () => {
         const disk = JSON.parse(await readFile(join(directory, "generation-tasks.json"), "utf8"));
         expect(disk.find((task: { id: string }) => task.id === second.id).payload.tasks[0].taskIds).toEqual([submissions[1].id]);
         adjustment = true;
-        await executeAgentRun(waiting, "http://fixture.local", "session=fixture");
+        await completeLinkedResults(waiting);
         await prepareAdvisoryReview(second.id, { origin: "http://fixture.local", cookie: "session=fixture", directory });
         await recoverAdvisoryReview(second.id);
         const completedSecond = (await getAgentRun(second.id))!;
@@ -543,6 +556,7 @@ describe("scene continuity with real services and file persistence", () => {
         });
         const confirmedBranch = await confirmLocalScene(branch.id);
         await executeAgentRun(confirmedBranch, "http://fixture.local", "session=fixture");
+        await completeLinkedResults((await getAgentRun(branch.id))!);
         await prepareAdvisoryReview(branch.id, { origin: "http://fixture.local", cookie: "session=fixture", directory });
         await recoverAdvisoryReview(branch.id);
         const completedBranch = (await getAgentRun(branch.id))!;
@@ -651,7 +665,7 @@ describe("scene continuity with real services and file persistence", () => {
         expect(submitted).toMatchObject({ status: "running", runId: legacy.id, attempts: [{ attemptNo: 1, status: "running" }] });
         await scheduler.releaseGenerationTaskLease("image", original.id, originalWorker, { executionPhase: "submitted", upstreamTaskId: submitted.upstream.id, nextPollAt: Date.now() }, { executionId: claim.executionId });
         const createCount = transport.create.mock.calls.length;
-        await executeAgentRun(savedLegacy, "http://fixture.local", "session=fixture");
+        await completeLinkedResults(savedLegacy);
         const recoveredLegacy = (await getAgentRun(legacy.id))!;
         expect(recoveredLegacy.status).toBe("completed");
         expect(JSON.stringify(recoveredLegacy.ecommerceSnapshot!.plan)).toBe(frozenPlan);

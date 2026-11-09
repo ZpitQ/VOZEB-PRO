@@ -261,8 +261,8 @@ describe("file image task result final upload fault gates", () => {
         const secondOutput = await outputAt(current, 1);
         expect(firstOutput.bytes).toEqual(secondOutput.bytes);
         expect(current.result.results).toEqual([
-            { resultId: current.image.id + ":1", resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 0 },
-            { resultId: current.image.id + ":2", resultIndex: 2, nativeInputIndex: 1, finalArtifactIndex: 1 },
+            { resultId: current.image.id + ":1", resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 0, finalImage: { format: "png", hasAlpha: false } },
+            { resultId: current.image.id + ":2", resultIndex: 2, nativeInputIndex: 1, finalArtifactIndex: 1, finalImage: { format: "png", hasAlpha: false } },
         ]);
         const before = await snapshot(current);
         const first = await upload(current, firstOutput);
