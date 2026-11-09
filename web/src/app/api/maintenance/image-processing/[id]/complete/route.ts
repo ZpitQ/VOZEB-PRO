@@ -11,7 +11,7 @@ import type {
     SceneProtectionEvidence,
     SceneProtectionSnapshot,
 } from "@/lib/image-processing/contracts";
-import { completeImageProcessingTask, ImageProcessingInputError, type CompleteImageProcessingInput } from "@/lib/server/image-processing-service";
+import { completeImageProcessingTask, ImageProcessingInputError, type CompleteImageProcessingInput, type StoredImageProcessingArtifact } from "@/lib/server/image-processing-service";
 import { isAuthorizedWorkerRequest, isWorkerTokenConfigured } from "@/lib/server/maintenance-auth";
 
 export const runtime = "nodejs";
@@ -39,10 +39,16 @@ function completionInput(value: unknown): CompleteImageProcessingInput {
     const manifest = fields(body.manifest, ["jobId", "executionId", "sourceIdentities", "artifacts", "geometry", "results", "enhancement"]);
     if (manifest.enhancement !== undefined) return enhancementCompletionInput(body, manifest);
     if (manifest.results !== undefined) return resultCompletionInput(body, manifest);
-    if (!Array.isArray(manifest.sourceIdentities) || manifest.sourceIdentities.length !== 1 || !Array.isArray(manifest.artifacts) || manifest.artifacts.length !== 1) throw new ImageProcessingInputError("参考完成清单必须包含一份原件身份和分析工件", 400);
+    if (!Array.isArray(manifest.sourceIdentities) || manifest.sourceIdentities.length !== 1 || !Array.isArray(manifest.artifacts) || ![1, 3].includes(manifest.artifacts.length))
+        throw new ImageProcessingInputError("参考完成清单必须包含一份原件身份和完整工件", 400);
     const source = fields(manifest.sourceIdentities[0], ["assetId", "assetVersion", "sha256", "bytes", "mimeType", "width", "height"]);
     const artifact = fields(manifest.artifacts[0], ["kind", "storageKey", "sha256", "mimeType", "bytes", "width", "height"]);
-    if (artifact.kind !== "analysis" && artifact.kind !== "mask") throw new ImageProcessingInputError("参考完成清单工件类别无效", 400);
+    if (artifact.kind !== "analysis" && artifact.kind !== "mask" && artifact.kind !== "generation_reference") throw new ImageProcessingInputError("参考完成清单工件类别无效", 400);
+    const artifacts = manifest.artifacts.map((value): StoredImageProcessingArtifact => {
+        const item = fields(value, ["kind", "storageKey", "sha256", "mimeType", "bytes", "width", "height"]);
+        if (item.kind !== "analysis" && item.kind !== "mask" && item.kind !== "generation_reference" && item.kind !== "generation_mask") throw new ImageProcessingInputError("参考完成清单工件类别无效", 400);
+        return { kind: item.kind, storageKey: text(item.storageKey), sha256: sha256(item.sha256), mimeType: text(item.mimeType), bytes: integer(item.bytes), width: integer(item.width), height: integer(item.height) };
+    });
     const geometry = geometryInput(manifest.geometry, artifact.kind);
     return {
         workerId: text(body.workerId).trim(),
@@ -53,7 +59,7 @@ function completionInput(value: unknown): CompleteImageProcessingInput {
             sourceIdentities: [
                 { assetId: text(source.assetId), assetVersion: text(source.assetVersion), sha256: sha256(source.sha256), bytes: integer(source.bytes), mimeType: text(source.mimeType), width: integer(source.width), height: integer(source.height) },
             ],
-            artifacts: [{ kind: artifact.kind, storageKey: text(artifact.storageKey), sha256: sha256(artifact.sha256), mimeType: text(artifact.mimeType), bytes: integer(artifact.bytes), width: integer(artifact.width), height: integer(artifact.height) }],
+            artifacts,
             geometry,
         },
         metrics: completionMetrics(body.metrics),
@@ -194,7 +200,7 @@ function resultArtifactInput(value: unknown): CompleteImageProcessingInput["mani
 }
 
 function resultBindingInput(value: unknown): NonNullable<ImageProcessingResult["results"]>[number] {
-    const result = fields(value, ["resultId", "resultIndex", "nativeInputIndex", "finalArtifactIndex", "error", "baselineValidated", "sceneProtectionEvidence", "productEnhancementEvidence"]);
+    const result = fields(value, ["resultId", "resultIndex", "nativeInputIndex", "finalArtifactIndex", "error", "finalImage", "baselineValidated", "sceneProtectionEvidence", "productEnhancementEvidence"]);
     const identity = { resultId: text(result.resultId), resultIndex: integer(result.resultIndex), nativeInputIndex: integer(result.nativeInputIndex, 0) };
     if (result.error !== undefined) {
         fields(value, ["resultId", "resultIndex", "nativeInputIndex", "error"]);
@@ -202,11 +208,18 @@ function resultBindingInput(value: unknown): NonNullable<ImageProcessingResult["
         if (error.failureStage !== "decode" && error.failureStage !== "validation") throw new ImageProcessingInputError("结果失败槽位阶段无效", 400);
         return { ...identity, error: { code: text(error.code), message: text(error.message), failureStage: error.failureStage } };
     }
+    let finalImage: { format: string; hasAlpha: boolean } | undefined;
+    if (result.finalImage !== undefined) {
+        const image = fields(result.finalImage, ["format", "hasAlpha"]);
+        if (typeof image.hasAlpha !== "boolean") throw new ImageProcessingInputError("最终成图透明事实无效", 400);
+        finalImage = { format: text(image.format), hasAlpha: image.hasAlpha };
+    }
     const baselineValidated = result.baselineValidated;
     if (baselineValidated !== undefined && typeof baselineValidated !== "boolean") throw new ImageProcessingInputError("结果基线验证标记无效", 400);
     return {
         ...identity,
         finalArtifactIndex: integer(result.finalArtifactIndex, 0),
+        ...(finalImage ? { finalImage } : {}),
         ...(baselineValidated === undefined ? {} : { baselineValidated }),
         ...(result.sceneProtectionEvidence === undefined ? {} : { sceneProtectionEvidence: sceneResultEvidenceInput(result.sceneProtectionEvidence) }),
         ...(result.productEnhancementEvidence === undefined ? {} : { productEnhancementEvidence: productCompositionInput(result.productEnhancementEvidence) }),
@@ -253,8 +266,8 @@ function sceneResultEvidenceInput(value: unknown): SceneProtectionEvidence {
     };
 }
 
-function geometryInput(value: unknown, kind: "analysis" | "mask"): ImageProcessingResult["geometry"] {
-    const geometry = fields(value, kind === "analysis" ? ["sourceSize"] : ["sourceSize", "productBounds", "haloBounds", "sceneProtection", "enhancementBaseline"]);
+function geometryInput(value: unknown, kind: "analysis" | "mask" | "generation_reference"): ImageProcessingResult["geometry"] {
+    const geometry = fields(value, kind === "mask" ? ["sourceSize", "productBounds", "haloBounds", "sceneProtection", "enhancementBaseline"] : ["sourceSize"]);
     return {
         sourceSize: sizeInput(geometry.sourceSize),
         ...(geometry.productBounds !== undefined ? { productBounds: rectangleInput(geometry.productBounds) } : {}),

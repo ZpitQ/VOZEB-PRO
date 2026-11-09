@@ -50,7 +50,7 @@ export type CreativeAgentRun = {
     ecommerceSceneSelection?: { action: "confirm_scene_selection"; baselineAssetId: string; url: string; width: number; height: number };
     ecommerceReferenceReview?: CreativeReferenceReview | null;
     canCheckStatus?: boolean;
-    imageProcessingRecovery?: { reason: "resource_failure"; canResume: boolean; message: string };
+    imageProcessingRecovery?: { reason: "resource_failure" | "input_rejected"; canResume: boolean; message: string };
     createdAt?: number;
     updatedAt?: number;
     assetIds: string[];

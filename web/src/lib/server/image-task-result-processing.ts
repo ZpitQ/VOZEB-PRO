@@ -1320,12 +1320,13 @@ function completedImageResults(image: ImageTask, completion: CompletedResultInpu
         const layered = image.config.outputMode === "layers";
         const ordinary4k = enhanced && !layered && !image.sceneProtection && image.enhancementDelivery?.scope !== "product_background";
         const protectedMask = ordinary4k && Boolean(image.mask);
+        const finalEnhancement = enhanced && !layered && Boolean(slot.finalImage);
         if (ordinary4k && (artifact.sha256 !== source.sha256 || artifact.bytes !== source.bytes || artifact.width !== source.width || artifact.height !== source.height || artifact.mimeType !== source.mimeType))
             throw new Error("Ordinary 4k result changed its provider native bytes");
         const nativeUrl = ordinary4k ? url : resultMediaUrl(native.storageKey);
         const enhancementSkip =
             enhanced && (layered || nativeProduct || protectedMask || isNativeGlobalSceneImageTaskResult(image))
-                ? imageEnhancementExclusion({ enabled: image.enhancementPolicy?.enabled ?? false, requested4k: true, protectedContract: nativeProduct || protectedMask, layered })
+                ? imageEnhancementExclusion({ enabled: image.enhancementPolicy?.enabled ?? false, requested4k: true, protectedContract: !finalEnhancement && (nativeProduct || protectedMask), layered })
                 : undefined;
         return [
             {
@@ -1336,7 +1337,7 @@ function completedImageResults(image: ImageTask, completion: CompletedResultInpu
                 height: artifact.height,
                 bytes: artifact.bytes,
                 mimeType: artifact.mimeType,
-                ...(enhanced && !layered && !nativeProduct && !protectedMask
+                ...(enhanced && !layered && (finalEnhancement || (!nativeProduct && !protectedMask))
                     ? {
                           enhancementId: `enhancement:${slot.resultId}`,
                           nativeSource: {
@@ -1348,6 +1349,20 @@ function completedImageResults(image: ImageTask, completion: CompletedResultInpu
                               format: source.nativeImage.format,
                               hasAlpha: source.nativeImage.hasAlpha,
                               provenance: "provider_native" as const,
+                          },
+                      }
+                    : {}),
+                ...(finalEnhancement
+                    ? {
+                          enhancementSource: {
+                              url,
+                              sha256: artifact.sha256,
+                              byteLength: artifact.bytes,
+                              width: artifact.width,
+                              height: artifact.height,
+                              format: slot.finalImage!.format,
+                              hasAlpha: slot.finalImage!.hasAlpha,
+                              provenance: "generation_final" as const,
                           },
                       }
                     : {}),

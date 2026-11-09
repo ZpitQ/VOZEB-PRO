@@ -30,7 +30,7 @@ import { getStoredGenerationTaskRecord } from "./generation-task-store";
 import { ensureImageTaskResultProcessing, consumeCompletedImageTaskResultProcessing } from "./image-task-result-processing";
 import { usesImageTaskResultProcessing } from "./image-task-result-contract";
 import { readCompletedEcommerceSceneProtection } from "./ecommerce-protection-preparation";
-import { loadPreparedEcommerceReferenceSource } from "./ecommerce-reference-preparation";
+import { verifyPreparedEcommerceReferenceSource, loadPreparedEcommerceReferenceSource } from "./ecommerce-reference-preparation";
 
 export type ImageUpstreamStep =
     | { state: "pending"; upstream: NonNullable<ImageTask["upstream"]>; status: string }
@@ -357,6 +357,13 @@ async function frozenImageSubmissionReferences(task: ImageTask, origin: string, 
         )
             throw new EcommerceReferenceSourceChangedError();
         const original = { ...reference, dataUrl: "", url: originalImageSourceUrl(source), serverUrl: undefined, remoteUrl: undefined };
+        if (task.productProtection && task.ecommerceExecution?.modelSnapshot.imageEdit?.protocol === "sub2api") {
+            const prepared = parent.ecommerceSnapshot?.processing?.prepareReferences.find((entry) => entry.assetId === reference.id)?.manifest?.sourceIdentities[0];
+            if (!prepared || prepared.decodeError || prepared.sha256 !== item.contentSha256) throw new EcommerceReferenceSourceChangedError();
+            await verifyPreparedEcommerceReferenceSource({ sourceUrl: original.url, sourceBytes: prepared.bytes, contentSha256: item.contentSha256 }, origin, authContext);
+            references.push(original);
+            continue;
+        }
         const dataUrl = await imageReferenceToDataUrl(original, reference.name || `reference-${index + 1}.png`, origin, authContext);
         const encoded = dataUrl.match(/^data:image\/[^;,]+;base64,(.+)$/i)?.[1];
         if (!encoded) throw new EcommerceReferenceSourceReadError();

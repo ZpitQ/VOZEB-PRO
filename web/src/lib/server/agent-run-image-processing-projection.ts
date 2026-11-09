@@ -5,7 +5,7 @@ import type { AgentImageProcessingPayload, ImageProcessingStoredResult } from ".
 import type { ImageTask } from "./image-task-store";
 import { appliedImageResultRunBinding, fileImageResultRun, imageResultRunBinding } from "./image-task-result-run";
 import { canonicalImageTaskResultValue, imageTaskResultInputsMatch, imageTaskResultSourceIdentityDigest } from "./image-task-result-contract";
-import { imageProcessingFailureIdentity } from "./image-processing-failure";
+import { imageProcessingFailureIdentity, imageProcessingPauseMessage } from "./image-processing-failure";
 import { ensurePostgresSchema, getDatabaseProvider, postgresQuery, withPostgresTransaction, type QueryExecutor } from "./database";
 import { GENERATION_TASK_FILE, getStoredGenerationTaskRecord, withGenerationTaskFileRead, type StoredGenerationTaskRecord } from "./generation-task-store";
 import { writeJsonDataFile } from "./data-adapter";
@@ -290,4 +290,79 @@ export async function repairAgentImageProcessingFacts(run: AgentRun, project: Pr
         if (cause instanceof AgentImageProcessingProjectionError) throw cause;
         throw new AgentImageProcessingProjectionError(cause);
     }
+}
+
+async function imageProcessingPauseProjection(expected: AgentRun, now: number, storage: Storage) {
+    const record = await stored("agent", expected.id, storage);
+    const run = record?.payload as AgentRun | undefined;
+    const waiting = run?.ecommerceSnapshot?.processing?.waitingFor;
+    if (
+        !record ||
+        record.userId !== expected.userId ||
+        record.status !== "paused" ||
+        record.expiresAt <= now ||
+        !run ||
+        run.status !== "paused" ||
+        run.cancellation ||
+        !waiting ||
+        !isDeepStrictEqual(waiting, expected.ecommerceSnapshot?.processing?.waitingFor)
+    )
+        return null;
+    const stage = await stored("image_processing", waiting.jobId, storage);
+    const payload = stage?.payload as AgentImageProcessingPayload | undefined;
+    const result = stage?.resultPayload as ImageProcessingStoredResult | undefined;
+    const failure = result?.failure;
+    if (
+        !stage ||
+        stage.userId !== record.userId ||
+        stage.runId !== run.id ||
+        stage.expiresAt <= now ||
+        stage.executionPhase !== "needs_review" ||
+        !payload ||
+        (payload.operation !== "prepare_reference" && payload.operation !== "build_protection") ||
+        payload.inputDigest !== waiting.inputDigest ||
+        !failure ||
+        !result?.workerId ||
+        !payload.executionId ||
+        result.executionId !== payload.executionId ||
+        failure.jobId !== stage.id ||
+        failure.executionId !== payload.executionId ||
+        (failure.status === "rejected" ? stage.status !== "error" : stage.status !== "paused")
+    )
+        return null;
+    const message = imageProcessingPauseMessage(failure);
+    const key = identity(["pause", stage.id, payload.inputDigest, result.executionId, result.workerId, imageProcessingFailureIdentity(failure), message]);
+    const mutation: ProjectionMutation = { run, event: { type: "run.paused", data: { imageProcessingProjectionKey: key, message } }, assistant: { status: "running", content: message } };
+    return { run, key, message, reason: failure.status === "rejected" ? ("input_rejected" as const) : ("resource_failure" as const), mutation };
+}
+
+export async function repairAgentImageProcessingPause(run: AgentRun) {
+    if (run.status !== "paused" || !run.ecommerceSnapshot?.processing?.waitingFor) return;
+    const result =
+        getDatabaseProvider() === "postgres"
+            ? await withPostgresTransaction(async (executor) => {
+                  await getStoredGenerationTaskRecord("agent", run.id, executor, true);
+                  const now = (await executor.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now.getTime();
+                  const projection = await imageProcessingPauseProjection(run, now, executor);
+                  if (!projection) return;
+                  const receipt = await executor.query("SELECT id FROM creative_run_events WHERE run_id = $1 AND data ->> 'imageProcessingProjectionKey' = $2 LIMIT 1", [run.id, projection.key]);
+                  if (receipt.rows.length) return { ...projection, notify: false };
+                  await updatePostgresAssistant(executor, projection.run.assistantMessageId, projection.mutation.assistant!, now);
+                  await executor.query("INSERT INTO creative_run_events (run_id, type, data, created_at) VALUES ($1, $2, $3::jsonb, $4)", [run.id, projection.mutation.event.type, JSON.stringify(projection.mutation.event.data), new Date(now)]);
+                  await executor.query("SELECT pg_notify('vozeb_pro_run_events', $1)", [run.id]);
+                  return { ...projection, notify: true };
+              })
+            : await queueRuntimeFileOperation(async () => {
+                  const db = await readRuntimeFile();
+                  return withGenerationTaskFileRead(async (records) => {
+                      const now = Date.now();
+                      const projection = await imageProcessingPauseProjection(run, now, records);
+                      if (!projection) return;
+                      if (db.events.some((event) => event.runId === run.id && (event.data as { imageProcessingProjectionKey?: string } | undefined)?.imageProcessingProjectionKey === projection.key)) return { ...projection, notify: false };
+                      await writeRuntimeFile(applyRuntimeMutation(db, projection.run, projection.mutation, now));
+                      return { ...projection, notify: true };
+                  });
+              });
+    if (result?.notify) notifyCreativeRunEvent(run.id);
+    return result && { reason: result.reason, canResume: false, message: result.message };
 }

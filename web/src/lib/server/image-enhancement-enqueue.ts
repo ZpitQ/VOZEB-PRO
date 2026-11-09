@@ -122,6 +122,20 @@ export function imageTaskEnhancementDelivery(task: ImageTask, result: NonNullabl
 }
 
 export function enhancementNativeIdentityMatches(task: ImageTask, result: NonNullable<ImageTask["result"]>, source: EnhancementSource, delivery?: EnhancementDeliverySnapshot): boolean {
+    if (result.enhancementSource) {
+        return (
+            !delivery &&
+            isDeepStrictEqual(result.enhancementSource, source) &&
+            source.provenance === "generation_final" &&
+            source.url === (result.serverUrl || result.dataUrl) &&
+            source.width === result.width &&
+            source.height === result.height &&
+            source.byteLength === result.bytes &&
+            `image/${source.format}` === result.mimeType &&
+            (!result.sceneProtectionEvidence || result.sceneProtectionEvidence.compositeDigest === source.sha256) &&
+            (!result.productEnhancementEvidence || result.productEnhancementEvidence.baselineSha256 === source.sha256)
+        );
+    }
     if (!isDeepStrictEqual(result.nativeSource, source)) return false;
     if (delivery?.contract.scope === "local_edit") return isDeepStrictEqual(imageTaskEnhancementDelivery(task, result), delivery);
     if (source.width !== result.width || source.height !== result.height) return false;
@@ -130,14 +144,15 @@ export function enhancementNativeIdentityMatches(task: ImageTask, result: NonNul
 }
 
 export function planImageTaskEnhancement(task: ImageTask, result: NonNullable<ImageTask["result"]>) {
-    const source = result.nativeSource;
+    const source = result.enhancementSource || result.nativeSource;
     if (!source) throw new Error("native_invalid");
-    const delivery = imageTaskEnhancementDelivery(task, result);
+    const delivery = result.enhancementSource ? undefined : imageTaskEnhancementDelivery(task, result);
     return planImageEnhancement({
         nativeValid: enhancementNativeIdentityMatches(task, result, source, delivery),
         enabled: task.enhancementPolicy?.enabled ?? false,
         requested4k: resolveResultSize(task.config.quality, "1:1") === resolveResultSize("4k", "1:1"),
         protectedContract:
+            !result.enhancementSource &&
             !delivery &&
             Boolean(
                 task.ecommerceExecution?.canvas ||
@@ -160,7 +175,7 @@ export async function enqueueImageEnhancement(task: ImageTask, executor?: QueryE
     if (task.status !== "success") return;
     const results = task.result?.results?.length ? task.result.results : task.result ? [task.result] : [];
     for (const result of results) {
-        if (!result.nativeSource || !result.resultId || !result.enhancementId) continue;
+        if (!(result.enhancementSource || result.nativeSource) || !result.resultId || !result.enhancementId) continue;
         const decision = planImageTaskEnhancement(task, result);
         const now = task.updatedAt;
         const job: ImageEnhancementJob = {

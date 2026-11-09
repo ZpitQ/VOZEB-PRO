@@ -76,6 +76,11 @@ export async function executeImageProcessing(request: ImageProcessingRequest, sa
             throw new ImageProcessingRejection("invalid_image", "商品图片像素无法解码", { cause: error });
         }
         sampleMemory();
+        if (request.operation === "prepare_reference" && request.options.generationInput) {
+            const reference = await generationReference(source, mimeType, request.options.generationInput.bounds, sampleMemory);
+            const artifact = await persistArtifact(request.outputDirectory, "generation_reference", reference.data, reference.mimeType, reference.size);
+            return { ...base, artifacts: [artifact], geometry: { sourceSize } };
+        }
         let analysisSource = source;
         let analysisMimeType = mimeType;
         let analysisSize = sourceSize;
@@ -140,22 +145,43 @@ export async function executeImageProcessing(request: ImageProcessingRequest, sa
             enhancementBaseline = await freezeEnhancementBaseline(source, mask, input.assetId, sourceSize, { scope: "product_background", ...options.freezeEnhancementBaseline }, sampleMemory);
         return { ...base, artifacts: [artifact], geometry: { sourceSize, ...(sceneProtection ? { sceneProtection } : {}), ...(enhancementBaseline ? { enhancementBaseline } : {}) } };
     }
-    const { mask, productBounds, width, height } = await buildWhiteMask(source, request.options.transparentBackground, sampleMemory);
+    const { mask, productBounds, width, height } = await buildWhiteMask(source, request.options.transparentBackground, sampleMemory, request.options.sourceFraming);
     const artifact = await persistArtifact(request.outputDirectory, "mask", mask, "image/png", { width, height });
     const enhancementBaseline = request.options.freezeEnhancementBaseline
         ? await freezeEnhancementBaseline(source, mask, input.assetId, { width, height }, { scope: "product_background", productAnchorId: input.assetId, productCore: [productBounds] }, sampleMemory)
         : undefined;
-    return { ...base, artifacts: [artifact], geometry: { sourceSize: { width, height }, productBounds, haloBounds: expand(productBounds, width, height), ...(enhancementBaseline ? { enhancementBaseline } : {}) } };
+    const artifacts = [artifact];
+    if (request.options.generationInput) {
+        const reference = await generationReference(source, mimeType, request.options.generationInput.bounds, sampleMemory);
+        const size = reference.size;
+        artifacts.push(await persistArtifact(request.outputDirectory, "generation_reference", reference.data, reference.mimeType, size));
+        const generationMask = await sharp(mask, decodeOptions)
+            .resize({ ...size, kernel: "nearest" })
+            .png()
+            .toBuffer();
+        sampleMemory();
+        artifacts.push(await persistArtifact(request.outputDirectory, "generation_mask", generationMask, "image/png", size));
+    }
+    return { ...base, artifacts, geometry: { sourceSize: { width, height }, productBounds, haloBounds: expand(productBounds, width, height), ...(enhancementBaseline ? { enhancementBaseline } : {}) } };
 }
 
-async function buildWhiteMask(source: Buffer, transparentBackground: boolean, sampleMemory: () => void) {
+async function generationReference(source: Buffer, mimeType: string, bounds: ImageProcessingSize, sampleMemory: () => void) {
+    const input = sharp(source, decodeOptions)
+        .rotate()
+        .resize({ ...bounds, fit: "inside", withoutEnlargement: true });
+    const reference = await (mimeType === "image/jpeg" ? input.jpeg({ quality: 90, chromaSubsampling: "4:4:4" }) : input.png()).toBuffer({ resolveWithObject: true });
+    sampleMemory();
+    return { data: reference.data, mimeType: mimeType === "image/jpeg" ? "image/jpeg" : "image/png", size: { width: reference.info.width, height: reference.info.height } };
+}
+
+async function buildWhiteMask(source: Buffer, transparentBackground: boolean, sampleMemory: () => void, sourceFraming?: "visible_extent") {
     const pixels = await decodeProductPixels(source);
     sampleMemory();
     const { width, height } = pixels.info;
     if (pixels.info.channels !== 4) throw new ImageProcessingRejection("invalid_image", "商品图片像素格式无效");
     let productBounds: ImageProcessingRectangle;
     try {
-        productBounds = buildWhiteBackgroundProductMaskPixels(pixels.data, width, height, transparentBackground);
+        productBounds = buildWhiteBackgroundProductMaskPixels(pixels.data, width, height, transparentBackground, sourceFraming);
     } catch (error) {
         if (error instanceof EcommerceProductSegmentationError) throw new ImageProcessingRejection("segmentation_rejected", error.message, { cause: error });
         throw error;
@@ -250,7 +276,7 @@ async function processResults(request: Extract<ImageProcessingRequest, { operati
                 identity.nativeImage = { format: identity.mimeType.slice("image/".length), hasAlpha: !stats.isOpaque };
                 sampleMemory();
                 const result = await compositePreparedScene(bytes, context, sampleMemory);
-                return { bytes: result.bytes, mimeType: "image/png", ...size, evidence: { ...(baselineValidated ? { baselineValidated: true } : {}), sceneProtectionEvidence: result.evidence } };
+                return { bytes: result.bytes, mimeType: "image/png", ...size, finalImage: result.finalImage, evidence: { ...(baselineValidated ? { baselineValidated: true } : {}), sceneProtectionEvidence: result.evidence } };
             },
             sampleMemory,
         );
@@ -270,7 +296,7 @@ async function processResults(request: Extract<ImageProcessingRequest, { operati
             sampleMemory();
             if (identity.width !== size.width || identity.height !== size.height) throw new ImageProcessingRejection(code, "Product native dimensions must exactly match the source");
             const result = await compositePreparedProduct(bytes, context, "native", sampleMemory);
-            return { bytes: result.bytes, mimeType: "image/png", ...size, evidence: { baselineValidated: true, productEnhancementEvidence: result.evidence } };
+            return { bytes: result.bytes, mimeType: "image/png", ...size, finalImage: result.finalImage, evidence: { baselineValidated: true, productEnhancementEvidence: result.evidence } };
         },
         sampleMemory,
     );
@@ -292,7 +318,12 @@ async function inspectResultInputs(request: Extract<ImageProcessingRequest, { op
     return identities;
 }
 
-type SlotOutput = ImageProcessingSize & { bytes: Buffer; mimeType: string; evidence?: { baselineValidated?: boolean; sceneProtectionEvidence?: SceneProtectionEvidence; productEnhancementEvidence?: ProductEnhancementEvidence } };
+type SlotOutput = ImageProcessingSize & {
+    bytes: Buffer;
+    mimeType: string;
+    finalImage?: { format: string; hasAlpha: boolean };
+    evidence?: { baselineValidated?: boolean; sceneProtectionEvidence?: SceneProtectionEvidence; productEnhancementEvidence?: ProductEnhancementEvidence };
+};
 async function processSlots(
     request: Extract<ImageProcessingRequest, { operation: "process_result" }>,
     sourceIdentities: ImageProcessingSourceIdentity[],
@@ -318,7 +349,8 @@ async function processSlots(
             sampleMemory();
             const finalArtifactIndex = artifacts.length;
             artifacts.push(await persistArtifact(request.outputDirectory, "final", output.bytes, output.mimeType, { width: output.width, height: output.height }, { resultId: slot.resultId, resultIndex: slot.resultIndex }));
-            results.push({ ...binding, finalArtifactIndex, ...output.evidence });
+            const finalImage = output.finalImage || (artifacts[finalArtifactIndex].sha256 === identity.sha256 ? identity.nativeImage : undefined);
+            results.push({ ...binding, finalArtifactIndex, ...(finalImage ? { finalImage } : {}), ...output.evidence });
         } catch (error) {
             if (!(error instanceof ImageProcessingRejection)) throw error;
             const decodeFailure = error.code === "invalid_result" || error.cause !== undefined;

@@ -57,6 +57,10 @@ prepare/build取消关闭确认已复用heartbeat：请求含closed或stopCause�
 
 上述prepare上传/完成已有文件与真实PostgreSQL单连接池、两处完成写入故障回滚和本地/S3媒体证据。prepare/build fail已通过文件与真实PostgreSQL单连接池局部检查，包括关闭后的真实拒绝、受控资源报告、原身份重放、父终态/新依赖守卫、实际PG父锁跨截止拒绝和具名CHECK父子回滚。File新增过期用例仅验证有效调用跨截止，不宣称观察到实际排队；受控资源报告只验证服务映射，不证明真实V8 OOM。process_result的ImageTask父规则已修约，native采集/归属封版、结果入队/final上传、显式恢复及幂等消息事件投影仍待实现验证；底层attachment file存储不代表collector/B通过。真实Next大工件传输已有局部资格，实际Worker/Agent整链路尚未验收，不代表完整S3/S4已完成。
 
+原生商品生成输入副本复用同一 `generation_tasks` JSONB：white `build_protection.payload.options.generationInput` 与父 `ecommerceSnapshot.processing.protection.generationInput` 保存首次入队的 `bounds/quality`，参与原阶段摘要；可信完成后进入Agent Task及ImageTask的 `ecommerceExecution.generationInput`。新manifest/staged artifacts精确保留 `mask/generation_reference/generation_mask` 三角色及原身份，后两者沿原临时媒体登记生命周期；原mask、原件和保护坐标保持。首次入队、全部工件完成登记和新图片任务执行快照绑定复用既有事务/父锁；恢复不读取后来默认值，旧字段缺省不改变旧摘要。不新增表、列、迁移或第二队列。
+
+副参考生成准备仍复用 `prepare_reference`，以显式 `options.generationInput={bounds,quality}` 区分分析用途。父 `processing.generationReferences[]` 独立保存逻辑父任务、原素材及版本、计划摘要、job/inputDigest 与完整 manifest；原分析 `prepareReferences` 与 checkpoint 不改写。生成 options 和规范化的冻结计划／路由参与阶段身份，同一素材的分析与生成工件不能互换。生成完成只合并本阶段并唤醒原父任务；File mutation 与 PostgreSQL 复用原父锁／同一 executor，提交图片前等待全部所需副本。
+
 ### process_result的ImageTask父契约（待实现）
 
 沿既有generation_tasks的image与image_processing记录，不新增表、列、通用owner/lease或第二队列。仅结果child的parent_task_id指真实image，run_id/conversation_id/project_id保留可选原归属；业务attempt绑定image payload.attemptNo，不取row attempt_no代替。原claim从recovery穿过provider响应、取流/关闭/登记与最终锁内关联；锁外I/O后不换成新读到的epoch。失权独立退出，不能失败/退款/新create或清新owner；payload-only通用mutation不能代替实际row租约校验。
@@ -134,6 +138,8 @@ VOZEB PRO 的 PostgreSQL 真实表名统一使用项目名前缀 `vozeb_pro_`。
 
 增强任务 JSON 的 `staged.delivered` 与 `publication.delivered` 保存最终实际格式 `png|jpeg`、地址、尺寸、字节数和摘要；新增无保护全局交付为 JPEG，受保护交付与旧暂存 PNG 保持原格式。远端 `remoteResult` 及完整 AI 结果仍严格 PNG，回执绑定该远端结果；无需表迁移，不覆盖历史文件。
 
+生成完成后的整图增强：新结果可保存独立 `enhancementSource`（`generation_final`），冻结已保存最终成图的站内URL、SHA、字节数、真实尺寸、格式和实际透明度；`nativeSource`仍表示未经改写的上游原件。CPU结果槽位可带 `finalImage`，摘要仅在该字段存在时追加，已有完成清单摘要保持。生成保护/合成先验收并保存原图，随后增强任务按该最终源使用既有 `full_image` 流程和JPEG交付，不再携带旧蒙版增强交付合同；原PNG和生成证据保留，增强版另存并绑定原图父资产。后台开关、画质目标、真实透明图限制、倍率/预算及幂等规则保持。旧已冻结M7/M8任务继续使用以下原合同，不补签、不重新推理；无需新表或迁移。
+
 M7 在既有图片任务 JSON 中增加创建时冻结的 `enhancementDelivery`（`ecommerce-delivery.v2`）：明确全局整图或 `product_background`，后者保存商品锚点/源尺寸、规范方向色彩、源/规范源摘要及可信 inline PNG 蒙版/摘要。结果的 `productEnhancementEvidence`（`product-baseline.v2`）分别绑定真实 provider native 与合格原图及其合成证据，不覆盖 `nativeSource`。增强任务 payload 的 `decision.delivery` 固定该合同和合格原图身份，`requestedTarget` 保留请求目标；严格商品背景的实际 target 保持源画幅。`staged/publication.protection` 保存规范版本、源/AI/蒙版/final 摘要、锚点、尺寸及保护像素计数，发布时重建验证。无需新增表或迁移；公开读取只返回范围和技术事实白名单，不返回蒙版或连接凭据。
 
 M8 沿用同一 JSON 结构增加 `scope: local_edit` 与 `scene-enhancement.v1` 保护证据，仅在新建显式4K且已有确认有效局部选区时冻结源、坐标及可信蒙版。合同中的 baseline 是编辑前参考，`decision.delivery.baseline` 是原局部编辑技术通过后的合格原图；`decision.source` 继续保存真实 provider native，三者不能互换。raw native 与合格 baseline 可按既有 `uniform_scale` / `pixel_grid_scale` 规则具有不同尺寸，原 native 技术要求不变。Worker prepare 与 submit 同用冻结的合格原图上下文，下载校验沿相同冻结输入尺寸与模型倍率；最终交付保持源画幅，仅在 `alpha < 255` 允许域写回，alpha255保护区RGBA零差。`requestedTarget` 独立保存请求尺寸，不由4K画质反推更大尺寸；例如精确源画幅1254²时，请求可1254²、推理5016²、交付1254²，不能标为整图4K。`staged/publication.protection` 分别保存完整 AI 与最终件摘要、映射、允许/保护像素数及区域外零变化计数；发布时从原参考和 native 重建合格原图，再用保存的完整 AI 重建最终件，并核staged字节。增强资产保留独立父链，继续编辑需重新确认选区；无需新表、迁移或 Worker 协议升级。当前入口只签发可信二值矩形，空/全域不冻结局部合同，helper软混合不代表画笔UI。旧任务不补签新合同，增强失败不撤回合格原图；本期不新增整图4K导出入口。
@@ -201,6 +207,8 @@ M8 沿用同一 JSON 结构增加 `scope: local_edit` 与 `scene-enhancement.v1`
 文本、图片、视频、音频和漫剧整集合成终态更新使用带 `user_id + task_type + allowed status` 条件的原子 `UPDATE`；任务尝试元数据通过存储层原子 mutate 合并，避免取消状态被旧快照覆盖。用户取消、后台成功、后台失败和过期检查同时发生时只有一个状态转换能成功，退款由成功抢占终态或检测到已取消结果的一方执行。
 
 生成恢复通过 `worker_id + lease_until` 原子领取到期任务；页面唤醒和常驻 Worker 复用同一恢复服务。上游创建成功后先保存任务 ID，再进入查询阶段；查询到结果先写 `result_ready`，下一批只完成媒体保存。`submitting` 结果不确定且无法对账时进入 `needs_review`，只有管理员明确提供上游任务 ID、结果或确认失败后才能继续。Webhook 事件先按渠道与事件 ID 幂等登记，再匹配已有媒体任务并清除租约；未匹配事件保留为 `unmatched`，不得创建新任务。
+
+白底商品细节的原取景策略保存于Agent计划 `preserve.sourceFraming=visible_extent`，并冻结到图像阶段白底 `options.sourceFraming` 与输入摘要。prepare/build暂停的安全消息和事件使用既有 `imageProcessingProjectionKey` 幂等收据，任务真值提交后可由读取补齐；原始进程诊断仍只保存在阶段结果，不进入公开消息。沿用现有JSONB和事件表，不新增物理表或列。
 
 Agent Run 的状态与任务数组继续保存在 `generation_tasks.payload`，每个多副本子任务同时保存子任务 ID、完成状态、尝试次数和结果，恢复时复用已完成结果并继续轮询未完成任务；事件独立写入 `creative_run_events`。状态更新、助手消息终态和事件追加在同一 PostgreSQL 事务内完成；暂停、恢复、取消、完成和失败竞争时，旧 Run 快照不能覆盖更新后的状态。文件 Provider 使用串行 mutation queue 保持相同的进程内语义。短剧成本概览按 `user_id + project_id + task_type + status` 在数据库聚合，并使用 `generation_tasks_user_project_idx`，不读取数千条完整任务 JSON 后再汇总。
 
@@ -408,6 +416,8 @@ PayPly 下单由服务端向 `VOZEB_PRO_PAYPLY_CHECKOUT_URL` 发起请求，密�
 规划上下文读取当前会话的持久摘要和最近 12 条已完成消息，更早消息按序写入 `creative_conversations.context_summary`，并用 `context_summary_through_sequence` 防止重复摘要。服务端按 Surface 和实际能力筛选模型、只加入用户显式选择的 Skill，并完整保留这份已验证上下文，不再叠加平台固定字符预算或输出 token 上限。当前 Run 的用户消息和助手占位消息不会重复进入自身规划上下文；真实供应商上下文能力仍需在启用渠道时验收。
 
 任务可保存多份媒体引用。依赖任务完成后，执行器从其稳定 `assetId` 重新读取持久媒体位置并注入下游图片或视频请求；`parent_asset_id` 保存首个父资产，其余父资产 ID 记录在资产 metadata 中。
+
+规划阶段失败后，用户明确重试会在原 Run 的 `generation_tasks.payload.planningRequestId` 保存新的私有规划请求身份，与 failed→planning 状态更新原子提交。重试继续复用原会话及用户/助手消息；Worker 恢复、重复调度与同轮协议回退必须复用这份身份，不得重新生成。普通 Agent 规划与电商编辑规划均以它派生计费幂等键；首次规划沿原 Run 身份。电商规划消息中的嵌套 JSON 按键稳定序列化，避免 JSONB 读回的键顺序改变消费指纹。历史消费、退款与同键异参 409 校验保持原有约束。
 
 同一用户的 `client_request_id` 保持唯一。重复提交 Agent Run 时返回原运行，不重复创建用户消息、助手占位消息、子任务或计费。每份并发结果以独立子任务身份合并写回父任务，并追加 `task.child.completed/failed`；已经成功的子任务与资产不会因兄弟失败而丢失。SSE 使用 `creative_run_events.id` 作为 `Last-Event-ID`，只重放游标之后的事件。
 

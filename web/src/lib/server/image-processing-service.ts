@@ -1,4 +1,5 @@
-import { imageProcessingFailureIdentity, type ClosedImageProcessingFailure } from "./image-processing-failure";
+import { imageProcessingFailureIdentity, imageProcessingPauseMessage, type ClosedImageProcessingFailure } from "./image-processing-failure";
+import { repairAgentImageProcessingPause } from "./agent-run-image-processing-projection";
 import { readEnhancementProcessingTask, closeEnhancementProcessingFailure, type EnhancementProcessingPayload } from "./image-enhancement-processing-store";
 import {
     claimEnhancementProcessingTask,
@@ -19,7 +20,7 @@ import type { EcommerceGenerationTrace } from "./ecommerce-generation-trace";
 import { independentAdvisoryReview, reviewContextDigest, reviewDigest, reviewQualityDigest, reviewRegionTuple, reviewSourceTuple } from "./ecommerce-visual-review-identity";
 import { fileImageResultRun, imageResultRunMatches, nativeGlobalSceneResultTaskMatches, nativeProductResultTaskMatches, readImageResultRun, type ImageResultRun, type ImageResultRunBinding } from "./image-task-result-run";
 import { createHash, randomUUID } from "node:crypto";
-import { resolveResultSize } from "@/app/api/image-tasks/image-task-size";
+import { normalizeQuality, resolveResultSize, resolveEcommerceCanvasRequestSize, parseImageDimensions } from "@/lib/image-generation-size";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -32,6 +33,7 @@ import sharp, { type Metadata } from "sharp";
 import { CREATIVE_UPLOAD_MAX_BYTES } from "@/lib/creative-upload";
 import type {
     ImageProcessingArtifact,
+    ImageProcessingGenerationInput,
     ImageProcessingEnhancementBaseline,
     ImageProcessingInput,
     ImageProcessingOperation,
@@ -70,6 +72,7 @@ import {
     isNativeProductImageTaskResult,
     imageTaskNativeSceneBaseline,
     imageTaskResultSourceIdentityDigest,
+    canonicalImageTaskResultValue,
     imageTaskResultReferenceLocation,
     imageTaskResultReferenceUrl,
     imageTaskResultInputsMatch,
@@ -140,8 +143,9 @@ type ImageProcessingStageReference = { jobId: string; inputDigest: string; manif
 export type ImageProcessingCheckpoint = {
     version: "image-processing-checkpoint.v1";
     prepareReferences: Array<ImageProcessingStageReference & { assetId: string; assetVersion: string }>;
+    generationReferences?: Array<ImageProcessingStageReference & { parentTaskId: string; assetId: string; assetVersion: string; generationInput: ImageProcessingGenerationInput; planDigest: string }>;
     sceneSelection?: SceneSelectionReceipt;
-    protection?: ImageProcessingStageReference;
+    protection?: ImageProcessingStageReference & { generationInput?: ImageProcessingGenerationInput };
     waitingFor?: ImageProcessingStageReference;
 };
 
@@ -539,6 +543,16 @@ function imageProcessingCloseIdentity(closed: ImageProcessingCancellationCloseRe
 }
 
 export async function failImageProcessingTask(id: string, input: FailImageProcessingInput): Promise<FailedImageProcessingStage> {
+    const response = await closeImageProcessingTask(id, input);
+    const stage = await readImageProcessingStage(id);
+    if (stage && (stage.payload.operation === "prepare_reference" || stage.payload.operation === "build_protection") && stage.runId) {
+        const parent = await getStoredGenerationTask<AgentRun>("agent", stage.runId);
+        if (parent) await repairAgentImageProcessingPause(parent);
+    }
+    return response;
+}
+
+async function closeImageProcessingTask(id: string, input: FailImageProcessingInput): Promise<FailedImageProcessingStage> {
     if (input.failure.jobId !== id || input.failure.executionId !== input.executionId) throw new ImageProcessingInputError("失败报告与阶段身份不符", 400);
     const failure = imageProcessingFailureIdentity(input.failure);
     const enhancement = await readEnhancementProcessingTask(id);
@@ -714,7 +728,7 @@ export async function resumeImageProcessingTaskForRun(run: AgentRun): Promise<Ag
     );
 }
 
-export async function imageProcessingRecoveryForRun(run: AgentRun): Promise<{ reason: "resource_failure"; canResume: boolean; message: string } | undefined> {
+export async function imageProcessingRecoveryForRun(run: AgentRun): Promise<{ reason: "resource_failure" | "input_rejected"; canResume: boolean; message: string } | undefined> {
     const waiting = run.ecommerceSnapshot?.processing?.waitingFor;
     if (run.surface !== "chat" || run.status !== "paused" || run.cancellation || !waiting) return;
     const record = await getStoredGenerationTaskRecord("agent", run.id);
@@ -724,6 +738,8 @@ export async function imageProcessingRecoveryForRun(run: AgentRun): Promise<{ re
     if (parent.status !== "paused" || parent.cancellation || parent.conversationId !== run.conversationId || currentWaiting?.jobId !== waiting.jobId || currentWaiting.inputDigest !== waiting.inputDigest) return;
     const stage = await readImageProcessingStage(waiting.jobId);
     if (!stage) return;
+    const pause = await repairAgentImageProcessingPause(run);
+    if (pause?.reason === "input_rejected") return pause;
     try {
         if (!(await validateImageProcessingResourceResume(run, parent, record.userId, stage, readImageProcessingStage))) return;
     } catch (error) {
@@ -794,10 +810,15 @@ async function validateImageProcessingResourceResume(expected: AgentRun, parent:
     )
         throw new ImageProcessingInputError("当前图像阶段没有可恢复的资源失败回执", 409);
     const reference =
-        payload.operation === "prepare_reference" ? processing?.prepareReferences.find((item) => item.jobId === stage.id && item.assetId === payload.inputs[0].assetId && item.assetVersion === payload.inputs[0].assetVersion) : processing?.protection;
+        payload.operation === "prepare_reference"
+            ? (payload.options.generationInput ? processing?.generationReferences : processing?.prepareReferences)?.find(
+                  (item) => item.jobId === stage.id && item.assetId === payload.inputs[0].assetId && item.assetVersion === payload.inputs[0].assetVersion,
+              )
+            : processing?.protection;
     if (reference?.jobId !== stage.id || reference.inputDigest !== payload.inputDigest || reference.manifest || stage.id !== "image-process-" + payload.inputDigest) throw new ImageProcessingInputError("原图像阶段检查点已变化", 409);
     const input = imageProcessingResourceResumeInput(parent, stage);
-    if (input.operation === "build_protection") {
+    if (input.operation === "build_protection" || (input.operation === "prepare_reference" && input.options.generationInput)) {
+        if (input.operation === "prepare_reference") assertGenerationReferenceRequest(parent, input);
         const prepared = await completedProtectionInputs(parent, input, lookup, executor);
         if (prepared.inputDigest !== payload.inputDigest || enqueueInputsIdentity(prepared) !== enqueueInputsIdentity({ sources: payload.sources, facts: payload.resource.facts })) throw new ImageProcessingInputError("保护阶段原件完成证据已变化", 409);
     } else {
@@ -870,7 +891,7 @@ function readFailedImageProcessingStage(stage: ImageProcessingStageState, input:
 function pausedImageProcessingParent(parent: AgentRun, stage: ImageProcessingStageState, failure: ClosedImageProcessingFailure): AgentRun | undefined {
     const waiting = parent.ecommerceSnapshot?.processing?.waitingFor;
     if (parent.cancellation || parent.status === "cancelled" || parent.status === "completed" || parent.status === "failed" || waiting?.jobId !== stage.id || waiting.inputDigest !== stage.payload.inputDigest) return;
-    return { ...parent, status: "paused", executionId: undefined, failure: failure.status === "rejected" ? "图像处理未能完成，请检查参考图片或保护设置后继续。" : "图像处理资源不足，已暂停等待人工检查。" };
+    return { ...parent, status: "paused", executionId: undefined, failure: imageProcessingPauseMessage(failure) };
 }
 
 type ImageProcessingStageState = Pick<StoredGenerationTaskRecord, "id" | "userId" | "runId" | "parentTaskId" | "conversationId" | "surface" | "projectId" | "status" | "executionPhase" | "workerId" | "leaseUntil" | "expiresAt"> & {
@@ -891,15 +912,19 @@ export async function writeImageProcessingOutput(
     const initial = await readImageProcessingStage(id);
     requireImageProcessingStage(initial);
     assertCurrentImageProcessingStage(initial, identity);
-    const analysis = (initial.payload.operation === "prepare_reference" || initial.payload.operation === "prepare_review") && kind === "analysis";
-    const mask = initial.payload.operation === "build_protection" && kind === "mask";
+    const analysis = (initial.payload.operation === "prepare_review" || (initial.payload.operation === "prepare_reference" && !initial.payload.options.generationInput)) && kind === "analysis";
+    const generation =
+        initial.payload.operation === "prepare_reference" ? initial.payload.options.generationInput : initial.payload.operation === "build_protection" && !("mode" in initial.payload.options) ? initial.payload.options.generationInput : undefined;
+    const generationReference = Boolean(generation) && kind === "generation_reference";
+    const generationMask = initial.payload.operation === "build_protection" && Boolean(generation) && kind === "generation_mask";
+    const mask = initial.payload.operation === "build_protection" && (kind === "mask" || generationMask);
     const final = initial.payload.operation === "process_result" && kind === "final";
-    if (!analysis && !mask && !final) throw new ImageProcessingInputError("当前阶段不接受此工件类别", 400);
+    if (!analysis && !mask && !final && !generationReference) throw new ImageProcessingInputError("当前阶段不接受此工件类别", 400);
     if (!final && input.resultId !== undefined) throw new ImageProcessingInputError("当前工件类别不接受结果槽位选择", 400);
     const resultUpload = final ? selectImageProcessingFinalUpload(initial, input.resultId) : undefined;
     if (resultUpload) await assertImageProcessingFinalUploadAvailable(initial, identity, resultUpload);
     if (mask ? input.mimeType !== "image/png" : !analysisMimeTypes.includes(input.mimeType)) throw new ImageProcessingInputError(final ? "结果图像媒体类型不支持" : analysis ? "分析图像媒体类型不支持" : "保护蒙版仅接受PNG", 415);
-    const sourceSize = mask ? frozenDecodedSource(initial.payload) : undefined;
+    const sourceSize = kind === "mask" ? frozenDecodedSource(initial.payload) : undefined;
     const directory = await mkdtemp(join(tmpdir(), "vozeb-image-processing-output-"));
     const filename = join(directory, kind);
     try {
@@ -942,11 +967,16 @@ export async function writeImageProcessingOutput(
         if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0 || (analysis && Math.max(width, height) > ECOMMERCE_VISION_IMAGE_MAX_DIMENSION) || (final && width * height > 40_000_000))
             throw new ImageProcessingInputError(final ? "结果图像尺寸无效或超过40MP" : analysis ? "分析图像尺寸无效或超过2048" : "蒙版尺寸无效", 400);
         if (sourceSize && (width !== sourceSize.width || height !== sourceSize.height)) throw new ImageProcessingInputError("蒙版尺寸必须与冻结源尺寸一致", 400);
+        if (generation && (generationReference || generationMask)) {
+            const source = frozenDecodedSource(initial.payload);
+            if (width > generation.bounds.width || height > generation.bounds.height || width > source.width || height > source.height || (generationReference && !["image/png", "image/jpeg"].includes(mimeType)))
+                throw new ImageProcessingInputError("生成输入超出冻结请求边界或格式不支持", 400);
+        }
         // Mask and final files have no encoded-size cap derived from raw memory. This
         // boundary is the exact byte count of this closed, hashed file.
         const stored = await writeReferenceMediaFile(filename, "image", mimeType, false, {
             ownerUserId: initial.userId,
-            source: final ? "image-processing-final" : analysis ? "image-processing-analysis" : "image-processing-mask",
+            source: final ? "image-processing-final" : analysis ? "image-processing-analysis" : generationReference ? "image-processing-generation-reference" : "image-processing-mask",
             runId: initial.runId,
             taskId: id,
             maxBytes: analysis ? ECOMMERCE_VISION_IMAGE_MAX_BYTES : bytes,
@@ -978,7 +1008,11 @@ export async function writeImageProcessingOutput(
                     if (!active.rows[0]) throw new ImageProcessingInputError("图像阶段执行身份或租约已失效", 409);
                     return previous;
                 }
-                const staged: ImageProcessingStoredResult = { executionId: identity.executionId, artifacts: [artifact], ...(current.resultPayload?.checkpoints ? { checkpoints: current.resultPayload.checkpoints } : {}) };
+                const staged: ImageProcessingStoredResult = {
+                    executionId: identity.executionId,
+                    artifacts: [...imageProcessingFinalArtifacts(current, identity.executionId), artifact],
+                    ...(current.resultPayload?.checkpoints ? { checkpoints: current.resultPayload.checkpoints } : {}),
+                };
                 const updated = await executor.query(
                     "UPDATE generation_tasks SET result_payload = $4::jsonb, updated_at = statement_timestamp() WHERE id = $1 AND task_type = 'image_processing' AND status = 'running' AND worker_id = $2 AND payload ->> 'executionId' = $3 AND lease_until > statement_timestamp() AND expires_at > statement_timestamp() RETURNING id",
                     [id, identity.workerId, identity.executionId, JSON.stringify(staged)],
@@ -999,7 +1033,15 @@ export async function writeImageProcessingOutput(
             return {
                 tasks: records.map((task) =>
                     task === record
-                        ? { ...task, updatedAt: Date.now(), resultPayload: { executionId: identity.executionId, artifacts: [artifact], ...(current.resultPayload?.checkpoints ? { checkpoints: current.resultPayload.checkpoints } : {}) } }
+                        ? {
+                              ...task,
+                              updatedAt: Date.now(),
+                              resultPayload: {
+                                  executionId: identity.executionId,
+                                  artifacts: [...imageProcessingFinalArtifacts(current, identity.executionId), artifact],
+                                  ...(current.resultPayload?.checkpoints ? { checkpoints: current.resultPayload.checkpoints } : {}),
+                              },
+                          }
                         : task,
                 ),
                 result: artifact,
@@ -1777,7 +1819,7 @@ export async function completeImageProcessingTask(id: string, input: CompleteIma
             assertCurrentImageProcessingStage(current, input);
             if (current.runId !== initial.runId || current.userId !== parent.user_id || parent.expires_at.getTime() <= current.now) throw new ImageProcessingInputError("父子阶段归属已失效", 409);
             assertImageProcessingCompletion(current, input);
-            await assertImageProcessingOutputRegistration(current, input.manifest.artifacts[0], executor);
+            for (const artifact of input.manifest.artifacts) await assertImageProcessingOutputRegistration(current, artifact, executor);
             await assertImageProcessingFrozenSource(current, executor);
             const nextParent = await mergeCompletedImageProcessingParent(parent.payload, current, input.manifest, (jobId) => readImageProcessingStage(jobId, executor));
             const resultPayload = { ...completedImageProcessingPayload(input, Boolean(nextParent)), ...(current.resultPayload?.checkpoints ? { checkpoints: current.resultPayload.checkpoints } : {}) };
@@ -1811,7 +1853,7 @@ export async function completeImageProcessingTask(id: string, input: CompleteIma
             assertCurrentImageProcessingStage(current, input);
             if (current.runId !== initial.runId || current.userId !== parentRecord.userId || parentRecord.expiresAt <= current.now) throw new ImageProcessingInputError("父子阶段归属已失效", 409);
             assertImageProcessingCompletion(current, input);
-            await assertImageProcessingOutputRegistration(current, input.manifest.artifacts[0]);
+            for (const artifact of input.manifest.artifacts) await assertImageProcessingOutputRegistration(current, artifact);
             await assertImageProcessingFrozenSource(current);
             const nextParent = await mergeCompletedImageProcessingParent(parentRecord.payload as AgentRun, current, input.manifest, async (jobId) => {
                 const task = records.find((record) => record.type === "image_processing" && record.id === jobId);
@@ -2139,6 +2181,7 @@ function assertResultAuxiliaryRegistrations(stage: ImageProcessingStageState, re
 export function assertResultModeEvidence(options: ImageProcessingResultOptions, manifest: ImageProcessingManifest, result: Extract<ImageProcessingResultBinding, { finalArtifactIndex: number }>, artifact: StoredImageProcessingArtifact) {
     const native = manifest.sourceIdentities[result.nativeInputIndex];
     if (native.decodeError || !native.nativeImage) throw new ImageProcessingInputError("结果缺少实际原件事实", 400);
+    if (result.finalImage && (typeof result.finalImage.hasAlpha !== "boolean" || `image/${result.finalImage.format}` !== artifact.mimeType)) throw new ImageProcessingInputError("最终成图格式或透明事实不符", 400);
     if (options.mode === "ordinary" || options.mode === "layers") {
         if (result.baselineValidated !== undefined || result.sceneProtectionEvidence !== undefined || result.productEnhancementEvidence !== undefined) throw new ImageProcessingInputError("普通或分层结果不接受保护证据", 400);
         if (options.mode === "layers") {
@@ -2377,20 +2420,21 @@ function assertProtectionCompletion(stage: ImageProcessingStageState, input: Com
         source.width !== size.width ||
         source.height !== size.height ||
         manifest.results !== undefined ||
-        manifest.artifacts.length !== 1 ||
+        manifest.artifacts.length !== (!("mode" in options) && options.generationInput ? 3 : 1) ||
         !mask ||
         mask.kind !== "mask" ||
         mask.mimeType !== "image/png" ||
         mask.width !== size.width ||
         mask.height !== size.height ||
         !staged ||
-        staged.length !== 1 ||
-        JSON.stringify(artifactIdentity(mask)) !== JSON.stringify(artifactIdentity(staged[0])) ||
+        staged.length !== manifest.artifacts.length ||
+        !manifest.artifacts.every((artifact, index) => isDeepStrictEqual(artifactIdentity(artifact), artifactIdentity(staged[index]))) ||
         !manifest.geometry.sourceSize ||
         manifest.geometry.sourceSize.width !== size.width ||
         manifest.geometry.sourceSize.height !== size.height
     )
         throw new ImageProcessingInputError("保护完成清单与冻结原件或本执行蒙版不符", 400);
+    if (!("mode" in options) && options.generationInput) assertGenerationInputArtifacts(manifest.artifacts, options.generationInput, size);
     const geometry = manifest.geometry;
     if (!("mode" in options)) {
         const product = geometry.productBounds;
@@ -2504,12 +2548,13 @@ function assertPrepareCompletion(stage: ImageProcessingStageState, input: Comple
         manifest.results !== undefined ||
         Object.keys(manifest.geometry).some((key) => key !== "sourceSize") ||
         manifest.artifacts.length !== 1 ||
-        manifest.artifacts[0].kind !== "analysis" ||
+        manifest.artifacts[0].kind !== (stage.payload.operation === "prepare_reference" && stage.payload.options.generationInput ? "generation_reference" : "analysis") ||
         !artifacts ||
         artifacts.length !== 1 ||
         JSON.stringify(artifactIdentity(manifest.artifacts[0])) !== JSON.stringify(artifactIdentity(artifacts[0]))
     )
         throw new ImageProcessingInputError("完成清单与本执行登记工件或原件身份不符", 400);
+    if (stage.payload.operation === "prepare_reference" && stage.payload.options.generationInput) assertGenerationReferenceArtifact(manifest.artifacts[0], stage.payload.options.generationInput, size);
 }
 
 export function imageProcessingManifestDigest(manifest: ImageProcessingManifest) {
@@ -2548,6 +2593,7 @@ export function imageProcessingManifestDigest(manifest: ImageProcessingManifest)
                         result.baselineValidated,
                         result.sceneProtectionEvidence && sceneProtectionEvidenceIdentity(result.sceneProtectionEvidence),
                         result.productEnhancementEvidence && productCompositionIdentity(result.productEnhancementEvidence),
+                        ...(result.finalImage ? [[result.finalImage.format, result.finalImage.hasAlpha]] : []),
                     ],
                 ]),
             ]),
@@ -2635,6 +2681,7 @@ export function hasOnlyCompletedEcommerceReferencePrepares(run: AgentRun, childr
         !checkpoint ||
         processing.waitingFor ||
         processing.protection ||
+        processing.generationReferences?.length ||
         !references.length ||
         references.length !== checkpoint.assets.length ||
         references.length !== children.length ||
@@ -2660,7 +2707,7 @@ function completedEcommerceReferencePrepare(run: AgentRun, jobId: string, child:
     const current = checkpoint.assets.find((item) => item.asset.id === reference.assetId);
     if (!child || child.type !== "image_processing" || child.status !== "success" || child.executionPhase !== "completed" || child.userId !== run.userId || child.runId !== run.id || !current?.contentSha256 || !reference.manifest) return;
     const payload = child.payload as AgentImageProcessingPayload;
-    if (payload.version !== "image-processing.v1" || payload.operation !== "prepare_reference" || payload.inputs.length !== 1 || payload.sources.length !== 1 || !payload.executionId) return;
+    if (payload.version !== "image-processing.v1" || payload.operation !== "prepare_reference" || Object.keys(payload.options).length !== 0 || payload.inputs.length !== 1 || payload.sources.length !== 1 || !payload.executionId) return;
     const input = payload.inputs[0];
     const encoded = payload.resource.facts.encodedInputs.find((fact) => fact.inputIndex === 0 && fact.assetId === input.assetId && fact.assetVersion === input.assetVersion);
     const result = child.resultPayload as ImageProcessingStoredResult | undefined;
@@ -2705,6 +2752,17 @@ function prepareSourceMatchesReference(item: EcommerceReferenceCheckpoint["asset
 }
 
 async function mergeCompletedImageProcessingParent(parent: AgentRun, stage: ImageProcessingStageState, manifest: ImageProcessingManifest, lookup: (jobId: string) => Promise<ImageProcessingStageState | undefined>): Promise<AgentRun | undefined> {
+    if (stage.payload.operation === "prepare_reference" && stage.payload.options.generationInput) {
+        const snapshot = parent.ecommerceSnapshot;
+        const processing = snapshot?.processing;
+        const reference = processing?.generationReferences?.find((item) => item.jobId === stage.id && item.inputDigest === stage.payload.inputDigest);
+        if (!snapshot || !processing || !reference || parent.cancellation || parent.status === "cancelled" || processing.waitingFor?.jobId !== stage.id || processing.waitingFor.inputDigest !== stage.payload.inputDigest) return;
+        return {
+            ...parent,
+            executionId: undefined,
+            ecommerceSnapshot: { ...snapshot, processing: { ...processing, generationReferences: processing.generationReferences!.map((item) => (item === reference ? { ...item, manifest } : item)), waitingFor: undefined } },
+        };
+    }
     if (stage.payload.operation !== "build_protection") return mergeCompletedPrepareParent(parent, stage, manifest, lookup);
     const snapshot = parent.ecommerceSnapshot;
     const processing = snapshot?.processing;
@@ -3095,16 +3153,16 @@ export async function enqueueImageProcessingTask(input: EnqueueImageProcessingIn
         const replay = await readPrepareReplay(run, input);
         if (replay) return replay;
         assertParentExecution(run, input);
-        prepared = await prepareReferenceInputs(run, input);
+        prepared = input.options.generationInput ? await completedProtectionInputs(run, input, readImageProcessingStage) : await prepareReferenceInputs(run, input);
     } else {
         prepared = await completedProtectionInputs(run, input, readImageProcessingStage);
-        const replay = await readProtectionReplay(run, input, prepared);
+        const replay = await readFrozenImageProcessingReplay(run, input, prepared);
         if (replay) return replay;
         assertParentExecution(run, input);
     }
     const { inputDigest, inputs, sources, facts } = prepared;
     const { profileVersion, ...configuration } = imageProcessingResourceConfig(process.env);
-    const operation: ImageProcessingOperation = input.operation === "prepare_reference" ? { operation: "prepare_reference", options: {} } : { operation: "build_protection", options: input.options };
+    const operation: ImageProcessingOperation = input.operation === "prepare_reference" ? { operation: "prepare_reference", options: input.options } : { operation: "build_protection", options: input.options };
     const estimate = estimateImageProcessingMemory({ ...operation, inputs }, facts);
     const admission = decideImageProcessingAdmission(estimate, { totalMemoryBytes: configuration.budgetBytes, availableMemoryBytes: configuration.budgetBytes, availableSlots: configuration.concurrency });
     const payload: AgentImageProcessingPayload = {
@@ -3161,7 +3219,7 @@ export async function enqueueImageProcessingTask(input: EnqueueImageProcessingIn
                     ],
                 );
             }
-            const next = waitingParent(parent.payload, payload, parent.server_now.getTime());
+            const next = waitingParent(parent.payload, payload, parent.server_now.getTime(), input.parentTaskId);
             await executor.query(
                 "UPDATE generation_tasks SET status = $2, payload = $3::jsonb, updated_at = $4, execution_phase = $5, next_poll_at = NULL, worker_id = NULL, lease_until = NULL, last_heartbeat_at = NULL, last_upstream_status = $6 WHERE id = $1 AND task_type = 'agent'",
                 [next.id, payload.resource.unavailable ? "paused" : "running", JSON.stringify(next), parent.server_now, payload.resource.unavailable ? "needs_review" : "created", payload.resource.unavailable?.code || "image_processing_waiting"],
@@ -3213,7 +3271,7 @@ export async function enqueueImageProcessingTask(input: EnqueueImageProcessingIn
             const updated: StoredGenerationTaskRecord = {
                 ...parent,
                 status: payload.resource.unavailable ? "paused" : "running",
-                payload: waitingParent(current, payload, now),
+                payload: waitingParent(current, payload, now, input.parentTaskId),
                 updatedAt: now,
                 executionPhase: payload.resource.unavailable ? "needs_review" : "created",
                 nextPollAt: undefined,
@@ -3548,7 +3606,7 @@ async function readCompletedEcommerceLocalProductProtection(run: AgentRun, conte
         plan.strategy !== "strict_product" ||
         !plan.source.productAnchorId ||
         plan.source.productAnchorId === plan.source.currentSceneBaselineId ||
-        plan.protection?.scope !== "local" ||
+        !plan.protection ||
         plan.protection.preserveOutsideMask ||
         !checkpoint ||
         checkpoint.state !== "resolved" ||
@@ -3560,7 +3618,7 @@ async function readCompletedEcommerceLocalProductProtection(run: AgentRun, conte
         reference.asset.height === undefined
     )
         throw new ImageProcessingInputError("局部商品保护缺少原计划、分析或参考身份", 409);
-    const analysis = toLegacyEcommerceVisualAnalysis(rawAnalysis);
+    const analysis = toLegacyEcommerceVisualAnalysis(rawAnalysis, plan.source.currentSceneBaselineId);
     const anchors = analysis.references.filter((item) => item.assetId === plan.source.productAnchorId);
     const scenes = analysis.references.filter((item) => item.assetId === reference.asset.id);
     if (anchors.length !== 1 || anchors[0].role !== "product" || scenes.length !== 1 || scenes[0].role !== "scene") throw new ImageProcessingInputError("局部商品原分析与商品锚或场景角色不符", 409);
@@ -3690,7 +3748,7 @@ async function readCompletedEcommerceLocalProductProtection(run: AgentRun, conte
         isLocalMediaRegistrationExpired(maskRegistration, now)
     )
         throw new ImageProcessingInputError("局部商品原蒙版登记已变化或失效", 409);
-    return { stage, source, mask, sourceRegistration, maskRegistration, regions, execution, reference, references };
+    return { stage, source, mask, sourceRegistration, maskRegistration, regions, execution, reference, references, manifest };
 }
 
 export async function readCompletedEcommerceProductProtection(run: AgentRun, context?: SceneProtectionReadContext) {
@@ -3717,7 +3775,7 @@ export async function readCompletedEcommerceProductProtection(run: AgentRun, con
         reference.asset.height === undefined
     )
         throw new ImageProcessingInputError("商品保护缺少原计划、分析或已冻结参考", 409);
-    const analysis = toLegacyEcommerceVisualAnalysis(rawAnalysis);
+    const analysis = toLegacyEcommerceVisualAnalysis(rawAnalysis, plan.source.currentSceneBaselineId);
     const profile = resolveEcommerceImageProviderProfile(route);
     if (!profile) throw new ImageProcessingInputError("已保存的商品模型不支持电商编译器", 409);
     const execution = compileEcommerceImageRequest(plan, profile);
@@ -3727,7 +3785,9 @@ export async function readCompletedEcommerceProductProtection(run: AgentRun, con
     const detailAnchorAllowed = product?.confidence === "medium" && product.visualEvidence.isolatedSubject && (product.visualEvidence.whiteBackground || product.visualEvidence.transparentBackground);
     if (!product || (!detailAnchorAllowed && product.confidence !== "high") || !product.visualEvidence.isolatedSubject || (!product.visualEvidence.whiteBackground && !product.visualEvidence.transparentBackground))
         throw new ImageProcessingInputError("商品图不是高置信度白色或透明背景单主体", 409);
-    const options = { transparentBackground: product.visualEvidence.transparentBackground };
+    const generationInput = snapshot.processing?.protection?.generationInput;
+    if (generationInput) execution.generationInput = generationInput;
+    const options = { transparentBackground: product.visualEvidence.transparentBackground, ...(plan.preserve.sourceFraming ? { sourceFraming: plan.preserve.sourceFraming } : {}), ...(generationInput ? { generationInput } : {}) };
     const stage = await readCompletedEcommerceSceneProtectionTask(
         run,
         {
@@ -3780,7 +3840,7 @@ export async function readCompletedEcommerceProductProtection(run: AgentRun, con
         !sourceSize ||
         sourceSize.width !== source.width ||
         sourceSize.height !== source.height ||
-        manifest.artifacts.length !== 1 ||
+        manifest.artifacts.length !== (!("mode" in options) && options.generationInput ? 3 : 1) ||
         !mask ||
         mask.kind !== "mask" ||
         mask.mimeType !== "image/png" ||
@@ -3790,6 +3850,7 @@ export async function readCompletedEcommerceProductProtection(run: AgentRun, con
         !haloBounds
     )
         throw new ImageProcessingInputError("商品保护产物与原prepare、build或参考不一致", 409);
+    if (generationInput) assertGenerationInputArtifacts(manifest.artifacts, generationInput, source);
     const regions = buildProductProtectionRegions(
         {
             ...analysis,
@@ -3845,7 +3906,301 @@ export async function readCompletedEcommerceProductProtection(run: AgentRun, con
         isLocalMediaRegistrationExpired(maskRegistration, now)
     )
         throw new ImageProcessingInputError("商品保护原蒙版登记已变化或失效", 409);
-    return { stage, source, mask, sourceRegistration, maskRegistration, regions, execution, reference, references: [{ source, registration: sourceRegistration }] };
+    return { stage, source, mask, sourceRegistration, maskRegistration, regions, execution, reference, references: [{ source, registration: sourceRegistration }], manifest };
+}
+
+function generationReferencePlanDigest(run: AgentRun) {
+    const snapshot = run.ecommerceSnapshot;
+    return createHash("sha256")
+        .update(
+            JSON.stringify(
+                canonicalImageTaskResultValue([
+                    snapshot?.plan,
+                    snapshot?.compilerVersion,
+                    snapshot?.modelRouteSnapshots?.image_generation,
+                    snapshot?.referenceCheckpoint?.inputId,
+                    snapshot?.referenceCheckpoint?.decisionId,
+                    snapshot?.referenceCheckpoint?.analysisStage.requestId,
+                ]),
+            ),
+        )
+        .digest("hex");
+}
+
+function assertGenerationReferenceRequest(run: AgentRun, input: Extract<ImageProcessingFrozenInput, { operation: "prepare_reference" }>) {
+    const snapshot = run.ecommerceSnapshot;
+    const plan = snapshot?.plan;
+    const checkpoint = snapshot?.referenceCheckpoint;
+    const route = snapshot?.modelRouteSnapshots?.image_generation;
+    const profile = route && resolveEcommerceImageProviderProfile(route);
+    const generation = input.options.generationInput;
+    const execution = plan && profile && compileEcommerceImageRequest(plan, profile);
+    const expectedParent = plan?.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene";
+    const previous = snapshot?.processing?.generationReferences?.find((item) => item.parentTaskId === input.parentTaskId && item.assetId === input.inputs[0].assetId);
+    if (
+        !snapshot ||
+        snapshot.mode !== "active" ||
+        !plan ||
+        !["local_edit", "product_to_scene"].includes(plan.operation) ||
+        !checkpoint ||
+        checkpoint.state !== "resolved" ||
+        checkpoint.analysisStage.state !== "completed" ||
+        !execution ||
+        execution.state !== "ready" ||
+        execution.compilerVersion !== snapshot.compilerVersion ||
+        route?.imageEdit?.protocol !== "sub2api" ||
+        !generation ||
+        input.parentTaskId !== expectedParent ||
+        !execution.referenceRoles.slice(1).some((role) => role.assetId === input.inputs[0].assetId) ||
+        run.cancellation ||
+        !["running", "paused"].includes(run.status) ||
+        run.tasks.some((task) => task.attempts || task.taskId || task.taskIds?.length || task.childTasks?.length)
+    )
+        throw new ImageProcessingInputError("生成参考缺少原计划、已分析引用或提交前的父任务身份", 409);
+    const requestSize = parseImageDimensions(resolveEcommerceCanvasRequestSize(execution.canvas, normalizeQuality(generation.quality), `${generation.bounds.width}x${generation.bounds.height}`) || "");
+    if (!isDeepStrictEqual(requestSize, generation.bounds) || (previous && (!isDeepStrictEqual(previous.generationInput, generation) || previous.planDigest !== generationReferencePlanDigest(run))))
+        throw new ImageProcessingInputError("生成参考与冻结画布、画质或计划不一致", 409);
+}
+
+function assertGenerationReferenceArtifact(reference: StoredImageProcessingArtifact, input: ImageProcessingGenerationInput, source: { width: number; height: number }) {
+    const scale = Math.min(1, input.bounds.width / source.width, input.bounds.height / source.height);
+    if (reference.kind !== "generation_reference" || !["image/jpeg", "image/png"].includes(reference.mimeType) || reference.width !== Math.round(source.width * scale) || reference.height !== Math.round(source.height * scale))
+        throw new ImageProcessingInputError("生成参考副本与冻结原件或画布不一致", 409);
+}
+
+export async function prepareEcommerceGenerationReferences(run: AgentRun, executionId: string, execution: ReturnType<typeof compileEcommerceImageRequest>, defaults: { imageQuality: string; imageSize: string }) {
+    const snapshot = run.ecommerceSnapshot!;
+    if (execution.modelSnapshot.imageEdit?.protocol !== "sub2api") return true;
+    const previous = snapshot.processing?.generationReferences?.[0]?.generationInput || execution.generationInput;
+    const quality = previous?.quality || (run.generationPreferences?.image?.quality || defaults.imageQuality).trim();
+    const bounds = previous?.bounds || parseImageDimensions(resolveEcommerceCanvasRequestSize(execution.canvas, normalizeQuality(quality), defaults.imageSize) || "");
+    if (!bounds) return true;
+    const parentTaskId = snapshot.plan?.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene";
+    for (const role of execution.referenceRoles.slice(1)) {
+        const reference = snapshot.referenceCheckpoint!.assets.find((item) => item.asset.id === role.assetId)!;
+        if (reference.asset.width! <= bounds.width && reference.asset.height! <= bounds.height) continue;
+        const stage = await enqueueImageProcessingTask({
+            runId: run.id,
+            parentExecutionId: executionId,
+            parentTaskId,
+            operation: "prepare_reference",
+            algorithmVersion: "generation-reference.v1",
+            inputs: [{ assetId: reference.asset.id, assetVersion: reference.assetVersion, expectedSha256: reference.contentSha256 }],
+            options: { generationInput: { bounds, quality } },
+        });
+        if (stage.status !== "success") return false;
+    }
+    return true;
+}
+
+function assertGenerationInputArtifacts(artifacts: StoredImageProcessingArtifact[], input: ImageProcessingGenerationInput, source: { width: number; height: number }) {
+    const [mask, reference, generationMask] = artifacts;
+    const scale = Math.min(1, input.bounds.width / source.width, input.bounds.height / source.height);
+    if (
+        artifacts.length !== 3 ||
+        mask.kind !== "mask" ||
+        reference.kind !== "generation_reference" ||
+        generationMask.kind !== "generation_mask" ||
+        !["image/jpeg", "image/png"].includes(reference.mimeType) ||
+        generationMask.mimeType !== "image/png" ||
+        reference.width !== Math.round(source.width * scale) ||
+        reference.height !== Math.round(source.height * scale) ||
+        generationMask.width !== reference.width ||
+        generationMask.height !== reference.height
+    )
+        throw new ImageProcessingInputError("生成输入副本与冻结原件、蒙版或画布不一致", 409);
+    return { reference, mask: generationMask };
+}
+
+export async function readEcommerceGenerationInput(image: ImageTask, quality: string | undefined, requestSize: string | undefined) {
+    const primaryInput = image.ecommerceExecution?.generationInput;
+    if (!image.ecommerceExecution || !image.runId) throw new ImageProcessingInputError("生成输入副本缺少冻结执行身份", 409);
+    const run = await getStoredGenerationTask<AgentRun>("agent", image.runId);
+    const original = await getStoredGenerationTask<ImageTask>("image", image.id);
+    if (!run || run.userId !== image.userId || run.status !== "running" || run.cancellation || !original || image.references.length !== original.references.length) throw new ImageProcessingInputError("生成输入副本与当前图片任务或父任务不一致", 409);
+    // The runtime verifies source hashes before replacing only these transport fields.
+    const sourceImage = {
+        ...image,
+        references: image.references.map((reference, index) => ({
+            ...reference,
+            dataUrl: original.references[index].dataUrl,
+            url: original.references[index].url,
+            serverUrl: original.references[index].serverUrl,
+            remoteUrl: original.references[index].remoteUrl,
+        })),
+    };
+    if (imageTaskResultSourceIdentityDigest(original) !== imageTaskResultSourceIdentityDigest(sourceImage)) throw new ImageProcessingInputError("生成输入副本与当前图片任务或父任务不一致", 409);
+    const completed = await readCompletedEcommerceProductProtection(run);
+    const frozen = primaryInput || run.ecommerceSnapshot?.processing?.generationReferences?.[0]?.generationInput;
+    const bounds = parseImageDimensions(requestSize || "");
+    const task = run.tasks.find((item) => item.id === completed.stage.parentTaskId);
+    assertGenerationImageExecution(image, original, run, completed.stage.parentTaskId);
+    if (
+        !task ||
+        !isDeepStrictEqual(task.ecommerceExecution, image.ecommerceExecution) ||
+        !isDeepStrictEqual(completed.execution, image.ecommerceExecution) ||
+        !isDeepStrictEqual(task.productProtectionRegions, completed.regions) ||
+        !isDeepStrictEqual(image.mask, completed.regions.editableBackground.mask?.reference) ||
+        !bounds ||
+        (frozen && (quality !== normalizeQuality(frozen.quality) || !isDeepStrictEqual(bounds, frozen.bounds))) ||
+        image.references.length !== completed.execution.referenceRoles.length ||
+        !image.references.every((reference, index) => {
+            const role = completed.execution.referenceRoles[index];
+            const originalReference = run.ecommerceSnapshot?.referenceCheckpoint?.assets.find((item) => item.asset.id === role.assetId);
+            return (
+                originalReference &&
+                reference.id === role.assetId &&
+                reference.ecommerceRole === role.role &&
+                originalImageSourceUrl(imageTaskResultReferenceUrl(original.references[index])) === originalImageSourceUrl(assetAccessUrl(originalReference.asset) || "")
+            );
+        })
+    )
+        throw new ImageProcessingInputError("生成输入副本与原计划、参考或实际请求不一致", 409);
+    const reference = (original: ImageTask["references"][number], artifact: StoredImageProcessingArtifact) => ({
+        ...original,
+        dataUrl: "",
+        url: undefined,
+        remoteUrl: undefined,
+        serverUrl: "/api/reference-assets/" + artifact.storageKey.split("/").map(encodeURIComponent).join("/"),
+        width: artifact.width,
+        height: artifact.height,
+        type: artifact.mimeType,
+    });
+    const registeredArtifact = async (artifact: StoredImageProcessingArtifact, jobId: string) => {
+        const registration = await getLocalMediaRegistration(artifact.storageKey);
+        if (
+            !registration ||
+            registration.ownerUserId !== image.userId ||
+            registration.type !== "image" ||
+            registration.scope !== "reference" ||
+            registration.source !== (artifact.kind === "generation_reference" ? "image-processing-generation-reference" : "image-processing-mask") ||
+            registration.runId !== run.id ||
+            registration.taskId !== jobId ||
+            isLocalMediaRegistrationExpired(registration, Date.now())
+        )
+            throw new ImageProcessingInputError("生成输入副本登记已失效或归属不符", 409);
+        await readImageProcessingMediaFacts(registration, artifact);
+    };
+    const references = [...image.references];
+    const referenceBytes: Array<number | undefined> = references.map(() => undefined);
+    let maskBytes: number | undefined;
+    let mask = image.mask;
+    if (primaryInput) {
+        const pair = assertGenerationInputArtifacts(completed.manifest.artifacts, primaryInput, completed.source);
+        await registeredArtifact(pair.reference, completed.stage.id);
+        await registeredArtifact(pair.mask, completed.stage.id);
+        references[0] = reference(image.references[0], pair.reference);
+        referenceBytes[0] = pair.reference.bytes;
+        maskBytes = pair.mask.bytes;
+        mask = reference(image.mask!, pair.mask);
+    }
+    for (const [index, role] of completed.execution.referenceRoles.entries()) {
+        const asset = run.ecommerceSnapshot!.referenceCheckpoint!.assets.find((item) => item.asset.id === role.assetId)!;
+        if (asset.asset.width! <= bounds.width && asset.asset.height! <= bounds.height) continue;
+        if (index === 0) {
+            if (!primaryInput) throw new ImageProcessingInputError("主参考超出请求画布且缺少配套生成蒙版", 409);
+            continue;
+        }
+        const generation = { bounds, quality: frozen?.quality || quality || "auto" };
+        const input: Extract<ImageProcessingFrozenInput, { operation: "prepare_reference" }> = {
+            runId: run.id,
+            parentTaskId: completed.stage.parentTaskId,
+            operation: "prepare_reference",
+            algorithmVersion: "generation-reference.v1",
+            inputs: [{ assetId: asset.asset.id, assetVersion: asset.assetVersion, expectedSha256: asset.contentSha256 }],
+            options: { generationInput: generation },
+        };
+        const prepared = await completedProtectionInputs(run, input, readImageProcessingStage);
+        const mapping = run.ecommerceSnapshot?.processing?.generationReferences?.find(
+            (item) =>
+                item.parentTaskId === input.parentTaskId &&
+                item.assetId === role.assetId &&
+                item.assetVersion === asset.assetVersion &&
+                item.inputDigest === prepared.inputDigest &&
+                item.jobId === `image-process-${prepared.inputDigest}` &&
+                item.planDigest === generationReferencePlanDigest(run) &&
+                isDeepStrictEqual(item.generationInput, generation),
+        );
+        const saved = mapping && (await readImageProcessingStage(mapping.jobId));
+        const manifest = saved?.resultPayload?.manifest;
+        const source = manifest?.sourceIdentities[0];
+        if (
+            !mapping?.manifest ||
+            !saved ||
+            saved.status !== "success" ||
+            saved.executionPhase !== "completed" ||
+            saved.userId !== run.userId ||
+            saved.runId !== run.id ||
+            saved.parentTaskId !== input.parentTaskId ||
+            saved.expiresAt <= saved.now ||
+            saved.payload.operation !== "prepare_reference" ||
+            !isDeepStrictEqual(saved.payload.options, input.options) ||
+            !manifest ||
+            !source ||
+            source.decodeError ||
+            manifest.jobId !== saved.id ||
+            manifest.executionId !== saved.payload.executionId ||
+            saved.resultPayload?.executionId !== saved.payload.executionId ||
+            saved.resultPayload.manifestDigest !== imageProcessingManifestDigest(manifest) ||
+            imageProcessingManifestDigest(manifest) !== imageProcessingManifestDigest(mapping.manifest) ||
+            manifest.sourceIdentities.length !== 1 ||
+            manifest.artifacts.length !== 1 ||
+            source.assetId !== asset.asset.id ||
+            source.assetVersion !== asset.assetVersion ||
+            source.sha256 !== asset.contentSha256 ||
+            source.bytes !== prepared.facts.encodedInputs[0].bytes ||
+            source.width !== asset.asset.width ||
+            source.height !== asset.asset.height ||
+            enqueueInputsIdentity(prepared) !== enqueueInputsIdentity({ sources: saved.payload.sources, facts: saved.payload.resource.facts })
+        )
+            throw new ImageProcessingInputError("生成参考缺少与原任务匹配的完成工件", 409);
+        assertSameStage(saved.payload, { ...saved.payload, ...input, inputDigest: prepared.inputDigest, inputs: prepared.inputs });
+        const artifact = manifest.artifacts[0];
+        assertGenerationReferenceArtifact(artifact, generation, source);
+        const originalRegistration = await getLocalMediaRegistration(prepared.sources[0].storageKey);
+        assertRegistration(originalRegistration, prepared.sources[0], run.userId);
+        await readImageProcessingMediaFacts(originalRegistration, source);
+        await registeredArtifact(artifact, saved.id);
+        references[index] = reference(image.references[index], artifact);
+        referenceBytes[index] = artifact.bytes;
+    }
+    const currentRun = await getStoredGenerationTask<AgentRun>("agent", run.id);
+    const currentImage = await getStoredGenerationTask<ImageTask>("image", image.id);
+    if (!currentRun || generationReferencePlanDigest(currentRun) !== generationReferencePlanDigest(run) || !currentImage || imageTaskResultSourceIdentityDigest(currentImage) !== imageTaskResultSourceIdentityDigest(original))
+        throw new ImageProcessingInputError("生成输入读取期间原任务或计划已变化", 409);
+    assertGenerationImageExecution(image, currentImage, currentRun, completed.stage.parentTaskId);
+    return { references, mask, referenceBytes, maskBytes };
+}
+
+function assertGenerationImageExecution(image: ImageTask, current: ImageTask, run: AgentRun, logicalParentId: string | undefined) {
+    const task = run.tasks.find((item) => item.id === logicalParentId);
+    const checkpoint = run.ecommerceSnapshot?.referenceCheckpoint;
+    const fence = image.referenceDispatch;
+    if (
+        current.id !== image.id ||
+        current.userId !== image.userId ||
+        current.runId !== run.id ||
+        current.conversationId !== run.conversationId ||
+        current.status !== image.status ||
+        !["pending", "running"].includes(current.status) ||
+        current.executionId !== image.executionId ||
+        current.attemptNo !== image.attemptNo ||
+        current.clientRequestId !== image.clientRequestId ||
+        !isDeepStrictEqual(current.referenceDispatch, fence) ||
+        run.cancellation ||
+        run.status !== "running" ||
+        !task ||
+        task.status !== "running" ||
+        !isDeepStrictEqual(task.ecommerceExecution, image.ecommerceExecution) ||
+        !fence ||
+        fence.copy < 1 ||
+        fence.copy > task.count ||
+        fence.inputId !== checkpoint?.inputId ||
+        fence.decisionId !== checkpoint.decisionId ||
+        fence.analysisRequestId !== checkpoint.analysisStage.requestId ||
+        image.clientRequestId !== `${run.clientRequestId}:${task.id}:${task.attempts}:${fence.copy}`
+    )
+        throw new ImageProcessingInputError("生成输入副本的当前图片执行身份已失效", 409);
 }
 
 export async function readCompletedEcommerceSceneProtectionTask(run: AgentRun, input: Extract<ImageProcessingFrozenInput, { operation: "build_protection" }>, context?: SceneProtectionReadContext): Promise<ImageProcessingTask | undefined> {
@@ -3856,12 +4211,12 @@ export async function readCompletedEcommerceSceneProtectionTask(run: AgentRun, i
           }
         : readImageProcessingStage;
     const prepared = await completedProtectionInputs(run, input, lookup, undefined, context?.registrations, context?.now, context?.completedResult);
-    return readProtectionReplay(run, input, prepared, context?.records);
+    return readFrozenImageProcessingReplay(run, input, prepared, context?.records);
 }
 
 async function completedProtectionInputs(
     run: AgentRun,
-    input: Extract<ImageProcessingFrozenInput, { operation: "build_protection" }>,
+    input: Extract<ImageProcessingFrozenInput, { operation: "build_protection" | "prepare_reference" }>,
     lookup: (jobId: string) => Promise<ImageProcessingStageState | undefined>,
     executor?: QueryExecutor,
     registrations?: LocalMediaRegistration[],
@@ -3887,6 +4242,7 @@ async function completedProtectionInputs(
         prepared.runId !== run.id ||
         !payload ||
         payload.operation !== "prepare_reference" ||
+        Object.keys(payload.options).length !== 0 ||
         payload.version !== "image-processing.v1" ||
         payload.inputs.length !== 1 ||
         payload.sources.length !== 1 ||
@@ -3900,6 +4256,8 @@ async function completedProtectionInputs(
         manifest.executionId !== payload.executionId ||
         result.executionId !== payload.executionId ||
         manifest.sourceIdentities.length !== 1 ||
+        manifest.artifacts.length !== 1 ||
+        manifest.artifacts[0].kind !== "analysis" ||
         result.manifestDigest !== imageProcessingManifestDigest(manifest) ||
         imageProcessingManifestDigest(manifest) !== imageProcessingManifestDigest(reference.manifest) ||
         !original ||
@@ -3920,7 +4278,7 @@ async function completedProtectionInputs(
     // The old prepare keeps v0. Only this new stage maps its proven bytes and
     // completed decode dimensions onto the parent's current v1 identity.
     return {
-        inputDigest: protectionInputDigest(run, input, inputs),
+        inputDigest: input.operation === "prepare_reference" ? prepareInputDigest(run, input, identity.sha256) : protectionInputDigest(run, input, inputs),
         inputs,
         sources: payload.sources,
         facts: {
@@ -3931,7 +4289,14 @@ async function completedProtectionInputs(
 }
 
 function protectionOptionsIdentity(options: ImageProcessingProtectionOptions) {
-    if (!("mode" in options)) return ["white", options.transparentBackground, Boolean(options.freezeEnhancementBaseline)];
+    if (!("mode" in options))
+        return [
+            "white",
+            options.transparentBackground,
+            Boolean(options.freezeEnhancementBaseline),
+            ...(options.sourceFraming ? [options.sourceFraming] : []),
+            ...(options.generationInput ? [[options.generationInput.bounds.width, options.generationInput.bounds.height, options.generationInput.quality]] : []),
+        ];
     if (options.mode === "scene_selection") return [options.mode, rectangleIdentity(options.region), options.semantics, options.selectionSource, Boolean(options.freezeEnhancementBaseline)];
     const baseline = options.freezeEnhancementBaseline;
     return [options.mode, rectangleIdentity(options.targetRegion), options.protectedRectangles.map(rectangleIdentity), baseline ? [baseline.productAnchorId, baseline.productCore.map(rectangleIdentity)] : null];
@@ -3955,29 +4320,53 @@ function enqueueInputsIdentity(inputs: Pick<ImageProcessingEnqueueInputs, "facts
     ]);
 }
 
-async function readProtectionReplay(run: AgentRun, input: Extract<ImageProcessingFrozenInput, { operation: "build_protection" }>, prepared: ImageProcessingEnqueueInputs, records?: StoredGenerationTaskRecord[]): Promise<ImageProcessingTask | undefined> {
+async function readFrozenImageProcessingReplay(
+    run: AgentRun,
+    input: Extract<ImageProcessingFrozenInput, { operation: "build_protection" | "prepare_reference" }>,
+    prepared: ImageProcessingEnqueueInputs,
+    records?: StoredGenerationTaskRecord[],
+): Promise<ImageProcessingTask | undefined> {
     const stored = records ? records.find((item) => item.type === "image_processing" && item.id === `image-process-${prepared.inputDigest}`) : await getStoredGenerationTaskRecord("image_processing", `image-process-${prepared.inputDigest}`);
     if (!stored) return;
     if (stored.userId !== run.userId || stored.runId !== run.id || stored.clientRequestId !== prepared.inputDigest || stored.attemptNo !== 0) throw new ImageProcessingInputError("保护阶段归属或请求身份冲突", 409);
     const payload = stored.payload as AgentImageProcessingPayload;
-    assertSameStage(payload, { ...payload, operation: "build_protection", algorithmVersion: input.algorithmVersion, inputDigest: prepared.inputDigest, inputs: prepared.inputs, options: input.options });
+    assertSameStage(payload, { ...payload, ...input, inputDigest: prepared.inputDigest, inputs: prepared.inputs });
     if (enqueueInputsIdentity({ sources: payload.sources, facts: payload.resource.facts }) !== enqueueInputsIdentity(prepared)) throw new ImageProcessingInputError("保护阶段原件事实冲突", 409);
     return { ...stored, type: "image_processing", payload };
 }
 
 async function recheckEnqueueInputs(run: AgentRun, input: EnqueueImageProcessingInput, payload: AgentImageProcessingPayload, lookup: (jobId: string) => Promise<ImageProcessingStageState | undefined>, executor?: QueryExecutor) {
-    if (input.operation !== "build_protection") return recheckFrozenReference(run, input, payload.sources[0], executor);
+    if (input.operation === "prepare_reference" && input.options.generationInput) assertGenerationReferenceRequest(run, input);
+    else if (input.operation !== "build_protection") return recheckFrozenReference(run, input, payload.sources[0], executor);
     const current = await completedProtectionInputs(run, input, lookup, executor);
     if (current.inputDigest !== payload.inputDigest || enqueueInputsIdentity(current) !== enqueueInputsIdentity({ sources: payload.sources, facts: payload.resource.facts })) throw new ImageProcessingInputError("保护阶段原件完成证据已变化", 409);
 }
 
-function prepareInputDigest(run: Pick<AgentRun, "userId" | "id">, input: ImageProcessingFrozenInput, expectedSha256?: string) {
+function prepareInputDigest(run: AgentRun, input: ImageProcessingFrozenInput, expectedSha256?: string) {
     return createHash("sha256")
-        .update(JSON.stringify([run.userId, run.id, input.parentTaskId || "", input.operation, input.algorithmVersion, [[input.inputs[0].assetId, input.inputs[0].assetVersion, expectedSha256 || ""]], []]))
+        .update(
+            JSON.stringify([
+                run.userId,
+                run.id,
+                input.parentTaskId || "",
+                input.operation,
+                input.algorithmVersion,
+                [[input.inputs[0].assetId, input.inputs[0].assetVersion, expectedSha256 || ""]],
+                input.operation === "prepare_reference" && input.options.generationInput
+                    ? [input.options.generationInput.bounds.width, input.options.generationInput.bounds.height, input.options.generationInput.quality, generationReferencePlanDigest(run)]
+                    : [],
+            ]),
+        )
         .digest("hex");
 }
 
 async function readPrepareReplay(run: AgentRun, input: EnqueueImageProcessingInput): Promise<ImageProcessingTask | undefined> {
+    if (input.operation === "prepare_reference" && input.options.generationInput) {
+        assertGenerationReferenceRequest(run, input);
+        const prepared = await completedProtectionInputs(run, input, readImageProcessingStage);
+        const reference = run.ecommerceSnapshot?.processing?.generationReferences?.find((item) => item.inputDigest === prepared.inputDigest && item.jobId === `image-process-${prepared.inputDigest}`);
+        return reference ? readFrozenImageProcessingReplay(run, input, prepared) : undefined;
+    }
     const requested = input.inputs[0];
     const references = run.ecommerceSnapshot?.processing?.prepareReferences || [];
     for (const reference of references) {
@@ -3985,7 +4374,7 @@ async function readPrepareReplay(run: AgentRun, input: EnqueueImageProcessingInp
         const stored = await getStoredGenerationTaskRecord("image_processing", reference.jobId);
         if (!stored || stored.userId !== run.userId || stored.runId !== run.id) throw new ImageProcessingInputError("原参考处理阶段归属已失效", 409);
         const payload = stored.payload as AgentImageProcessingPayload;
-        if (payload.operation !== "prepare_reference") throw new ImageProcessingInputError("原参考处理阶段操作冲突", 409);
+        if (payload.operation !== "prepare_reference" || Object.keys(payload.options).length !== 0) throw new ImageProcessingInputError("原参考处理阶段操作冲突", 409);
         if (payload.algorithmVersion !== input.algorithmVersion) continue;
         const source = payload.inputs[0];
         const encoded = payload.resource.facts.encodedInputs.find((fact) => fact.inputIndex === 0 && fact.assetId === requested.assetId && fact.assetVersion === reference.assetVersion);
@@ -4103,7 +4492,7 @@ export async function collectReference(registration: LocalMediaRegistration, inp
 }
 
 export async function readImageProcessingMediaFacts(registration: LocalMediaRegistration, expected: { sha256: string; bytes: number; width: number; height: number; mimeType: string }, executor?: QueryExecutor) {
-    const { sha256, bytes, metadata } = await collectRegisteredOriginal(registration, expected.sha256, executor);
+    const { sha256, bytes, metadata } = await collectRegisteredOriginal(registration, expected.sha256, executor, expected.bytes);
     const size = orientedDimensions(metadata);
     const mimeType = imageMimeType(metadata);
     if (size.width * size.height > ECOMMERCE_IMAGE_MAX_INPUT_PIXELS) throw new ImageProcessingInputError("画幅验收原件超过像素限制", 413);
@@ -4111,7 +4500,7 @@ export async function readImageProcessingMediaFacts(registration: LocalMediaRegi
     return { sha256, bytes, mimeType, ...size };
 }
 
-async function collectRegisteredOriginal(registration: LocalMediaRegistration, expectedSha256?: string, executor?: QueryExecutor) {
+async function collectRegisteredOriginal(registration: LocalMediaRegistration, expectedSha256?: string, executor?: QueryExecutor, maxBytes = CREATIVE_UPLOAD_MAX_BYTES) {
     const directory = await mkdtemp(join(tmpdir(), "vozeb-image-processing-input-"));
     const stagedPath = join(directory, "source");
     try {
@@ -4120,7 +4509,7 @@ async function collectRegisteredOriginal(registration: LocalMediaRegistration, e
         const meter = new Transform({
             transform(chunk: Buffer, _encoding, callback) {
                 bytes += chunk.length;
-                if (bytes > CREATIVE_UPLOAD_MAX_BYTES) return callback(new ImageProcessingInputError("参考图片文件过大", 413));
+                if (bytes > maxBytes) return callback(new ImageProcessingInputError("参考图片文件过大", 413));
                 hash.update(chunk);
                 callback(null, chunk);
             },
@@ -4146,17 +4535,37 @@ function assertSameStage(current: AgentImageProcessingPayload, requested: AgentI
         current.inputs[0].expectedSha256 !== requested.inputs[0].expectedSha256
     )
         throw new ImageProcessingInputError("图像阶段请求指纹冲突", 409);
+    if (current.operation === "prepare_reference" && requested.operation === "prepare_reference" && !isDeepStrictEqual(current.options, requested.options)) throw new ImageProcessingInputError("图像阶段参考用途冲突", 409);
     if (current.operation === "build_protection" && requested.operation === "build_protection" && JSON.stringify(protectionOptionsIdentity(current.options)) !== JSON.stringify(protectionOptionsIdentity(requested.options)))
         throw new ImageProcessingInputError("图像阶段保护策略冲突", 409);
 }
 
-function waitingParent(run: AgentRun, payload: AgentImageProcessingPayload, now: number): AgentRun {
+function waitingParent(run: AgentRun, payload: AgentImageProcessingPayload, now: number, parentTaskId?: string): AgentRun {
     const snapshot = run.ecommerceSnapshot;
     if (!snapshot) throw new ImageProcessingInputError("参考处理检查点不存在", 409);
     const reference = { jobId: `image-process-${payload.inputDigest}`, inputDigest: payload.inputDigest };
     const previous = snapshot.processing || { version: "image-processing-checkpoint.v1", prepareReferences: [] };
     if (payload.operation === "build_protection")
-        return { ...run, status: payload.resource.unavailable ? "paused" : run.status, executionId: undefined, updatedAt: now, ecommerceSnapshot: { ...snapshot, processing: { ...previous, protection: reference, waitingFor: reference } } };
+        return {
+            ...run,
+            status: payload.resource.unavailable ? "paused" : run.status,
+            executionId: undefined,
+            updatedAt: now,
+            ecommerceSnapshot: {
+                ...snapshot,
+                processing: { ...previous, protection: { ...reference, ...(!("mode" in payload.options) && payload.options.generationInput ? { generationInput: payload.options.generationInput } : {}) }, waitingFor: reference },
+            },
+        };
+    if (payload.operation === "prepare_reference" && payload.options.generationInput) {
+        const previousReferences = previous.generationReferences || [];
+        const generationReferences = previousReferences.some((item) => item.jobId === reference.jobId)
+            ? previousReferences
+            : [
+                  ...previousReferences,
+                  { ...reference, parentTaskId: parentTaskId!, assetId: payload.inputs[0].assetId, assetVersion: payload.inputs[0].assetVersion, generationInput: payload.options.generationInput, planDigest: generationReferencePlanDigest(run) },
+              ];
+        return { ...run, status: payload.resource.unavailable ? "paused" : run.status, executionId: undefined, updatedAt: now, ecommerceSnapshot: { ...snapshot, processing: { ...previous, generationReferences, waitingFor: reference } } };
+    }
     const prepareReferences = previous.prepareReferences.some((item) => item.jobId === reference.jobId)
         ? previous.prepareReferences
         : [...previous.prepareReferences, { ...reference, assetId: payload.inputs[0].assetId, assetVersion: payload.inputs[0].assetVersion }];

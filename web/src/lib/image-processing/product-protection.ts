@@ -24,7 +24,7 @@ async function composite(
     maxPixels: number,
     candidateRole: "ai" | "native",
     sampleMemory: () => void,
-): Promise<{ bytes: Buffer; evidence: ProductEnhancementEvidence }> {
+): Promise<{ bytes: Buffer; finalImage: { format: "png"; hasAlpha: boolean }; evidence: ProductEnhancementEvidence }> {
     const context = await prepareProductProtection(source, maskInput, protection, maxPixels, sampleMemory);
     return compositePreparedProduct(ai, context, candidateRole, sampleMemory);
 }
@@ -56,7 +56,12 @@ export async function prepareProductProtection(source: Buffer, maskInput: Buffer
     return { original, mask, allowedPixels, size, protection, maxPixels, sourceSha256: digest(source), maskSha256: digest(maskBytes) };
 }
 
-export async function compositePreparedProduct(ai: Buffer, context: Awaited<ReturnType<typeof prepareProductProtection>>, candidateRole: "ai" | "native", sampleMemory: () => void): Promise<{ bytes: Buffer; evidence: ProductEnhancementEvidence }> {
+export async function compositePreparedProduct(
+    ai: Buffer,
+    context: Awaited<ReturnType<typeof prepareProductProtection>>,
+    candidateRole: "ai" | "native",
+    sampleMemory: () => void,
+): Promise<{ bytes: Buffer; finalImage: { format: "png"; hasAlpha: boolean }; evidence: ProductEnhancementEvidence }> {
     const { original, mask, allowedPixels, size, protection, maxPixels, sourceSha256, maskSha256 } = context;
     const product = protection.product;
     const { pixels, aiSize } = await mapProductCandidate(ai, size, maxPixels, candidateRole);
@@ -80,6 +85,7 @@ export async function compositePreparedProduct(ai: Buffer, context: Awaited<Retu
     }
     return {
         bytes,
+        finalImage: { format: "png", hasAlpha: false },
         evidence: {
             version: "product-enhancement.v2",
             normalization: "srgb-upright-v1",

@@ -1,3 +1,4 @@
+import type { EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
 import { getDatabaseProvider, ensurePostgresSchema, postgresQuery, withPostgresTransaction, type QueryExecutor } from "@/lib/server/database";
 import { resolveGenerationReviewReason } from "@/lib/server/generation-task-review-reason";
 import { readJsonDataFile, withJsonDataFileLock, writeJsonDataFile } from "@/lib/server/data-adapter";
@@ -885,7 +886,12 @@ async function upsertTask<T extends { id: string; userId: string; status: string
     });
 }
 
-async function insertTask<T extends { id: string; userId: string; status: string; createdAt: number; updatedAt: number }>(type: GenerationTaskType, task: T, ttlMs: number, options?: { referenceDispatch?: EcommerceReferenceDispatchFence }): Promise<T> {
+async function insertTask<T extends { id: string; userId: string; status: string; createdAt: number; updatedAt: number }>(
+    type: GenerationTaskType,
+    task: T & { ecommerceExecution?: EcommerceCompiledImageRequest },
+    ttlMs: number,
+    options?: { referenceDispatch?: EcommerceReferenceDispatchFence },
+): Promise<T> {
     const status = normalizeGenerationTaskStatus(task.status);
     const context = normalizeGenerationTaskContext(task as GenerationTaskContext);
     if (getDatabaseProvider() === "postgres") {
@@ -902,7 +908,7 @@ async function insertTask<T extends { id: string; userId: string; status: string
                 );
                 const existing = duplicate.rows[0];
                 if (existing) return withExecutionState(existing.payload, existing.execution_phase, existing.last_upstream_status, existing.result_payload);
-                assertEcommerceReferenceDispatch(parent.rows[0]?.payload, task.userId, context, options?.referenceDispatch || context.referenceDispatch);
+                assertEcommerceReferenceDispatch(parent.rows[0]?.payload, task.userId, context, options?.referenceDispatch || context.referenceDispatch, task.ecommerceExecution);
                 const inserted = await client.query<{ payload: T }>(
                     `INSERT INTO generation_tasks (id, user_id, task_type, status, payload, created_at, updated_at, expires_at, conversation_id, run_id, surface, project_id, parent_task_id, attempt_no, client_request_id)
                 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) ON CONFLICT DO NOTHING RETURNING payload`,
@@ -934,7 +940,13 @@ async function insertTask<T extends { id: string; userId: string; status: string
         );
         if (duplicate) return { tasks, result: type === "image" && context.runId ? withExecutionState(duplicate.payload as T, duplicate.executionPhase, duplicate.lastUpstreamStatus, duplicate.resultPayload) : (duplicate.payload as T) };
         if (type === "image" && context.runId)
-            assertEcommerceReferenceDispatch(tasks.find((item) => item.id === context.runId && item.type === "agent")?.payload as AgentRun | undefined, task.userId, context, options?.referenceDispatch || context.referenceDispatch);
+            assertEcommerceReferenceDispatch(
+                tasks.find((item) => item.id === context.runId && item.type === "agent")?.payload as AgentRun | undefined,
+                task.userId,
+                context,
+                options?.referenceDispatch || context.referenceDispatch,
+                task.ecommerceExecution,
+            );
         const record: StoredGenerationTaskRecord = {
             id: task.id,
             userId: task.userId,

@@ -96,7 +96,7 @@ prepare/build建立子阶段、保存父检查点的 `waitingFor` 和将父记�
 
 `facts.encodedInputs`逐项保存`inputIndex/assetId/assetVersion/sha256/bytes`和真实`layout:{format,depth,channels}`；仅同一文件的元数据读取实际失败时，以互斥的`metadataRejected:true`替代layout。该标记只允许坏native槽省去无法进入的解码/输出工作区，实际编码字节仍计入；全局source/mask不能借此准入。缺少采集结果与元数据已失败不同。`facts.decodedInputs`只保存同身份完整处理检查点的真实宽高，未完成解码时为空。
 
-当前模型版本为`image-processing-memory.s3.v4`，已测prepare的uchar PNG/JPEG、ushort PNG及float三通道TIFF；后续保护/结果只对已校准uchar PNG/JPEG布局准入。首次prepare分别保留64MP，对应样本需求405/649/893MiB；布局缺失时不能套用405MiB。多结果累计实际编码输入与各成功槽的输出预留，raw/codec按单活跃槽峰值计入。这些系数是锁定Sharp版本的实测工程预留，不是任意编解码器的数学内存上界；未校准布局明确不可领取。
+当前模型版本为`image-processing-memory.s8.v1`，已测prepare的uchar PNG/JPEG、ushort PNG及float三通道TIFF；后续保护/结果只对已校准uchar PNG/JPEG布局准入。首次prepare分别保留64MP，对应样本需求405/649/893MiB；布局缺失时不能套用405MiB。多结果累计实际编码输入与各成功槽的输出预留，raw/codec按单活跃槽峰值计入。这些系数是锁定Sharp版本的实测工程预留，不是任意编解码器的数学内存上界；未校准布局明确不可领取。
 
 `process_enhancement` 的四类工程预留为：global JPEG 1536MiB，legacy PNG、product、scene 各1280MiB；仅覆盖当前producer/B0已定义的PNG8 RGB(A)/JPEG3输入角色和几何域，域外保持uncalibrated，不代表通用内存上界或并发容量。
 
@@ -227,6 +227,16 @@ process_result成功解码的原件sourceIdentity另保存最窄`nativeImage:{fo
 
 opaque原件沿现permanent/reference/attachment/octet-stream/.bin存储；只扩独立的结果输入attachment assertion，不放宽prepare/build image assertion或public.bin/dataURL/reader白名单。Task2完整验证后，Web可沿原Provider流复制同一原件到受控闭合文件、复核EOF hash/bytes，再经现image file writer和实际MIME/操作字节政策取得合法image URL；不在Web解码/resize/合成/alpha扫描。合格final已是同hash/bytes原件时复用URL，仅尺寸相同不够。nativeSource及各proof/canvas.nativeUrl绑定真原件，final/baseline绑定实际合成/交付件；保持现enhancement native/final尺寸与URL equality及保护baseline条件，不借thumbnail/resize件补原件事实。
 
+### 原生商品编辑的输入副本
+
+已确认的原生商品白底／透明底编辑，在首次 `build_protection` 入队时，将本轮已解析请求边界与有效画质冻结为 `options.generationInput = { bounds: { width, height }, quality }`，同一父子提交保存到 `processing.protection.generationInput`；两项共同参与摘要。恢复与完成消费只读该快照，不按后来默认设置重新计算。缺少该字段的既有检查点继续使用原摘要与单蒙版，不补填字段。
+
+独立图像子进程保留原尺寸 `mask`，再从登记原件生成 `generation_reference` 与 `generation_mask`。源图按EXIF展示方向正规化，在冻结边界内等比缩小，不放大、不裁切、不补边；PNG保留透明，JPEG沿已验证编码生成，蒙版按实际副本尺寸使用nearest。新完成清单精确包含这三个角色，上传、暂存与提交核对每份工件的真实尺寸、格式、字节、SHA、登记归属及执行身份；单蒙版路径保持。
+
+可信完成读取补入同份 `EcommerceCompiledImageRequest.generationInput`，Agent子任务冻结该画质。创建ImageTask时在既有父锁内检查完整执行快照；有新标记的原生adapter在提交前验证原build与成对媒体，仅替换实际传输中的第一商品源与独立蒙版。缺失、不符或过期的副本不得退回原大图或自动重提。ImageTask仍保存原references、原mask和全分辨率保护坐标；结果保留真实native/stored尺寸，传输尺寸不充当交付尺寸。结果读回保留副本的manifest身份，不要求已提交后的临时副本永久存在。
+
+受控同图对照支持尺寸适配方向，但没有证明供应商的精确像素、边长或字节阈值。本方案复用本轮请求边界，不新增供应商上限、自动重试、队列阶段或用户配置；资源与副本扩容沿现有Compose参数和排队契约。
+
 ## 7. 状态转换与恢复
 
 下表父Run/waitingFor行为适用于prepare/build；结果分支按第7.1节处理，不扩大已有prepare/build资格。
@@ -249,9 +259,15 @@ opaque原件沿现permanent/reference/attachment/octet-stream/.bin存储；只�
 
 当前父Run实际保存在generation_tasks的agent记录payload中。文件Provider在一次既有generation-task文件mutation提交父/子任务真值；保持creative→generation-task的既有锁顺序，不在锁内重入公开Run mutation。creative文件的消息/事件是独立投影：任务提交后按jobId/inputDigest和转换身份幂等更新、发出通知；中断后从任务真值补齐，刷新仍能读到正确状态。不得声称消息文件、任务文件和媒体跨存储原子提交。媒体写入先于完成事务。
 
-`EcommerceGenerationSnapshot.processing`承载 `{version:'image-processing-checkpoint.v1',prepareReferences,protection?,waitingFor?}`，已完成项保存 `{jobId,inputDigest,manifest}`。编辑方案先写既有 `plan/modelRoles/modelRouteSnapshots/stageTimings`，再入队保护任务。process_result引用只在ImageTask.resultProcessing，不写Agent单result/waitingFor作为多个copy的结果依赖。
+`EcommerceGenerationSnapshot.processing`承载 `{version:'image-processing-checkpoint.v1',prepareReferences,generationReferences?,protection?,waitingFor?}`，已完成项保存 `{jobId,inputDigest,manifest}`。编辑方案先写既有 `plan/modelRoles/modelRouteSnapshots/stageTimings`，再入队保护任务。process_result引用只在ImageTask.resultProcessing，不写Agent单result/waitingFor作为多个copy的结果依赖。
 
 恢复前逐项核对阶段摘要和工件归属；方案已完成时不重调规划。已有上游ID继续查询，`result_ready`只进行结果处理。上游/文本调用已经发出但响应未落盘时保留未知语义，不宣称外部exactly-once。
+
+### 白底商品细节与安全暂停投影
+
+规范计划为 `product_to_scene`＋`strict_product`，且已确认目标为V4 `product_detail`、高置信度、具有可见商品事实且为独立白底／透明底主体时，服务端在规范计划的 `preserve.sourceFraming` 冻结 `visible_extent`；模型自报的该项不构成授权。此值沿白底 `build_protection.options`、输入摘要、完成读取与实际CPU处理传递，编译提示要求保留可见范围、视角和边缘截断，不补全画外商品。默认完整模式保持原贴边拒绝。细节模式只从背景边界分母扣除最终选中大组件的实际贴边像素，再应用原0.9背景比例；最低0.1、真实颜色／alpha、边界洪泛和单主体判断保持，不扣除其他非白像素，也不增加阈值或全尺寸像素缓冲。
+
+prepare/build确定失败先提交父子任务真值，随后按当前依赖和执行回执幂等投影固定安全中文与 `run.paused` 事件；读取可补齐遗漏投影。安全文案纳入投影身份，文案语义更新可形成新收据，相同文案重复读取不追加事件。明确输入拒绝公开为 `input_rejected` 且不可直接继续；资源失败仍走既有配置调整与原任务恢复。原始诊断仅留内部阶段。原生生图沿既有ordinary路径分别保留source/native/stored尺寸；完整生成与视觉质量须单独验收。
 
 ### 7.1 process_result本地等待、恢复与取消（已接入，按分项证据验收）
 
@@ -353,3 +369,9 @@ S0/S1完成门：基线、范围、夹具hash、acceptance manifest、调用图�
 仅消费与原增强父任务、原成功图片及冻结输入绑定相符的已闭合 `success/completed` 子任务；清单、交付工件和保护证明复用完成边界的验证。`publicationProcessing.promotion` 在保存前固定 `aiStorageKey`、`deliveredStorageKey`，中断恢复复用同一永久原件。Web 只校验登记、流字节/SHA 和头部元数据，通过现有媒体 Provider 保存原字节，不重新解码像素、合成或编码。
 
 媒体 I/O 在关系锁外完成；资产和父任务发布在既有关系边界内复核当前图片、父子绑定、登记、取消及有效租约。PostgreSQL 复用同一 executor，末尾租约失效回滚资产和父任务；文件 Provider 沿 creative → generation → enhancement → registry 锁序，以稳定资产身份恢复跨文件中断。发布后沿原远端任务和 receiptId 确认，不重新 CREATE 或下载 RAW。
+
+### 生成用途的单参考准备
+
+`prepare_reference.options={}` 继续是分析模式，仅接受单个 `analysis` 工件。显式 `{generationInput:{bounds,quality}}` 是本轮生成模式，独立进程从同一已登记原件生成单个 `generation_reference`，等比、不放大、不裁切并保留透明语义，不经过分析压缩。两种模式使用独立阶段指纹和父检查点；生成身份还绑定规范化的冻结计划／路由、原分析请求和逻辑父任务。
+
+`processing.generationReferences` 精确保存每个生成阶段；完成不能修改分析状态或计费身份。持久图片任务仍只保存原引用；提交前的service reader验证原分析、精确job/输入/算法/manifest、工件登记和实际字节。媒体I/O之后重新核对当前图片执行epoch、状态、派发fence及逻辑attempt/copy；供应商attemptNo独立于逻辑派发轮次。随后adapter只替换本次传输，并按已验证工件bytes读取与编码，不放宽普通上传上限或同键异参计费规则。

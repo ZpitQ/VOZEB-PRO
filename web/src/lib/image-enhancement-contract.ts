@@ -68,7 +68,7 @@ export type PublicImageEnhancement = {
     reason: string | null;
     attempt: number;
     timings?: ImageEnhancementTimings;
-    native: PublicEnhancementArtifact & { url: string; provenance: "provider_native" | "ai_enhanced" | "protected_composite" };
+    native: PublicEnhancementArtifact & { url: string; provenance: "provider_native" | "ai_enhanced" | "protected_composite" | "generation_final" };
     providerNative?: PublicEnhancementArtifact & { url: string };
     delivery?: {
         version: "ecommerce-delivery.v2";

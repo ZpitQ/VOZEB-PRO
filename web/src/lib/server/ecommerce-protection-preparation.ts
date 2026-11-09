@@ -1,6 +1,16 @@
+import { normalizeQuality, resolveEcommerceCanvasRequestSize } from "@/lib/image-generation-size";
+import { parseImageDimensions } from "@/lib/image-size";
 import type { AgentRun, AgentRunTask } from "./agent-run-store";
 import type { ImageProcessingProtectionOptions } from "../image-processing/contracts";
-import { compileConfirmedSceneExecution, ecommerceSceneSelectionReceiptState, ecommerceSceneProtectionOptions, enqueueImageProcessingTask, readCompletedEcommerceProductProtection, readCompletedEcommerceSceneProtection } from "./image-processing-service";
+import {
+    compileConfirmedSceneExecution,
+    ecommerceSceneSelectionReceiptState,
+    ecommerceSceneProtectionOptions,
+    enqueueImageProcessingTask,
+    readCompletedEcommerceProductProtection,
+    readCompletedEcommerceSceneProtection,
+    prepareEcommerceGenerationReferences,
+} from "./image-processing-service";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import { resolveLocalEditTarget } from "./ecommerce-edit-planner";
 import { createEcommerceLocalEditTask, createEcommerceProductSceneTask, createEcommerceSceneEditTask, EcommerceProductSegmentationError } from "./ecommerce-generation-service";
@@ -8,7 +18,7 @@ import { buildSceneProductProtectionRegions, STRICT_PRODUCT_COMPILER_VERSION, ty
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
 import { verifyPreparedEcommerceReferenceSource } from "./ecommerce-reference-preparation";
 
-export async function prepareEcommerceProtectionTask(run: AgentRun, executionId: string, analysis: EcommerceVisualAnalysis): Promise<AgentRunTask | undefined> {
+export async function prepareEcommerceProtectionTask(run: AgentRun, executionId: string, analysis: EcommerceVisualAnalysis, defaults: { imageQuality: string; imageSize: string }): Promise<AgentRunTask | undefined> {
     const snapshot = run.ecommerceSnapshot;
     const plan = snapshot?.plan;
     const checkpoint = snapshot?.referenceCheckpoint;
@@ -16,7 +26,7 @@ export async function prepareEcommerceProtectionTask(run: AgentRun, executionId:
     if (!snapshot || !plan || !checkpoint || !route || (plan.operation !== "product_to_scene" && plan.operation !== "local_edit")) throw new Error("商品保护缺少已持久化的计划、参考或模型路由");
     const profile = resolveEcommerceImageProviderProfile(route);
     if (!profile) throw new Error("已保存的生图模型不支持电商编译器");
-    const ecommerceExecution = compileEcommerceImageRequest(plan, profile);
+    let ecommerceExecution = compileEcommerceImageRequest(plan, profile);
     if (ecommerceExecution.state !== "ready" || ecommerceExecution.compilerVersion !== snapshot.compilerVersion) throw new Error("已保存的生图计划与编译器快照不一致");
     const sourceAssetId = plan.source.currentSceneBaselineId || plan.source.productAnchorId;
     const reference = checkpoint.assets.find((item) => item.asset.id === sourceAssetId);
@@ -35,7 +45,14 @@ export async function prepareEcommerceProtectionTask(run: AgentRun, executionId:
         const detailAnchorAllowed = product?.confidence === "medium" && product.visualEvidence.isolatedSubject && (product.visualEvidence.whiteBackground || product.visualEvidence.transparentBackground);
         if (!product || (!detailAnchorAllowed && product.confidence !== "high") || !product.visualEvidence.isolatedSubject || (!product.visualEvidence.whiteBackground && !product.visualEvidence.transparentBackground))
             throw new EcommerceProductSegmentationError("商品图不是高置信度白色或透明背景单主体");
-        options = { transparentBackground: product.visualEvidence.transparentBackground };
+        const previous = snapshot.processing?.protection;
+        let generationInput = previous?.generationInput;
+        if (!previous && ecommerceExecution.mask && route.imageEdit?.protocol === "sub2api") {
+            const quality = (run.generationPreferences?.image?.quality || defaults.imageQuality).trim();
+            const bounds = parseImageDimensions(resolveEcommerceCanvasRequestSize(ecommerceExecution.canvas, normalizeQuality(quality), defaults.imageSize) || "");
+            if (bounds) generationInput = { bounds, quality };
+        }
+        options = { transparentBackground: product.visualEvidence.transparentBackground, ...(plan.preserve.sourceFraming ? { sourceFraming: plan.preserve.sourceFraming } : {}), ...(generationInput ? { generationInput } : {}) };
     }
     const stage = await enqueueImageProcessingTask({
         runId: run.id,
@@ -76,7 +93,9 @@ export async function prepareEcommerceProtectionTask(run: AgentRun, executionId:
     )
         throw new Error("商品保护产物与实际完成的阶段或参考原件不一致");
     if (!regions) {
-        regions = (await readCompletedEcommerceProductProtection(run)).regions;
+        const completed = await readCompletedEcommerceProductProtection(run);
+        regions = completed.regions;
+        ecommerceExecution = completed.execution;
     }
     regions.editableBackground.mask = {
         trust: "trusted",
@@ -92,7 +111,10 @@ export async function prepareEcommerceProtectionTask(run: AgentRun, executionId:
         },
     };
     const assets = checkpoint.assets.map((item) => item.asset);
-    return plan.operation === "local_edit" ? createEcommerceLocalEditTask(run, plan, assets, regions, ecommerceExecution) : createEcommerceProductSceneTask(run, plan, assets, regions, ecommerceExecution);
+    if (!(await prepareEcommerceGenerationReferences(run, executionId, ecommerceExecution, defaults))) return;
+    const task = plan.operation === "local_edit" ? createEcommerceLocalEditTask(run, plan, assets, regions, ecommerceExecution) : createEcommerceProductSceneTask(run, plan, assets, regions, ecommerceExecution);
+    const generation = snapshot.processing?.generationReferences?.[0]?.generationInput;
+    return generation ? { ...task, quality: generation.quality, ratio: `${generation.bounds.width}x${generation.bounds.height}` } : task;
 }
 
 export async function prepareEcommerceSceneProtectionTask(run: AgentRun, executionId: string, origin: string, cookie: string): Promise<AgentRunTask | undefined> {

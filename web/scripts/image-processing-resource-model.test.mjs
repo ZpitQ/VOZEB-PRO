@@ -98,11 +98,11 @@ function facts(decodedInputs = [], encodedInputs = [encoded]) {
 }
 
 function calibrated(profile, requiredMemoryBytes) {
-    return { modelVersion: "image-processing-memory.s3.v4", profile, status: "calibrated", requiredMemoryBytes };
+    return { modelVersion: "image-processing-memory.s8.v1", profile, status: "calibrated", requiredMemoryBytes };
 }
 
 function uncalibrated(profile) {
-    return { modelVersion: "image-processing-memory.s3.v4", profile, status: "uncalibrated" };
+    return { modelVersion: "image-processing-memory.s8.v1", profile, status: "uncalibrated" };
 }
 
 const sourceLayoutBudgets = [
@@ -140,6 +140,16 @@ describe("hash-bound source layout budgets", () => {
         const estimate = estimateImageProcessingMemory(request("prepare_reference", {}, input), facts([], [fact]));
         expect(estimate).toEqual(uncalibrated("prepare_reference"));
         expect(decideImageProcessingAdmission(estimate, free).status).toBe("unavailable");
+    });
+});
+
+describe("generation reference admission", () => {
+    it.each([
+        { label: "64MP PNG", layout: { format: "png", depth: "uchar", channels: 4 }, expected: calibrated("generation_reference", 979369984) },
+        { label: "64MP JPEG", layout: { format: "jpeg", depth: "uchar", channels: 3 }, expected: calibrated("generation_reference", 979369984) },
+        { label: "uncalibrated 16bit PNG", layout: { format: "png", depth: "ushort", channels: 4 }, expected: uncalibrated("generation_reference") },
+    ])("accounts for generation output instead of borrowing the analysis reserve for $label", ({ layout, expected }) => {
+        expect(estimateImageProcessingMemory(request("prepare_reference", { generationInput: { bounds: { width: 8000, height: 8000 }, quality: "high" } }), facts([source64], [{ ...encoded, layout }]))).toEqual(expected);
     });
 });
 

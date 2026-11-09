@@ -124,6 +124,16 @@ describe("ecommerce v2 enhancement admission", () => {
         const task = canvasTask();
         expect(planImageTaskEnhancement(task, task.result!)).toMatchObject({ status: "queued", delivery: { contract: task.enhancementDelivery, baseline: { url: task.result!.serverUrl } } });
     });
+    it("enhances the saved complete image after product protection instead of the upstream native", () => {
+        const task = productTask();
+        const result = {
+            ...task.result!,
+            enhancementSource: { ...task.result!.nativeSource!, url: task.result!.serverUrl!, sha256: "b".repeat(64), provenance: "generation_final" as const },
+        };
+        const decision = planImageTaskEnhancement(task, result);
+        expect(decision).toMatchObject({ status: "queued", source: result.enhancementSource, target: { width: 4096, height: 4096 } });
+        expect(decision).not.toHaveProperty("delivery");
+    });
     it("binds raw native, protected original and product anchor before background work", () => {
         const task = productTask();
         expect(planImageTaskEnhancement(task, task.result!)).toMatchObject({

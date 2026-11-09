@@ -14,13 +14,14 @@ export class EcommerceProductSegmentationError extends Error {
 type Component = { seed: number; area: number; bounds: { x: number; y: number; width: number; height: number } };
 
 // The caller owns these decoded RGBA bytes; replace them with the mask to avoid a second full-size RGBA buffer.
-export function buildWhiteBackgroundProductMaskPixels(data: Uint8Array, width: number, height: number, transparent: boolean) {
+export function buildWhiteBackgroundProductMaskPixels(data: Uint8Array, width: number, height: number, transparent: boolean, sourceFraming?: "visible_extent") {
     const pixels = width * height;
     const state = new Uint8Array(pixels);
     const queue = new Uint32Array(pixels);
     let queued = 0;
     let borderPixels = 0;
     let backgroundBorderPixels = 0;
+    let subjectBorderPixels = 0;
 
     const backgroundCandidate = (index: number) => {
         const offset = index * 4;
@@ -82,6 +83,7 @@ export function buildWhiteBackgroundProductMaskPixels(data: Uint8Array, width: n
             top = Math.min(top, y);
             right = Math.max(right, x);
             bottom = Math.max(bottom, y);
+            if (to === 3 && (x === 0 || x === width - 1 || y === 0 || y === height - 1)) subjectBorderPixels += 1;
             if (x > 0) append(index - 1);
             if (x + 1 < width) append(index + 1);
             if (index >= width) append(index - width);
@@ -106,12 +108,13 @@ export function buildWhiteBackgroundProductMaskPixels(data: Uint8Array, width: n
     if (!largest) throw new EcommerceProductSegmentationError("没有检测到商品主体");
     if (secondLargestArea >= largest.area * SECOND_SUBJECT_RATIO) throw new EcommerceProductSegmentationError("检测到多个独立主体，需要人工复核");
     const bounds = largest.bounds;
-    if (bounds.x === 0 || bounds.y === 0 || bounds.x + bounds.width === width || bounds.y + bounds.height === height) {
+    if (sourceFraming !== "visible_extent" && (bounds.x === 0 || bounds.y === 0 || bounds.x + bounds.width === width || bounds.y + bounds.height === height)) {
         throw new EcommerceProductSegmentationError("商品主体接触图片边缘，无法生成可信保护蒙版");
     }
-    if (borderRatio < MIN_BORDER_BACKGROUND_RATIO) throw new EcommerceProductSegmentationError("商品图边界不是可信白色或透明背景");
-
     visitComponent(largest.seed, 2, 3);
+    // A confirmed detail can meet the frame; only its selected subject is excluded from the background boundary.
+    const backgroundBorder = sourceFraming === "visible_extent" ? borderPixels - subjectBorderPixels : borderPixels;
+    if (backgroundBorderPixels / backgroundBorder < MIN_BORDER_BACKGROUND_RATIO) throw new EcommerceProductSegmentationError("商品图边界不是可信白色或透明背景");
     data.fill(255);
     for (let index = 0; index < pixels; index += 1) data[index * 4 + 3] = state[index] === 3 ? 255 : 0;
     return bounds;

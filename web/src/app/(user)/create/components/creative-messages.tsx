@@ -298,13 +298,15 @@ function CreativeMediaRound({
                       : "参考图片待分析"
                 : sceneSelectionPending
                   ? "确认修改位置"
-                  : taskTitle?.startsWith("生成")
-                    ? `已为你${taskTitle}`
-                    : mode === "video"
-                      ? "已为你生成视频"
-                      : mode === "audio"
-                        ? "已为你生成音频"
-                        : "已为你生成图片";
+                  : imageProcessingPending
+                    ? "图像处理已暂停"
+                    : taskTitle?.startsWith("生成")
+                      ? `已为你${taskTitle}`
+                      : mode === "video"
+                        ? "已为你生成视频"
+                        : mode === "audio"
+                          ? "已为你生成音频"
+                          : "已为你生成图片";
     const renderRoundActions = (activeAsset: CreativeAsset) =>
         activeAsset.status === "ready" ? <CreativeRoundActions outputAssets={outputAssets} activeAsset={activeAsset} run={run} selectedAssetIds={selectedAssetIds} onToggleAsset={onToggleAsset} /> : null;
 

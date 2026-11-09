@@ -17,7 +17,13 @@ export async function validateSceneProtectionBytes(source: Buffer, maskBytes: Bu
     return original;
 }
 
-export async function compositeSceneEditBytes(source: Buffer, generated: Buffer, mask: Buffer, protection: SceneProtectionSnapshot, sampleMemory: () => void = () => {}): Promise<{ bytes: Buffer; evidence: SceneProtectionEvidence }> {
+export async function compositeSceneEditBytes(
+    source: Buffer,
+    generated: Buffer,
+    mask: Buffer,
+    protection: SceneProtectionSnapshot,
+    sampleMemory: () => void = () => {},
+): Promise<{ bytes: Buffer; finalImage: { format: "png"; hasAlpha: boolean }; evidence: SceneProtectionEvidence }> {
     const original = await validateSceneProtectionBytes(source, mask, protection);
     return compositePreparedScene(generated, { original, protection }, sampleMemory);
 }
@@ -26,7 +32,7 @@ export async function compositePreparedScene(
     generated: Buffer,
     context: { original: Awaited<ReturnType<typeof validateSceneProtectionBytes>>; protection: SceneProtectionSnapshot },
     sampleMemory: () => void,
-): Promise<{ bytes: Buffer; evidence: SceneProtectionEvidence }> {
+): Promise<{ bytes: Buffer; finalImage: { format: "png"; hasAlpha: boolean }; evidence: SceneProtectionEvidence }> {
     const { original, protection } = context;
     sampleMemory();
     const sourceSize = protection.sourceSize;
@@ -48,15 +54,18 @@ export async function compositePreparedScene(
         .toBuffer();
     sampleMemory();
     const persisted = await decodeScenePixels(bytes);
+    let hasAlpha = false;
     sampleMemory();
     for (let y = 0; y < sourceSize.height; y++)
         for (let x = 0; x < sourceSize.width; x++) {
-            if (inside(protection.targetRegion, x, y)) continue;
             const offset = (y * sourceSize.width + x) * 4;
+            if (persisted.data[offset + 3] !== 255) hasAlpha = true;
+            if (inside(protection.targetRegion, x, y)) continue;
             if (persisted.data.readUInt32LE(offset) !== original.data.readUInt32LE(offset)) reject("选区外像素保护验证失败");
         }
     return {
         bytes,
+        finalImage: { format: "png", hasAlpha },
         evidence: {
             ...structuredClone(protection),
             nativeSize,

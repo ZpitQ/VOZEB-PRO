@@ -40,6 +40,138 @@ function solid(width, height, background) {
 }
 
 describe("compiled full pixel operations", () => {
+    it.each([
+        {
+            name: "opaque PNG",
+            format: "png",
+            mimeType: "image/png",
+            background: "#ffffff",
+            transparentBackground: false,
+            backgroundAlpha: 255,
+            orientation: 1,
+            bounds: { width: 64, height: 64 },
+            sourceSize: { width: 128, height: 96 },
+            size: { width: 64, height: 48 },
+            corePixel: 1568,
+            backgroundPixel: 3071,
+        },
+        {
+            name: "JPEG",
+            format: "jpeg",
+            mimeType: "image/jpeg",
+            background: "#ffffff",
+            transparentBackground: false,
+            backgroundAlpha: 255,
+            orientation: 1,
+            bounds: { width: 64, height: 64 },
+            sourceSize: { width: 128, height: 96 },
+            size: { width: 64, height: 48 },
+            corePixel: 1568,
+            backgroundPixel: 3071,
+        },
+        {
+            name: "upright EXIF JPEG",
+            format: "jpeg",
+            mimeType: "image/jpeg",
+            background: "#ffffff",
+            transparentBackground: false,
+            backgroundAlpha: 255,
+            orientation: 6,
+            bounds: { width: 64, height: 64 },
+            sourceSize: { width: 96, height: 128 },
+            size: { width: 48, height: 64 },
+            corePixel: 1560,
+            backgroundPixel: 3071,
+        },
+        {
+            name: "transparent PNG",
+            format: "png",
+            mimeType: "image/png",
+            background: "#00000000",
+            transparentBackground: true,
+            backgroundAlpha: 0,
+            orientation: 1,
+            bounds: { width: 64, height: 64 },
+            sourceSize: { width: 128, height: 96 },
+            size: { width: 64, height: 48 },
+            corePixel: 1568,
+            backgroundPixel: 3071,
+        },
+        {
+            name: "small original",
+            format: "png",
+            mimeType: "image/png",
+            background: "#ffffff",
+            transparentBackground: false,
+            backgroundAlpha: 255,
+            orientation: 1,
+            bounds: { width: 256, height: 256 },
+            sourceSize: { width: 128, height: 96 },
+            size: { width: 128, height: 96 },
+            corePixel: 6208,
+            backgroundPixel: 12287,
+        },
+    ])("prepares matching generation inputs without replacing full-resolution protection for $name", async ({ format, mimeType, background, transparentBackground, backgroundAlpha, orientation, bounds, sourceSize, size, corePixel, backgroundPixel }) => {
+        const source = await sharp({ create: { width: 128, height: 96, channels: 4, background } })
+            .composite([{ input: { create: { width: 64, height: 48, channels: 4, background: "#8a6243" } }, left: 32, top: 24 }])
+            .toFormat(format, { quality: 100 })
+            .withMetadata({ orientation })
+            .toBuffer();
+        const setup = await task([source], "build_protection", { transparentBackground, generationInput: { bounds, quality: "high" } });
+        const outcome = await runImageProcessing(setup.request, setup.execution);
+        expect(outcome.status, JSON.stringify(outcome)).toBe("completed");
+        expect(outcome.result.sourceIdentities).toEqual([{ assetId: "asset-0", assetVersion: "version-0", sha256: digest(source), bytes: source.length, mimeType, ...sourceSize }]);
+        expect(outcome.result.artifacts.map((artifact) => artifact.kind)).toEqual(["mask", "generation_reference", "generation_mask"]);
+        const [originalMask, reference, mask] = outcome.result.artifacts;
+        expect(originalMask).toMatchObject({ ...sourceSize, mimeType: "image/png" });
+        expect(reference).toMatchObject({ ...size, mimeType });
+        expect(mask).toMatchObject({ ...size, mimeType: "image/png" });
+        expect(await sharp(reference.path).metadata()).toMatchObject(size);
+        const alpha = await sharp(mask.path).extractChannel("alpha").raw().toBuffer();
+        expect(alpha[corePixel]).toBe(255);
+        expect(alpha[0]).toBe(0);
+        expect(alpha[backgroundPixel]).toBe(0);
+        const pixels = await sharp(reference.path).ensureAlpha().raw().toBuffer();
+        expect(pixels[3]).toBe(backgroundAlpha);
+        expect(pixels[corePixel * 4 + 3]).toBe(255);
+        expect(await readFile(setup.request.inputs[0].path)).toEqual(source);
+        expect(outcome.result.geometry.sourceSize).toEqual(sourceSize);
+    });
+
+    it.each([
+        { background: "#ffffff", transparentBackground: false },
+        { background: "#00000000", transparentBackground: true },
+    ])("preserves the visible product pixels at the source edges on $background", async ({ background, transparentBackground }) => {
+        const source = await sharp({ create: { width: 64, height: 48, channels: 4, background } })
+            .composite([{ input: { create: { width: 26, height: 36, channels: 4, background: "#8a6243" } }, left: 0, top: 0 }])
+            .png()
+            .toBuffer();
+        const setup = await task([source], "build_protection", { transparentBackground, sourceFraming: "visible_extent" });
+        const outcome = await runImageProcessing(setup.request, setup.execution);
+        expect(outcome.status, JSON.stringify(outcome)).toBe("completed");
+        expect(outcome.result.geometry).toMatchObject({ sourceSize: { width: 64, height: 48 }, productBounds: { x: 0, y: 0, width: 26, height: 36 } });
+        const alpha = await sharp(await readFile(outcome.result.artifacts[0].path))
+            .extractChannel("alpha")
+            .raw()
+            .toBuffer();
+        expect(alpha[0]).toBe(255);
+        expect(alpha[2265]).toBe(255);
+        expect(alpha[2266]).toBe(0);
+        expect(alpha[3071]).toBe(0);
+    });
+
+    it("still rejects unexplained nonwhite edge pixels outside the selected detail subject", async () => {
+        const source = await sharp({ create: { width: 64, height: 48, channels: 4, background: "#ffffff" } })
+            .composite([
+                { input: { create: { width: 26, height: 36, channels: 4, background: "#8a6243" } }, left: 0, top: 0 },
+                { input: { create: { width: 1, height: 30, channels: 4, background: "#252525" } }, left: 63, top: 9 },
+            ])
+            .png()
+            .toBuffer();
+        const setup = await task([source], "build_protection", { transparentBackground: false, sourceFraming: "visible_extent" });
+        const outcome = await runImageProcessing(setup.request, setup.execution);
+        expect(outcome).toMatchObject({ status: "rejected", error: { code: "segmentation_rejected", message: "商品图边界不是可信白色或透明背景" } });
+    });
     it("prepares an upright original-coordinate review crop before vision bounding", async () => {
         const foreground = await solid(2000, 1400, "#e63946");
         const source = await sharp({ create: { width: 5000, height: 3000, channels: 3, background: "#ffffff" } })
@@ -128,7 +260,7 @@ describe("compiled full pixel operations", () => {
         expect(await sharp(final).metadata()).toMatchObject(expected);
         expect(final.equals(native)).toBe(preserve);
         expect(artifact.sha256).toBe(digest(final));
-        expect(outcome.result.results).toEqual([{ resultId: "image-task:1", resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 0 }]);
+        expect(outcome.result.results).toMatchObject([{ resultId: "image-task:1", resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 0 }]);
     });
 
     it("binds two distinct slots to their original native identities even when ordered differently", async () => {
@@ -145,8 +277,8 @@ describe("compiled full pixel operations", () => {
         const outcome = await runImageProcessing(setup.request, setup.execution);
         expect(outcome.status, JSON.stringify(outcome)).toBe("completed");
         expect(outcome.result.results).toEqual([
-            { resultId: "image-task:2", resultIndex: 2, nativeInputIndex: 1, finalArtifactIndex: 0 },
-            { resultId: "image-task:1", resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 1 },
+            { resultId: "image-task:2", resultIndex: 2, nativeInputIndex: 1, finalArtifactIndex: 0, finalImage: { format: "png", hasAlpha: false } },
+            { resultId: "image-task:1", resultIndex: 1, nativeInputIndex: 0, finalArtifactIndex: 1, finalImage: { format: "png", hasAlpha: false } },
         ]);
         expect(outcome.result.sourceIdentities).toMatchObject([
             { assetId: "asset-0", assetVersion: "version-0", sha256: digest(first) },

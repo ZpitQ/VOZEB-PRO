@@ -223,6 +223,7 @@ export type EcommerceEditPlan = {
     preserve: {
         productCore: string[];
         sceneElements: string[];
+        sourceFraming?: "visible_extent";
     };
     strategy: EcommerceStrategy;
     modelRoles: EcommerceModelRoles;
@@ -312,6 +313,7 @@ export function normalizeEcommerceEditPlan(value: unknown): EcommerceEditPlan | 
         preserve: {
             productCore: normalizeStringArray(preserve?.productCore),
             sceneElements: normalizeStringArray(preserve?.sceneElements),
+            ...(preserve?.sourceFraming === "visible_extent" ? { sourceFraming: "visible_extent" as const } : {}),
         },
         strategy: value.strategy as EcommerceStrategy,
         modelRoles: {
@@ -391,6 +393,7 @@ export function validateEcommerceEditPlan(plan: EcommerceEditPlan): void {
     if (!isRecord(plan.preserve)) throw new Error("商品保护项无效");
     requireStringArray(plan.preserve.productCore, "商品核心保护项");
     requireStringArray(plan.preserve.sceneElements, "场景保护项");
+    if (plan.preserve.sourceFraming !== undefined && plan.preserve.sourceFraming !== "visible_extent") throw new Error("商品取景保护项无效");
     if (sceneEdit && plan.preserve.productCore.length) throw new Error("场景编辑不能包含商品核心保护项");
     if (plan.strategy === "strict_product" && STRICT_PRODUCT_CORE.some((key) => !plan.preserve.productCore.includes(key))) throw new Error("商品核心保护项不完整");
 

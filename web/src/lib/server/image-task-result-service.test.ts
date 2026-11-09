@@ -238,6 +238,7 @@ describe("image task result persistence", () => {
         expect(rawBytes).toEqual(native);
         expect(proof.baselineSha256).toBe(digest(baseBytes));
         expect(result.nativeSource).toEqual({ url: proof.nativeUrl, sha256: digest(native), byteLength: native.length, width: 6, height: 4, format: "png", hasAlpha: false, provenance: "provider_native" });
+        expect(result).toHaveProperty("enhancementSource", { url: result.serverUrl, sha256: digest(baseBytes), byteLength: baseBytes.length, width: 6, height: 4, format: "png", hasAlpha: false, provenance: "generation_final" });
         expect(result.bytes).toBe(baseBytes.length);
         expect(proof.composition.compositeSha256).toBe(digest(baseBytes));
         const [original, composite] = await Promise.all([sharp(source).rotate().toColourspace("srgb").ensureAlpha().raw().toBuffer(), sharp(baseBytes).ensureAlpha().raw().toBuffer()]);
@@ -262,16 +263,16 @@ describe("image task result persistence", () => {
         expect(result).not.toHaveProperty("enhancementId");
     });
 
-    it("keeps an old product protection task skipped without assigning the v2 baseline contract", async () => {
+    it("freezes the delivered final for enhancement without inventing a product baseline contract", async () => {
         const { task, native } = await productDeliveryTask();
         delete task.enhancementDelivery;
         const {
             results: [result],
         } = await prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture");
-        expect(result.enhancementSkip).toEqual({ status: "skipped", reason: "protected_contract" });
+        expect(result).not.toHaveProperty("enhancementSkip");
         expect(result).not.toHaveProperty("productEnhancementEvidence");
-        expect(result).not.toHaveProperty("nativeSource");
-        expect(result).not.toHaveProperty("enhancementId");
+        expect(result.enhancementSource).toMatchObject({ url: result.serverUrl, sha256: digest(native), provenance: "generation_final" });
+        expect(result.enhancementId).toBe(`enhancement:${task.id}:1`);
         expect(await readFile(assetPath(result.serverUrl!))).toEqual(native);
     });
 
@@ -414,9 +415,10 @@ describe("image task result persistence", () => {
         } = await prepare(task, { dataUrl: dataUrl(native) }, "http://fixture.local", "fixture");
         expect(result).toMatchObject({ width: 6, height: 4, sceneProtectionEvidence: { compositeOutsideChangedPixels: 0, nativeOutsideChangedPixels: 20, method: "source_pixels_copy" } });
         expect(result).toHaveProperty("resultId", `${task.id}:1`);
-        expect(result).toHaveProperty("enhancementSkip", { status: "skipped", reason: "protected_contract" });
-        expect(result).not.toHaveProperty("nativeSource");
-        expect(result).not.toHaveProperty("enhancementId");
+        expect(result).not.toHaveProperty("enhancementSkip");
+        expect(result.nativeSource).toMatchObject({ sha256: digest(native), provenance: "provider_native" });
+        expect(result.enhancementSource).toMatchObject({ url: result.serverUrl, sha256: result.sceneProtectionEvidence!.compositeDigest, provenance: "generation_final" });
+        expect(result.enhancementId).toBe(`enhancement:${task.id}:1`);
         const evidence = result.sceneProtectionEvidence!;
         expect((await readFile(assetPath(evidence.nativeUrl!))).equals(native)).toBe(true);
         expect(await sharp(await readFile(assetPath(evidence.maskUrl!))).metadata()).toMatchObject({ width: 6, height: 4 });
@@ -428,7 +430,7 @@ describe("image task result persistence", () => {
         const restored = await getImageTask(created.id);
         expect(restored?.sceneProtection).toEqual(task.sceneProtection);
         expect(restored?.result?.sceneProtectionEvidence).toEqual(evidence);
-        expect(restored?.result).toHaveProperty("enhancementSkip", { status: "skipped", reason: "protected_contract" });
+        expect(restored?.result?.enhancementSource).toEqual(result.enhancementSource);
     });
 
     it("does not turn a partially unreadable local scene batch into success", async () => {
@@ -525,9 +527,9 @@ describe("image task result persistence", () => {
         );
         expect(results).toHaveLength(2);
         for (const media of results) {
-            expect(media).toHaveProperty("enhancementSkip", { status: "skipped", reason: "protected_contract" });
-            expect(media).not.toHaveProperty("nativeSource");
-            expect(media).not.toHaveProperty("enhancementId");
+            expect(media).not.toHaveProperty("enhancementSkip");
+            expect(media.enhancementSource).toMatchObject({ url: media.serverUrl, provenance: "generation_final" });
+            expect(media.enhancementId).toBe(`enhancement:${media.resultId}`);
         }
         expect(batchEvidence?.map((slot) => ({ resultId: slot.resultId, resultIndex: slot.resultIndex, nativeStatus: slot.nativeStatus, storageStatus: slot.storageStatus }))).toEqual(
             [1, 2].map((resultIndex) => ({ resultId: `${task.id}:${resultIndex}`, resultIndex, nativeStatus: "readable", storageStatus: "stored" })),

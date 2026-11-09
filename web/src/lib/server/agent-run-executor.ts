@@ -397,7 +397,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 ))
             )
                 return;
-            const legacyAnalysis = toLegacyEcommerceVisualAnalysis(analysis);
+            const legacyAnalysis = toLegacyEcommerceVisualAnalysis(analysis, purposeDecision?.currentSceneBaselineId);
             if (purposeDecision && purposeDecision.state !== "resolved") {
                 await pauseForReview(
                     purposeDecision.issues.some((issue) => issue.code === "reference_cue_unreliable") ? "reference_cue_unreliable" : "reference_purpose_confirmation_required",
@@ -431,8 +431,12 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             if (sources.productAnchorId && sources.currentSceneBaselineId) {
                 const product = legacyAnalysis.references.find((reference) => reference.assetId === sources.productAnchorId && reference.role === "product" && reference.confidence === "high");
                 const scene = legacyAnalysis.references.find((reference) => reference.assetId === sources.currentSceneBaselineId && reference.role === "scene" && reference.confidence === "high");
-                if (!product?.productFacts || !scene?.sceneFacts || !scene.productCore || !scene.fusionHalo) {
+                if (!product?.productFacts || !scene || (!scene.sceneFacts && !purposeDecision) || !scene.productCore || !scene.fusionHalo) {
                     await pauseForReview("local_edit_visual_ambiguity", "无法可靠确认场景中的商品位置，请重新选择清晰的图片。", true, undefined, planningEvidence());
+                    return;
+                }
+                if (purposeDecision && !scene.editableTargets.length) {
+                    await pauseForReview("missing_target", "当前图片尚无可可靠定位的非商品编辑区域，请补充修改位置或更换清晰图片。", true, undefined, planningEvidence());
                     return;
                 }
             }
@@ -474,7 +478,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                     origin,
                     cookie,
                     userId: claimed.userId,
-                    requestId: claimed.id,
+                    requestId: claimed.planningRequestId || claimed.id,
                     planningInput,
                     sources,
                     branchId: branch?.branchId || `ecommerce-${claimed.id}`,
@@ -653,7 +657,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                     run.userId,
                     model,
                     false,
-                    systemAiIdempotencyKey("agent-plan", run.userId, run.id, candidate.channel.id, candidate.upstreamModel),
+                    systemAiIdempotencyKey("agent-plan", run.userId, claimed.planningRequestId || run.id, candidate.channel.id, candidate.upstreamModel),
                     true,
                     () =>
                         updateAgentRunById(run.id, { timings: { ...(claimed.timings || { requestAcceptedAt: claimed.createdAt }), plannerFirstByteAt: Date.now() } }, { type: "run.planning.model_connected" }, ["running"], executionId).then(
@@ -774,7 +778,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
 async function executeEcommerceProtection(run: AgentRun, executionId: string, origin: string, cookie: string, settings: Awaited<ReturnType<typeof getAuthSettings>>) {
     const analysis = run.ecommerceSnapshot?.visualAnalysis;
     if (!analysis) throw new Error("已保存的商品保护计划缺少视觉事实");
-    const task = await prepareEcommerceProtectionTask(run, executionId, toLegacyEcommerceVisualAnalysis(analysis));
+    const task = await prepareEcommerceProtectionTask(run, executionId, toLegacyEcommerceVisualAnalysis(analysis, run.ecommerceSnapshot?.plan?.source.currentSceneBaselineId), settings.generationDefaults);
     if (!task) return;
     if (!(await updateAgentRunById(run.id, { tasks: [task] }, { type: "ecommerce.progress", data: { stage: "generating_image", text: publicEcommerceProgress("generating_image") } }, ["running"], executionId))) return;
     await executeTasks(run.id, origin, cookie, executionId, settings);

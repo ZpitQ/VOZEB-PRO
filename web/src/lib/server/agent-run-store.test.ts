@@ -476,6 +476,21 @@ describe("explicit saved native and published enhancement baselines", () => {
 describe("protected ecommerce delivery continuity", () => {
     beforeEach(() => vi.clearAllMocks());
 
+    it("keeps the protected original and its full-image enhancement selectable by their own identities", async () => {
+        const history = protectedImageHistory();
+        const final = { ...history.publication.decision.delivery.baseline, provenance: "generation_final" as const };
+        Object.assign(history.imageTask.result, { enhancementSource: final });
+        const { delivery: _delivery, ...fullDecision } = history.publication.decision;
+        Object.assign(history.publication, { decision: { ...fullDecision, source: final, target: { width: 4096, height: 4096 } } });
+        const { protection: _protection, ...publication } = history.publication.publication;
+        Object.assign(history.publication, { publication: { ...publication, delivered: { ...publication.delivered, width: 4096, height: 4096 } } });
+        Object.assign(history.enhanced, { width: 4096, height: 4096 });
+        history.enhanced.metadata.nativeSha256 = final.sha256;
+        bindGeneratedImageHistory(history);
+        await expect(selectCurrentSceneBaseline("conversation", history.native.id, "user")).resolves.toMatchObject({ id: history.native.id, serverUrl: final.url, width: 1254 });
+        await expect(selectCurrentSceneBaseline("conversation", history.enhanced.id, "user")).resolves.toMatchObject({ id: history.enhanced.id, serverUrl: history.enhanced.serverUrl, width: 4096 });
+    });
+
     it.each(["native", "enhanced"] as const)("uses the explicitly selected protected %s without confusing its identity with provider native", async (variant) => {
         const history = protectedImageHistory();
         bindGeneratedImageHistory(history);

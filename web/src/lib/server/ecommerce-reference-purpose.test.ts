@@ -389,7 +389,7 @@ describe("ecommerce reference purpose preparation", () => {
 
             const decision = resolveEcommerceReferenceDecision({ planningInput: input, analysis });
 
-            expect(decision).toMatchObject({ state: "resolved", editTargetId: "current", productAnchorId, currentSceneBaselineId: null, issues: [] });
+            expect(decision).toMatchObject({ state: "resolved", editTargetId: "current", productAnchorId, currentSceneBaselineId: "current", issues: [] });
             expect(decision.bindings).toEqual([{ assetId: "current", alias: "图片1", purposes: ["edit_target"], source: explicitTarget ? "explicit" : "inferred" }]);
             expect({ input, analysis }).toEqual(original);
         },

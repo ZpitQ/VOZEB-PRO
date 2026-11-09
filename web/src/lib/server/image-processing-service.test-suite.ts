@@ -341,6 +341,23 @@ export function imageProcessingEnqueueSuite(provider: "file" | "postgres") {
 
         type FailureFixture = { task: ImageProcessingTask; identity: { workerId: string; executionId: string }; artifact: StoredImageProcessingArtifact; completion: CompleteImageProcessingInput };
 
+        async function removePauseProjection() {
+            if (provider === "postgres") {
+                await database.withPostgresTransaction(async (executor) => {
+                    await executor.query("DELETE FROM creative_run_events WHERE run_id = $1 AND type = 'run.paused'", [run.id]);
+                    await executor.query("UPDATE creative_messages SET content = 'stale planning' WHERE id = $1", [run.assistantMessageId]);
+                });
+            } else {
+                const repository = await import("./creative-runtime-repository");
+                const db = await repository.readRuntimeFile();
+                await repository.writeRuntimeFile({
+                    ...db,
+                    events: db.events.filter((event) => event.runId !== run.id || event.type !== "run.paused"),
+                    messages: db.messages.map((message) => (message.id === run.assistantMessageId ? { ...message, content: "stale planning" } : message)),
+                });
+            }
+        }
+
         function failureCases(operation: "prepare_reference" | "build_protection", fixture: () => Promise<FailureFixture>) {
             describe(`${operation} closed failure registration`, () => {
                 const workerToken = "fixture-image-worker-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -574,9 +591,13 @@ export function imageProcessingEnqueueSuite(provider: "file" | "postgres") {
                     }, 30_000);
                 }
 
-                it("keeps reported rejection diagnostics internal while returning a safe parent failure", async () => {
+                it.each([
+                    { code: "fixture_closed_rejection", message: "图像处理未能完成，请检查参考图片或保护设置后继续。" },
+                    { code: "segmentation_rejected", message: "无法可靠识别商品与背景边界，已暂停处理，请核对图片或保护范围后继续。" },
+                ])("keeps reported rejection diagnostics internal while returning a safe parent failure ($code)", async ({ code, message }) => {
                     const current = await fixture();
                     const failure = rejectedReport(current);
+                    failure.error.code = code;
 
                     const response = await postFail(current.task, { ...current.identity, failure });
 
@@ -589,6 +610,19 @@ export function imageProcessingEnqueueSuite(provider: "file" | "postgres") {
                     expect(parent?.failure).not.toContain(failure.stderr);
                     expect(parent?.failure).not.toContain("/fixture/private");
                     expect(await tasks.getStoredGenerationTaskRecord("image_processing", current.task.id)).toMatchObject({ resultPayload: { failure } });
+                    assert(parent);
+                    expect((await runtime.listCreativeMessages(run.conversationId)).find((item) => item.id === run.assistantMessageId)?.content).toBe(message);
+                    const truth = await truthRows(current.task);
+                    await removePauseProjection();
+                    const selection = await import("./agent-run-public-selection");
+                    const request = new Request("http://localhost/api/agent/runs/" + run.id);
+                    expect(await selection.publicAgentRunForRequest(parent, request)).toMatchObject({ imageProcessingRecovery: { reason: "input_rejected", canResume: false, message } });
+                    expect((await runtime.listCreativeMessages(run.conversationId)).find((item) => item.id === run.assistantMessageId)?.content).toBe(message);
+                    const events = await runtime.listCreativeRunEvents(run.id);
+                    expect(events.filter((event) => event.type === "run.paused")).toHaveLength(1);
+                    expect(await selection.publicAgentRunSnapshotForRequest(parent, request)).toMatchObject({ imageProcessingRecovery: { reason: "input_rejected", canResume: false } });
+                    expect(await runtime.listCreativeRunEvents(run.id)).toEqual(events);
+                    expect(await truthRows(current.task)).toEqual(truth);
                 });
 
                 it.each([
@@ -2373,6 +2407,7 @@ export function imageProcessingEnqueueSuite(provider: "file" | "postgres") {
             it.each<{ policy: string; options: (assetId: string) => ImageProcessingProtectionOptions }>([
                 { policy: "white opaque", options: () => white },
                 { policy: "white transparent", options: () => ({ transparentBackground: true }) },
+                { policy: "white detail framing", options: () => ({ transparentBackground: false, sourceFraming: "visible_extent" }) },
                 { policy: "white qualified baseline", options: () => ({ ...white, freezeEnhancementBaseline: true }) },
                 { policy: "local normalized target and pixel protection", options: () => local },
                 { policy: "local qualified pixel core", options: qualifiedLocal },
@@ -2439,6 +2474,51 @@ export function imageProcessingEnqueueSuite(provider: "file" | "postgres") {
                 expect(manifest.sourceIdentities[0].assetVersion).toBe(prepare.payload.inputs[0].assetVersion);
                 expect(task.payload.resource.facts.decodedInputs[0].assetVersion).toBe(buildInput.inputs[0].assetVersion);
                 expect((await tasks.getStoredGenerationTask<AgentRun>("agent", run.id))?.ecommerceSnapshot?.referenceCheckpoint).toEqual(previousParent.ecommerceSnapshot.referenceCheckpoint);
+            });
+
+            it("rejects creating a native product child that drops its frozen generation execution", async () => {
+                await protectionFixture();
+                const execution: import("./ecommerce-image-compiler").EcommerceCompiledImageRequest = {
+                    state: "ready",
+                    compilerVersion: "ecommerce-openai-image-2.5.v1",
+                    providerProfileId: "gpt-image-2.5-sunburst",
+                    prompt: "fixture product",
+                    referenceRoles: [],
+                    parameters: { variant: "gpt-image-2.5-sunburst" },
+                    modelSnapshot: { logicalRole: "image_generation", capability: "image", logicalModelId: "fixture-image", channelId: "fixture-image", upstreamModel: "gpt-image-2.5-sunburst", apiFormat: "openai" },
+                    generationInput: { bounds: { width: 12, height: 12 }, quality: "high" },
+                };
+                const parent = await tasks.mutateStoredGenerationTask<AgentRun>("agent", run.id, 60_000, (current) => {
+                    assert(current.ecommerceSnapshot?.referenceCheckpoint);
+                    return {
+                        ...current,
+                        status: "running",
+                        executionId: "fixture-product-dispatch",
+                        tasks: [{ id: "ecommerce-product-scene", type: "image", title: "fixture product", prompt: execution.prompt, count: 1, attempts: 1, status: "running", dependencies: [], ecommerceExecution: execution }],
+                        ecommerceSnapshot: {
+                            ...current.ecommerceSnapshot,
+                            referenceCheckpoint: { ...current.ecommerceSnapshot.referenceCheckpoint, state: "resolved", analysisStage: { ...current.ecommerceSnapshot.referenceCheckpoint.analysisStage, state: "completed" } },
+                        },
+                    };
+                });
+                assert(parent?.ecommerceSnapshot?.referenceCheckpoint);
+                const checkpoint = parent.ecommerceSnapshot.referenceCheckpoint;
+                const child = {
+                    id: randomUUID(),
+                    userId,
+                    status: "pending",
+                    createdAt: Date.now(),
+                    updatedAt: Date.now(),
+                    runId: run.id,
+                    conversationId: run.conversationId,
+                    parentTaskId: "ecommerce-product-scene",
+                    attemptNo: 1,
+                    clientRequestId: `${parent.clientRequestId}:ecommerce-product-scene:1:1`,
+                };
+                const referenceDispatch = { executionId: "fixture-product-dispatch", inputId: checkpoint.inputId, decisionId: checkpoint.decisionId, analysisRequestId: checkpoint.analysisStage.requestId, copy: 1 };
+                await expect(tasks.createStoredGenerationTask("image", child, 60_000, { referenceDispatch })).rejects.toThrow("参考任务派发身份已失效");
+                expect(await tasks.getStoredGenerationTaskRecord("image", child.id)).toBeNull();
+                expect(await tasks.createStoredGenerationTask("image", { ...child, ecommerceExecution: execution }, 60_000, { referenceDispatch })).toMatchObject({ id: child.id, ecommerceExecution: execution });
             });
 
             it("resolves an omitted source hash from the completed prepare instead of weakening the new stage identity", async () => {
@@ -2668,7 +2748,7 @@ export function imageProcessingEnqueueSuite(provider: "file" | "postgres") {
                     vi.stubEnv("VOZEB_PRO_MAINTENANCE_TOKEN", "fixture-maintenance-token-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
                 });
 
-                async function nativeArtifact(task: ImageProcessingTask, identity: { workerId: string; executionId: string }) {
+                async function nativeArtifact(task: Pick<ImageProcessingTask, "id" | "payload">, identity: { workerId: string; executionId: string }) {
                     const { readReferenceAsset } = await import("./reference-asset-store");
                     const original = await readReferenceAsset(task.payload.sources[0].storageKey);
                     assert(original);
@@ -2710,7 +2790,7 @@ export function imageProcessingEnqueueSuite(provider: "file" | "postgres") {
                     );
                 }
 
-                function postMaskComplete(task: ImageProcessingTask, completion: unknown) {
+                function postMaskComplete(task: Pick<ImageProcessingTask, "id">, completion: unknown) {
                     return completeRoute.POST(
                         new Request(`http://localhost/api/maintenance/image-processing/${task.id}/complete`, { method: "POST", headers: { authorization: `Bearer ${workerToken}`, "content-type": "application/json" }, body: JSON.stringify(completion) }),
                         { params: Promise.resolve({ id: task.id }) },
@@ -2735,6 +2815,318 @@ export function imageProcessingEnqueueSuite(provider: "file" | "postgres") {
                     await scheduler.scheduleGenerationTask("image_processing", fixture.task.id, { resultPayload: { executionId: fixture.identity.executionId, artifacts: [artifact] } });
                     return { ...fixture, artifact, completion: completionFor(fixture, artifact) };
                 }
+
+                it("registers the paired generation inputs with the original full-resolution mask", async () => {
+                    const generationInput = { bounds: { width: 12, height: 12 }, quality: "high" };
+                    const fixture = await leasedMask(() => ({ transparentBackground: false, generationInput }));
+                    const upload = async (index: number) => {
+                        const artifact = fixture.native.result.artifacts[index];
+                        const response = await outputRoute.PUT(
+                            new Request(`http://localhost/api/maintenance/image-processing/${fixture.task.id}/outputs/${artifact.kind}`, {
+                                method: "PUT",
+                                headers: { authorization: `Bearer ${workerToken}`, "content-type": artifact.mimeType, "x-vozeb-pro-worker-id": fixture.identity.workerId, "x-vozeb-pro-execution-id": fixture.identity.executionId },
+                                body: new Uint8Array(await readFile(artifact.path)),
+                            }),
+                            { params: Promise.resolve({ id: fixture.task.id, kind: artifact.kind }) },
+                        );
+                        expect(response.status, await response.clone().text()).toBe(201);
+                        return (await response.json()).data as StoredImageProcessingArtifact;
+                    };
+                    const mask = await upload(0);
+                    const reference = await upload(1);
+                    const generationMask = await upload(2);
+                    const completion = { ...fixture.identity, manifest: { ...fixture.native.result, artifacts: [mask, reference, generationMask] }, metrics };
+                    expect(mask).toMatchObject({ kind: "mask", width: 24, height: 18 });
+                    expect(reference).toMatchObject({ kind: "generation_reference", width: 12, height: 9 });
+                    expect(generationMask).toMatchObject({ kind: "generation_mask", width: 12, height: 9 });
+                    const incomplete = await postMaskComplete(fixture.task, { ...completion, manifest: { ...completion.manifest, artifacts: [mask, reference, reference] } });
+                    expect(incomplete.status).toBe(400);
+                    const response = await postMaskComplete(fixture.task, completion);
+                    expect(response.status, await response.clone().text()).toBe(200);
+                    const parent = await tasks.getStoredGenerationTask<AgentRun>("agent", run.id);
+                    expect(parent?.ecommerceSnapshot?.processing?.protection).toMatchObject({ jobId: fixture.task.id, generationInput, manifest: { artifacts: [mask, reference, generationMask] } });
+                    expect(parent?.ecommerceSnapshot?.processing?.waitingFor).toBeUndefined();
+                    expect(await tasks.getStoredGenerationTaskRecord("image_processing", fixture.prepare.task.id)).toEqual(fixture.preparedRecord);
+                });
+
+                it("keeps the primary mask pair and prepares the auxiliary original before dispatch and TCP submission", async () => {
+                    const { prepareEcommerceProtectionTask } = await import("./ecommerce-protection-preparation");
+                    const { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } = await import("./ecommerce-image-compiler");
+                    const { compileStrictProductEdit } = await import("./ecommerce-product-regions");
+                    const { emptyAdvancedConfig } = await import("@/lib/channel-protocol-registry");
+                    ({ run, input } = await seedReference(userId, opaqueProduct));
+                    const prepare = await leasedPrepare();
+                    const prepared = await nativeArtifact(prepare.task, prepare.identity);
+                    const analysisArtifact = await service.writeImageProcessingOutput(prepare.task.id, "analysis", prepare.identity, { stream: imageBody(prepared.bytes), mimeType: prepared.result.artifacts[0].mimeType });
+                    await service.completeImageProcessingTask(prepare.task.id, { ...prepare.identity, manifest: { ...prepared.result, artifacts: [analysisArtifact] }, metrics });
+                    const auxiliaryBytes = await sharp({ create: { width: 48, height: 36, channels: 3, background: "#5a7c9e" } })
+                        .png()
+                        .toBuffer();
+                    const { writeReferenceImageDataUrl } = await import("./reference-asset-store");
+                    const storedAuxiliary = await writeReferenceImageDataUrl(`data:image/png;base64,${auxiliaryBytes.toString("base64")}`, { ownerUserId: userId, conversationId: run.conversationId, source: "fixture-auxiliary" });
+                    const [auxiliary] = await runtime.registerCreativeAssets([
+                        {
+                            id: `fixture-auxiliary-${randomUUID()}`,
+                            userId,
+                            conversationId: run.conversationId,
+                            ordinal: 1,
+                            type: "image",
+                            title: "auxiliary.png",
+                            sourceRunId: run.id,
+                            serverUrl: `/api/reference-assets/${storedAuxiliary.token}`,
+                            metadata: {},
+                        },
+                    ]);
+                    const { buildEcommercePlanningInput } = await import("./ecommerce-generation-snapshot");
+                    const { createEcommerceReferenceCheckpoint } = await import("./ecommerce-reference-recovery");
+                    const auxiliaryExecutionId = randomUUID();
+                    const expanded = await tasks.mutateStoredGenerationTask<AgentRun>("agent", run.id, 60_000, (current) => {
+                        assert(current.ecommerceSnapshot?.referenceCheckpoint);
+                        const original = current.ecommerceSnapshot.referenceCheckpoint.assets[0];
+                        const assets = [original.asset, auxiliary];
+                        const planningInput = buildEcommercePlanningInput(current, assets, { summary: "", recentMessages: [] });
+                        const checkpoint = createEcommerceReferenceCheckpoint(current, planningInput, assets);
+                        return {
+                            ...current,
+                            executionId: auxiliaryExecutionId,
+                            referencedAssetIds: assets.map((asset) => asset.id),
+                            ecommerceSnapshot: { ...current.ecommerceSnapshot, referenceCheckpoint: { ...checkpoint, assets: [original, checkpoint.assets[1]] } },
+                        };
+                    });
+                    assert(expanded?.ecommerceSnapshot?.referenceCheckpoint);
+                    await scheduler.scheduleGenerationTask("agent", run.id, { executionPhase: "created", nextPollAt: Date.now() });
+                    expect(await scheduler.claimDueGenerationTasks({ workerId: "fixture-auxiliary-parent", taskIds: [run.id], limit: 1 })).toHaveLength(1);
+                    const auxPrepare = await leasedPrepare({ ...input, parentExecutionId: auxiliaryExecutionId, inputs: [{ assetId: auxiliary.id, assetVersion: expanded.ecommerceSnapshot.referenceCheckpoint.assets[1].assetVersion }] });
+                    const auxNative = await nativeArtifact(auxPrepare.task, auxPrepare.identity);
+                    const auxAnalysis = await service.writeImageProcessingOutput(auxPrepare.task.id, "analysis", auxPrepare.identity, { stream: imageBody(auxNative.bytes), mimeType: auxNative.result.artifacts[0].mimeType });
+                    await service.completeImageProcessingTask(auxPrepare.task.id, { ...auxPrepare.identity, manifest: { ...auxNative.result, artifacts: [auxAnalysis] }, metrics });
+                    const analysisBefore = await tasks.getStoredGenerationTaskRecord("image_processing", auxPrepare.task.id);
+                    const resumed = await resumeProtectionParent(white);
+                    const assetId = resumed.buildInput.inputs[0].assetId;
+                    const analysis: import("./ecommerce-visual-analysis").EcommerceVisualAnalysis = {
+                        analysisVersion: "ecommerce-visual-analysis.v1",
+                        modelRole: { logicalRole: "vision_analysis", logicalModelId: "fixture-vision", channelId: "fixture-vision", upstreamModel: "fixture-vision" },
+                        references: [
+                            {
+                                assetId,
+                                role: "product",
+                                confidence: "high",
+                                visualEvidence: { whiteBackground: true, transparentBackground: false, isolatedSubject: true, completeScene: false },
+                                productFacts: { identity: "cabinet", outline: "rectangle", color: "brown", material: "wood", brandText: [], view: "front" },
+                                sceneFacts: null,
+                                productCore: { x: 0.3, y: 0.2, width: 0.4, height: 0.6 },
+                                fusionHalo: { x: 0.25, y: 0.15, width: 0.5, height: 0.7 },
+                                editableTargets: [],
+                            },
+                        ],
+                    };
+                    const route: import("./ecommerce-model-routing").EcommerceRoleRouteSnapshot = {
+                        logicalRole: "image_generation",
+                        capability: "image",
+                        logicalModelId: "fixture-image",
+                        channelId: "fixture-image",
+                        upstreamModel: "gpt-image-2.5-sunburst",
+                        apiFormat: "openai",
+                        imageEdit: { protocol: "sub2api", editPath: "/images/edits", transport: "json", supportsIndependentMask: true },
+                    };
+                    const plan: EcommerceEditPlan = {
+                        ...resumed.plan,
+                        source: { ...resumed.plan.source, sceneReferenceIds: [auxiliary.id] },
+                        planVersion: "ecommerce-edit.v1",
+                        canvas: { mode: "exact", size: { width: 12, height: 9 }, source: "user_text", allowReframe: false },
+                    };
+                    const profile = resolveEcommerceImageProviderProfile(route);
+                    assert(profile);
+                    const execution = compileEcommerceImageRequest(plan, profile);
+                    const parent = await tasks.mutateStoredGenerationTask<AgentRun>("agent", run.id, 60_000, (current) => {
+                        assert(current.ecommerceSnapshot?.referenceCheckpoint);
+                        return {
+                            ...current,
+                            ecommerceSnapshot: {
+                                ...current.ecommerceSnapshot,
+                                plan,
+                                visualAnalysis: analysis,
+                                modelRouteSnapshots: { image_generation: route },
+                                compilerVersion: execution.compilerVersion,
+                                referenceCheckpoint: { ...current.ecommerceSnapshot.referenceCheckpoint, state: "resolved", analysisStage: { ...current.ecommerceSnapshot.referenceCheckpoint.analysisStage, state: "completed" } },
+                            },
+                        };
+                    });
+                    assert(parent);
+                    expect(await prepareEcommerceProtectionTask(parent, resumed.buildInput.parentExecutionId, analysis, { imageQuality: "high", imageSize: "auto" })).toBeUndefined();
+                    const leases = await service.claimImageProcessingTasks({ workerId: "fixture-native-copy-worker", profileVersion: prepare.task.payload.resource.profileVersion, availableMemoryBytes: 1024 * 1024 * 1024, slots: 1 });
+                    expect(leases.tasks).toHaveLength(1);
+                    const lease = leases.tasks[0];
+                    assert(lease.payload.operation === "build_protection");
+                    const identity = { workerId: "fixture-native-copy-worker", executionId: lease.executionId };
+                    const native = await nativeArtifact({ id: lease.id, payload: lease.payload }, identity);
+                    const upload = async (index: number) => {
+                        const artifact = native.result.artifacts[index];
+                        return service.writeImageProcessingOutput(lease.id, artifact.kind, identity, { stream: imageBody(await readFile(artifact.path)), mimeType: artifact.mimeType });
+                    };
+                    const originalMask = await upload(0);
+                    const generationReference = await upload(1);
+                    const generationMask = await upload(2);
+                    await service.completeImageProcessingTask(lease.id, { ...identity, manifest: { ...native.result, artifacts: [originalMask, generationReference, generationMask] }, metrics });
+                    const executionId = randomUUID();
+                    await tasks.mutateStoredGenerationTask<AgentRun>("agent", run.id, 60_000, (current) => ({ ...current, executionId }));
+                    await scheduler.scheduleGenerationTask("agent", run.id, { executionPhase: "created", nextPollAt: Date.now() });
+                    expect(await scheduler.claimDueGenerationTasks({ workerId: "fixture-native-copy-parent", taskIds: [run.id], limit: 1 })).toHaveLength(1);
+                    const ready = await tasks.getStoredGenerationTask<AgentRun>("agent", run.id);
+                    assert(ready);
+                    const checkpointBefore = structuredClone(ready.ecommerceSnapshot?.referenceCheckpoint);
+                    expect(await prepareEcommerceProtectionTask(ready, executionId, analysis, { imageQuality: "low", imageSize: "1024x1024" })).toBeUndefined();
+                    const auxiliaryStage = await service.claimImageProcessingTasks({ workerId: "fixture-auxiliary-generation", profileVersion: prepare.task.payload.resource.profileVersion, availableMemoryBytes: 1024 * 1024 * 1024, slots: 1 });
+                    expect(auxiliaryStage.tasks).toHaveLength(1);
+                    expect(auxiliaryStage.tasks[0].payload).toMatchObject({ operation: "prepare_reference", options: { generationInput: { bounds: { width: 12, height: 9 }, quality: "high" } }, inputs: [{ assetId: auxiliary.id }] });
+                    const generationTask = auxiliaryStage.tasks[0];
+                    assert(generationTask.payload.operation === "prepare_reference");
+                    const generationIdentity = { workerId: "fixture-auxiliary-generation", executionId: generationTask.executionId };
+                    const generated = await nativeArtifact({ id: generationTask.id, payload: generationTask.payload }, generationIdentity);
+                    const generationUpload = await outputRoute.PUT(
+                        new Request(`http://localhost/api/maintenance/image-processing/${generationTask.id}/outputs/generation_reference`, {
+                            method: "PUT",
+                            headers: { authorization: `Bearer ${workerToken}`, "content-type": generated.result.artifacts[0].mimeType, "x-vozeb-pro-worker-id": generationIdentity.workerId, "x-vozeb-pro-execution-id": generationIdentity.executionId },
+                            body: new Uint8Array(generated.bytes),
+                        }),
+                        { params: Promise.resolve({ id: generationTask.id, kind: "generation_reference" }) },
+                    );
+                    expect(generationUpload.status, await generationUpload.clone().text()).toBe(201);
+                    const auxiliaryReference = (await generationUpload.json()).data;
+                    const { artifacts: _artifacts, ...generationManifest } = generated.result;
+                    const completed = await postMaskComplete(generationTask, { ...generationIdentity, manifest: { ...generationManifest, artifacts: [auxiliaryReference] }, metrics });
+                    expect(completed.status, await completed.clone().text()).toBe(200);
+                    expect(auxiliaryReference).toMatchObject({ kind: "generation_reference", width: 12, height: 9 });
+                    expect(await tasks.getStoredGenerationTaskRecord("image_processing", auxPrepare.task.id)).toEqual(analysisBefore);
+                    const nextExecutionId = randomUUID();
+                    await tasks.mutateStoredGenerationTask<AgentRun>("agent", run.id, 60_000, (current) => ({ ...current, executionId: nextExecutionId }));
+                    await scheduler.scheduleGenerationTask("agent", run.id, { executionPhase: "created", nextPollAt: Date.now() });
+                    expect(await scheduler.claimDueGenerationTasks({ workerId: "fixture-auxiliary-ready", taskIds: [run.id], limit: 1 })).toHaveLength(1);
+                    const generationReady = await tasks.getStoredGenerationTask<AgentRun>("agent", run.id);
+                    assert(generationReady);
+                    expect(generationReady.ecommerceSnapshot?.referenceCheckpoint).toEqual(checkpointBefore);
+                    const executable = await prepareEcommerceProtectionTask(generationReady, nextExecutionId, analysis, { imageQuality: "low", imageSize: "1024x1024" });
+                    assert(executable?.productProtectionRegions && executable.references);
+                    expect(executable.quality).toBe("high");
+                    await tasks.mutateStoredGenerationTask<AgentRun>("agent", run.id, 60_000, (current) => ({ ...current, tasks: [{ ...executable, status: "running", attempts: 1 }] }));
+                    const config: import("./image-task-store").ImageTaskConfig = {
+                        baseUrl: "http://127.0.0.1",
+                        apiKey: "fixture-only",
+                        apiFormat: "openai",
+                        model: "gpt-image-2.5-sunburst",
+                        quality: "high",
+                        size: "12x9",
+                        advancedConfig: { ...emptyAdvancedConfig(), protocol: "sub2api" },
+                    };
+                    const references = executable.references.map((reference) => ({ id: reference.assetId, url: reference.url, dataUrl: "", width: reference.width, height: reference.height, ecommerceRole: reference.ecommerceRole }));
+                    const compiled = compileStrictProductEdit({ kind: "edit" as const, prompt: executable.prompt, config, references }, executable.productProtectionRegions);
+                    assert(compiled.state === "ready");
+                    const checkpoint = ready.ecommerceSnapshot?.referenceCheckpoint;
+                    assert(checkpoint);
+                    const referenceDispatch = { executionId: nextExecutionId, inputId: checkpoint.inputId, decisionId: checkpoint.decisionId, analysisRequestId: checkpoint.analysisStage.requestId, copy: 1 };
+                    const image: import("./image-task-store").ImageTask = {
+                        ...compiled.task,
+                        id: randomUUID(),
+                        userId,
+                        username: "fixture",
+                        displayName: "fixture",
+                        source: "agent",
+                        status: "pending",
+                        createdAt: Date.now(),
+                        updatedAt: Date.now(),
+                        runId: run.id,
+                        conversationId: run.conversationId,
+                        parentTaskId: executable.id,
+                        clientRequestId: `${run.clientRequestId}:${executable.id}:1:1`,
+                        attemptNo: 1,
+                        referenceDispatch,
+                        ecommerceExecution: executable.ecommerceExecution,
+                    };
+                    await tasks.createStoredGenerationTask("image", image, 60_000, { referenceDispatch });
+                    await tasks.linkStoredGenerationTask("image", image.id, { parentTaskId: run.id });
+                    const linked = await tasks.getStoredGenerationTask<import("./image-task-store").ImageTask>("image", image.id);
+                    assert(linked);
+                    expect(linked.parentTaskId).toBe(run.id);
+                    const pair = await service.readEcommerceGenerationInput(linked, "high", "12x9");
+                    expect(pair.references[0]).toMatchObject({ serverUrl: "/api/reference-assets/" + generationReference.storageKey, width: 12, height: 9 });
+                    expect(pair.references[1]).toMatchObject({ id: auxiliary.id, serverUrl: "/api/reference-assets/" + auxiliaryReference.storageKey, width: 12, height: 9 });
+                    expect(await service.readEcommerceGenerationInput(linked, "high", "12x9")).toEqual(pair);
+                    await tasks.mutateStoredGenerationTask<import("./image-task-store").ImageTask>("image", image.id, 60_000, (value) => ({ ...value, executionId: "fixture-superseding-image-epoch" }));
+                    await expect(service.readEcommerceGenerationInput(linked, "high", "12x9")).rejects.toMatchObject({ status: 409 });
+                    await tasks.mutateStoredGenerationTask<import("./image-task-store").ImageTask>("image", image.id, 60_000, (value) => ({ ...value, executionId: undefined }));
+                    const secondAttempt = await tasks.mutateStoredGenerationTask<import("./image-task-store").ImageTask>("image", image.id, 60_000, (value) => ({ ...value, attemptNo: 2 }));
+                    assert(secondAttempt);
+                    expect(await service.readEcommerceGenerationInput(secondAttempt, "high", "12x9")).toEqual(pair);
+                    await expect(service.readEcommerceGenerationInput(linked, "high", "12x9")).rejects.toMatchObject({ status: 409 });
+                    await tasks.mutateStoredGenerationTask<import("./image-task-store").ImageTask>("image", image.id, 60_000, (value) => ({ ...value, attemptNo: 1 }));
+                    const before = await tasks.getStoredGenerationTaskRecord("image", image.id);
+                    expect(pair.mask).toMatchObject({ serverUrl: "/api/reference-assets/" + generationMask.storageKey, width: 12, height: 9 });
+                    const { buildJsonImageEditBodies } = await import("@/app/api/image-tasks/image-task-openai");
+                    await expect(buildJsonImageEditBodies(linked, "low", "12x9", "url", "http://127.0.0.1", "http://127.0.0.1")).rejects.toMatchObject({
+                        name: "GenerationSubmissionSafeFailure",
+                        cause: { message: "生成输入副本与原计划、参考或实际请求不一致" },
+                    });
+                    expect(await tasks.getStoredGenerationTaskRecord("image", image.id)).toEqual(before);
+                    expect((await tasks.getStoredGenerationTask<AgentRun>("agent", run.id))?.tasks[0].childTasks).toBeUndefined();
+                    const { buffer } = await import("node:stream/consumers");
+                    const { createImageTaskUpstreamStep } = await import("./image-task-runtime");
+                    let received: { images: { image_url: string }[]; mask: { image_url: string }; size: string } | undefined;
+                    const sourceUrl = linked.references[0].url;
+                    assert(sourceUrl);
+                    const media = new Map([
+                        [new URL(sourceUrl, "http://fixture").pathname, opaqueProduct],
+                        [new URL(auxiliary.serverUrl!, "http://fixture").pathname, auxiliaryBytes],
+                        ["/api/reference-assets/" + auxiliaryReference.storageKey, await readFile((await (await import("./reference-asset-store")).readReferenceAsset(auxiliaryReference.storageKey))!.filePath)],
+                        ["/api/reference-assets/" + generationReference.storageKey, await readFile(native.result.artifacts[1].path)],
+                        ["/api/reference-assets/" + generationMask.storageKey, await readFile(native.result.artifacts[2].path)],
+                    ]);
+                    const provider = createServer(async (request, response) => {
+                        if (request.method === "GET") {
+                            const body = media.get(new URL(request.url || "/", "http://fixture").pathname);
+                            assert(body);
+                            response.writeHead(200, { "content-type": "image/png" });
+                            response.end(body);
+                            return;
+                        }
+                        received = JSON.parse((await buffer(request)).toString("utf8"));
+                        response.writeHead(400, { "content-type": "application/json" });
+                        response.end(JSON.stringify({ error: { message: "fixture input received" } }));
+                    });
+                    await new Promise<void>((resolve, reject) => {
+                        provider.once("error", reject);
+                        provider.listen(0, "127.0.0.1", resolve);
+                    });
+                    try {
+                        const address = provider.address();
+                        assert(address && typeof address !== "string");
+                        const origin = `http://127.0.0.1:${address.port}`;
+                        const current = await tasks.mutateStoredGenerationTask<import("./image-task-store").ImageTask>("image", image.id, 60_000, (value) => ({ ...value, config: { ...value.config, baseUrl: "/api/fixture-image" } }));
+                        assert(current);
+                        const step = await createImageTaskUpstreamStep(current, origin, origin, "session=fixture-only");
+                        expect(received, JSON.stringify(step)).toBeDefined();
+                        expect(step.state).toBe("failed");
+                        assert(received);
+                        expect(received.size).toBe("12x9");
+                        const submittedReference = Buffer.from(received.images[0].image_url.split(",")[1], "base64");
+                        expect(
+                            createHash("sha256")
+                                .update(Buffer.from(received.images[1].image_url.split(",")[1], "base64"))
+                                .digest("hex"),
+                        ).toBe(auxiliaryReference.sha256);
+                        const submittedMask = Buffer.from(received.mask.image_url.split(",")[1], "base64");
+                        expect(createHash("sha256").update(submittedReference).digest("hex")).toBe(generationReference.sha256);
+                        expect(createHash("sha256").update(submittedMask).digest("hex")).toBe(generationMask.sha256);
+                        expect(await sharp(submittedReference).metadata()).toMatchObject({ width: 12, height: 9 });
+                        expect(await sharp(submittedMask).metadata()).toMatchObject({ width: 12, height: 9 });
+                        const saved = await tasks.getStoredGenerationTask<import("./image-task-store").ImageTask>("image", image.id);
+                        expect(saved?.references).toEqual(linked.references);
+                        expect(saved?.mask).toEqual(linked.mask);
+                    } finally {
+                        const closed = new Promise<void>((resolve, reject) => provider.close((error) => (error ? reject(error) : resolve())));
+                        provider.closeAllConnections();
+                        await closed;
+                    }
+                }, 120_000);
 
                 failureCases("build_protection", stagedMask);
                 cancellationCases(

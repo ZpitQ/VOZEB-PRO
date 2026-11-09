@@ -53,6 +53,7 @@ export type ImageTaskReference = {
 export type StoredImageTaskMediaResult = {
     resultId?: string;
     nativeSource?: Readonly<EnhancementSource>;
+    enhancementSource?: Readonly<EnhancementSource>;
     enhancementId?: string;
     productEnhancementEvidence?: ProductEnhancementBaselineEvidence;
     enhancementSkip?: ImageEnhancementSkip;

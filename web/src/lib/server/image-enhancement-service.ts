@@ -162,7 +162,7 @@ export async function retryImageEnhancement(id: string, userId: string) {
     if (initial && canResumeSkippedEnhancement(initial)) {
         const task = await getImageTask(initial.imageTaskId);
         const native = (task?.result?.results?.length ? task.result.results : task?.result ? [task.result] : []).find((result) => result.resultId === initial.resultId && result.enhancementId === id);
-        if (!task || task.userId !== userId || task.status !== "success" || !native || !isDeepStrictEqual(native.nativeSource, initial.decision.source)) return null;
+        if (!task || task.userId !== userId || task.status !== "success" || !native || !enhancementNativeIdentityMatches(task, native, initial.decision.source, initial.decision.delivery)) return null;
         const decision = planImageTaskEnhancement(task, native);
         if (decision.status !== "queued" || !isDeepStrictEqual(decision.target, initial.decision.target) || !isDeepStrictEqual(decision.delivery, initial.decision.delivery)) return null;
         resumed = decision;

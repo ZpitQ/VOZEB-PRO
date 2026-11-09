@@ -81,7 +81,7 @@ export function isNativeProductImageTaskResult(image: ImageTask) {
         ((protection.productAnchorId === protection.sourceAssetId && source.ecommerceRole === "product") ||
             (protection.maskProvider === "local-edit-target.v1" &&
                 protection.productAnchorId !== protection.sourceAssetId &&
-                execution.protection?.scope === "local" &&
+                execution.protection &&
                 !execution.protection.preserveOutsideMask &&
                 source.ecommerceRole === "scene" &&
                 image.references.length >= 2 &&

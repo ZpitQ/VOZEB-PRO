@@ -797,8 +797,4 @@ export function isRemoteMediaUrl(value: string) {
     return /^https?:\/\//i.test(value);
 }
 
-export function normalizeQuality(quality: string) {
-    const value = quality.trim().toLowerCase();
-    const normalized = QUALITY_ALIASES[value] || value;
-    return QUALITY_BASE[normalized] ? normalized : undefined;
-}
+export { normalizeQuality } from "@/lib/image-generation-size";

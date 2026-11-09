@@ -10,7 +10,7 @@ export type EnhancementSource = {
     byteLength: number;
     format: string;
     hasAlpha: boolean;
-    provenance: "provider_native" | "ai_enhanced";
+    provenance: "provider_native" | "ai_enhanced" | "generation_final";
 };
 type Dimensions = { width: number; height: number };
 export type EnhancementDeliverySnapshot = {

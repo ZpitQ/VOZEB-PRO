@@ -144,7 +144,7 @@ export function ecommerceCanvasInputFromRequest(prompt: string, configuredSize?:
     return { ...(userRequest ? { userRequest } : {}), ...(explicitSize ? { explicitSize } : {}), ...(baselineSize ? { baselineSize } : {}) };
 }
 
-export async function buildWhiteBackgroundProductProtection(source: Buffer, analysis: EcommerceVisualAnalysis, productAssetId: string): Promise<ProductProtectionRegions> {
+export async function buildWhiteBackgroundProductProtection(source: Buffer, analysis: EcommerceVisualAnalysis, productAssetId: string, sourceFraming?: EcommerceEditPlan["preserve"]["sourceFraming"]): Promise<ProductProtectionRegions> {
     const anchors = analysis.references.filter((item) => item.assetId === productAssetId);
     const reference = anchors.length === 1 && anchors[0].role === "product" ? anchors[0] : undefined;
     const detailAnchorAllowed = reference?.role === "product" && reference.confidence === "medium" && reference.visualEvidence.isolatedSubject && (reference.visualEvidence.whiteBackground || reference.visualEvidence.transparentBackground);
@@ -160,7 +160,7 @@ export async function buildWhiteBackgroundProductProtection(source: Buffer, anal
     }
     const { width, height, channels } = decoded.info;
     if (!width || !height || channels !== 4) throw new EcommerceProductSegmentationError("商品图片像素格式无效");
-    const bounds = buildWhiteBackgroundProductMaskPixels(decoded.data, width, height, reference.visualEvidence.transparentBackground);
+    const bounds = buildWhiteBackgroundProductMaskPixels(decoded.data, width, height, reference.visualEvidence.transparentBackground, sourceFraming);
     const halo = expand(bounds, width, height);
     const normalizedAnalysis: EcommerceVisualAnalysis = {
         ...analysis,
@@ -262,7 +262,7 @@ export function createEcommerceProductSceneTask(
         prompt: ecommerceExecution.prompt,
         count: Math.max(1, preferences?.count || 1),
         ...(ecommerceExecution.canvas ? { ratio: ecommerceCanvasSize(ecommerceExecution.canvas) } : preferences?.size ? { ratio: preferences.size } : {}),
-        ...(preferences?.quality ? { quality: preferences.quality } : {}),
+        ...(ecommerceExecution.generationInput ? { quality: ecommerceExecution.generationInput.quality } : preferences?.quality ? { quality: preferences.quality } : {}),
         dependencies: [],
         status: "ready",
         attempts: 0,

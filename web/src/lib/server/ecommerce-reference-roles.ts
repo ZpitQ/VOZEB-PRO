@@ -48,14 +48,14 @@ export type EcommerceSources = {
     clarificationQuestion: string | null;
 };
 
-export function toLegacyEcommerceVisualAnalysis(analysis: EcommerceVisualAnalysis | EcommerceVisualAnalysisV4): EcommerceVisualAnalysis {
+export function toLegacyEcommerceVisualAnalysis(analysis: EcommerceVisualAnalysis | EcommerceVisualAnalysisV4, currentSceneBaselineId?: string | null): EcommerceVisualAnalysis {
     if (analysis.analysisVersion !== "ecommerce-visual-analysis.v4") return analysis;
     return {
         ...analysis,
         analysisVersion: "ecommerce-visual-analysis.v3",
         references: analysis.references.map((reference) => ({
             ...reference,
-            role: reference.contentType === "isolated_product" || reference.contentType === "product_detail" ? "product" : reference.contentType === "interior_scene" ? "scene" : "unknown",
+            role: reference.assetId === currentSceneBaselineId ? "scene" : reference.contentType === "isolated_product" || reference.contentType === "product_detail" ? "product" : reference.contentType === "interior_scene" ? "scene" : "unknown",
         })),
     };
 }

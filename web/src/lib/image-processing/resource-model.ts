@@ -1,6 +1,6 @@
 import type { ImageProcessingInput, ImageProcessingOperation, ImageProcessingSize } from "./contracts.ts";
 
-export const IMAGE_PROCESSING_MEMORY_MODEL_VERSION = "image-processing-memory.s3.v4" as const;
+export const IMAGE_PROCESSING_MEMORY_MODEL_VERSION = "image-processing-memory.s8.v1" as const;
 
 export type ImageProcessingResourceRequest = ImageProcessingOperation & {
     inputs: readonly Pick<ImageProcessingInput, "assetId" | "assetVersion" | "expectedSha256">[];
@@ -24,6 +24,7 @@ export type ImageProcessingResourceFacts = {
 
 export type ImageProcessingMemoryProfile =
     | "prepare_reference"
+    | "generation_reference"
     | "prepare_review"
     | "white_protection"
     | "white_protection_qualified"
@@ -124,6 +125,10 @@ export function estimateImageProcessingMemory(request: ImageProcessingResourceRe
         return measured ? calibrated(profile, 1024 * MiB) : uncalibrated;
     }
     if (request.operation === "prepare_reference") {
+        if (request.options.generationInput) {
+            if (nativeCoefficient(encoded[0]) !== 4) return uncalibrated;
+            return calibrated(profile, 140 * MiB + 13 * decodedPixels(request, facts, 0, REFERENCE_PIXELS));
+        }
         const coefficient = nativeCoefficient(encoded[0]);
         if (coefficient === undefined) return uncalibrated;
         return calibrated(profile, 140 * MiB + coefficient * REFERENCE_PIXELS + 4 * MiB + 4 * 2048 ** 2);
@@ -205,7 +210,7 @@ function operationProfile(request: ImageProcessingResourceRequest): ImageProcess
         if (request.options.scope === "product_background") return "enhancement_product";
         return "enhancement_scene";
     }
-    if (request.operation === "prepare_reference") return "prepare_reference";
+    if (request.operation === "prepare_reference") return request.options.generationInput ? "generation_reference" : "prepare_reference";
     if (request.operation === "prepare_review") return "prepare_review";
     if (request.operation === "build_protection") {
         const protection = request.options;

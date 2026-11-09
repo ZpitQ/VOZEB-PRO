@@ -41,6 +41,7 @@ VOZEB PRO 是面向图片、视频、短剧与品牌物料生产的 AI 创作工
 - [安全与漏洞提交](/docs/support/security)
 - [待测试](/docs/progress/pending-test)
 - [TODO](/docs/progress/todo)
+- [大图Worker S8验收结果](superpowers/plans/2026-10-27-image-processing-worker-s8-results.md)
 - [更新日志](/docs/progress/changelog)
 
 ## 重要说明

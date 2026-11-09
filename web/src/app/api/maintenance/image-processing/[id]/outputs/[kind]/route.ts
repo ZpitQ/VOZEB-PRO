@@ -14,7 +14,8 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
     try {
         const { id, kind } = await context.params;
         const searchParams = new URL(request.url).searchParams;
-        if ((kind !== "analysis" && kind !== "mask" && kind !== "final") || (kind !== "final" && searchParams.has("resultId"))) throw new ImageProcessingInputError("当前阶段不接受此工件类别或槽位选择", 400);
+        if ((kind !== "analysis" && kind !== "mask" && kind !== "generation_reference" && kind !== "generation_mask" && kind !== "final") || (kind !== "final" && searchParams.has("resultId")))
+            throw new ImageProcessingInputError("当前阶段不接受此工件类别或槽位选择", 400);
         if (!request.body) throw new ImageProcessingInputError("图像工件内容为空", 400);
         const mimeType = (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
         const data = await writeImageProcessingOutput(id, kind, { workerId, executionId }, { stream: request.body, mimeType, signal: request.signal, resultId: searchParams.get("resultId") ?? undefined });

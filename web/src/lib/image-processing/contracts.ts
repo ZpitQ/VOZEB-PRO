@@ -14,8 +14,9 @@ type ImageProcessingRequestBase = {
 };
 
 export type ImageProcessingResultInput = { resultId: string; resultIndex: number; inputIndex: number };
+export type ImageProcessingGenerationInput = { bounds: ImageProcessingSize; quality: string };
 export type ImageProcessingProtectionOptions =
-    | { transparentBackground: boolean; freezeEnhancementBaseline?: true }
+    | { transparentBackground: boolean; sourceFraming?: "visible_extent"; generationInput?: ImageProcessingGenerationInput; freezeEnhancementBaseline?: true }
     | { mode: "local_edit"; targetRegion: ImageProcessingRectangle; protectedRectangles: ImageProcessingRectangle[]; freezeEnhancementBaseline?: { productAnchorId: string; productCore: ImageProcessingRectangle[] } }
     | { mode: "scene_selection"; region: ImageProcessingRectangle; semantics: string[]; selectionSource: "user_selection"; freezeEnhancementBaseline?: true };
 export type ImageProcessingResultOptions =
@@ -24,7 +25,7 @@ export type ImageProcessingResultOptions =
     | { mode: "scene_protection"; results: ImageProcessingResultInput[]; sourceInputIndex: number; maskInputIndex: number; protection: SceneProtectionSnapshot; baseline?: ImageProcessingBaseline }
     | { mode: "product_protection"; results: ImageProcessingResultInput[]; sourceInputIndex: number; maskInputIndex: number; protection: ProductEnhancementDescriptor; baseline: ImageProcessingBaseline };
 export type ImageProcessingOperation =
-    | { operation: "prepare_reference"; options: Record<string, never> }
+    | { operation: "prepare_reference"; options: { generationInput?: ImageProcessingGenerationInput } }
     | { operation: "prepare_review"; options: { region?: ImageProcessingRectangle } }
     | { operation: "build_protection"; options: ImageProcessingProtectionOptions }
     | { operation: "process_result"; options: ImageProcessingResultOptions }
@@ -62,7 +63,7 @@ export type ProductProtectionSnapshot = {
 };
 export type ProductEnhancementDescriptor = { version: "product-enhancement.v2"; normalization: "srgb-upright-v1"; product: ProductProtectionSnapshot; maskSha256: string };
 export type ImageProcessingArtifact = ImageProcessingSize & {
-    kind: "analysis" | "mask" | "final";
+    kind: "analysis" | "mask" | "generation_reference" | "generation_mask" | "final";
     path: string;
     sha256: string;
     mimeType: string;
@@ -105,7 +106,7 @@ export type ImageProcessingSourceIdentity = { assetId: string; assetVersion: str
     (ImageProcessingSize & { mimeType: string; nativeImage?: { format: string; hasAlpha: boolean }; decodeError?: never }) | { decodeError: ImageProcessingFailure; width?: never; height?: never; mimeType?: never; nativeImage?: never }
 );
 export type ImageProcessingResultBinding = { resultId: string; resultIndex: number; nativeInputIndex: number } & (
-    | { finalArtifactIndex: number; error?: never; baselineValidated?: boolean; sceneProtectionEvidence?: SceneProtectionEvidence; productEnhancementEvidence?: ProductEnhancementEvidence }
+    | { finalArtifactIndex: number; error?: never; finalImage?: { format: string; hasAlpha: boolean }; baselineValidated?: boolean; sceneProtectionEvidence?: SceneProtectionEvidence; productEnhancementEvidence?: ProductEnhancementEvidence }
     | { error: ImageProcessingFailure & { failureStage: "decode" | "validation" }; finalArtifactIndex?: never }
 );
 

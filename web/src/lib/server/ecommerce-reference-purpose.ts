@@ -270,7 +270,8 @@ export function resolveEcommerceReferenceDecision(input: { planningInput: Ecomme
         bindings,
         editTargetId,
         productAnchorId,
-        currentSceneBaselineId: target?.contentType === "interior_scene" ? target.assetId : null,
+        // The verified history relationship determines the edit baseline; appearance can still be a product detail.
+        currentSceneBaselineId: target && (target.contentType === "interior_scene" || target.assetId === inherited?.editTargetId) ? target.assetId : null,
         appliedCues,
         issues,
     };

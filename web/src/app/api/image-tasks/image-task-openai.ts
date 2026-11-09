@@ -1,3 +1,4 @@
+import { readEcommerceGenerationInput } from "@/lib/server/image-processing-service";
 import { after, NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth/session";
@@ -422,23 +423,33 @@ export async function buildJsonImageEditBodies(
 ) {
     const referenceContext = { ownerUserId: task.userId, taskId: task.id };
     const nativeSub2Api = isNativeSub2ApiImageEdit(task.config);
+    const generation =
+        nativeSub2Api && task.ecommerceExecution && task.productProtection
+            ? await readEcommerceGenerationInput(task, quality, requestSize).catch((cause: unknown) => {
+                  const error = new GenerationSubmissionSafeFailure("生成输入副本读取失败，请重新发起任务");
+                  error.cause = cause;
+                  throw error;
+              })
+            : undefined;
+    const references = generation ? generation.references : task.references;
+    const maskReference = generation ? generation.mask : task.mask;
     const images = (
         await Promise.all(
-            task.references.map((reference, index) =>
+            references.map((reference, index) =>
                 nativeSub2Api
-                    ? imageReferenceToDataUrl(reference, reference.name || `reference-${index + 1}.png`, origin, cookie)
+                    ? imageReferenceToDataUrl(reference, reference.name || `reference-${index + 1}.png`, origin, cookie, generation?.referenceBytes[index])
                     : publicUrlReferenceMode
                       ? publicImageReferenceRequestUrl(reference, origin, publicOrigin, referenceContext)
                       : Promise.resolve(jsonImageReferenceRequestUrl(reference, origin)),
             ),
         )
     ).filter(Boolean);
-    const mask = task.mask
+    const mask = maskReference
         ? nativeSub2Api
-            ? await imageReferenceToDataUrl(task.mask, task.mask.name || "mask.png", origin, cookie)
+            ? await imageReferenceToDataUrl(maskReference, maskReference.name || "mask.png", origin, cookie, generation?.maskBytes)
             : publicUrlReferenceMode
-              ? await publicImageReferenceRequestUrl(task.mask, origin, publicOrigin, referenceContext)
-              : jsonImageReferenceRequestUrl(task.mask, origin)
+              ? await publicImageReferenceRequestUrl(maskReference, origin, publicOrigin, referenceContext)
+              : jsonImageReferenceRequestUrl(maskReference, origin)
         : "";
     const prompt = withImageOutputInstructions(task.config, imageUrlObjectOnlyMode || nativeSub2Api ? buildSub2ApiImageEditPrompt(task.prompt, task.references, task.mask, nativeSub2Api) : buildImageReferencePromptText(task.prompt, task.references));
     const base = {

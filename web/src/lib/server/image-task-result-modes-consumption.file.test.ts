@@ -1275,11 +1275,12 @@ describe("File result modes consumed by the same ImageTask", () => {
         expect(outcome.published).toMatchObject({ id: image.id, config: { quality: "4k", size: "1:1" }, enhancementPolicy: image.enhancementPolicy });
         expect(outcome.published.references).toStrictEqual(image.references);
         expect(outcome.published.mask).toStrictEqual(mask);
-        expect(outcome.delivered).toMatchObject([{ resultId: `${image.id}:1`, width: 8, height: 8, enhancementSkip: { status: "skipped", reason: "protected_contract" } }]);
-        expect(outcome.delivered[0].enhancementId).toBeUndefined();
-        expect(outcome.delivered[0].nativeSource).toBeUndefined();
+        expect(outcome.delivered).toMatchObject([
+            { resultId: `${image.id}:1`, width: 8, height: 8, enhancementId: `enhancement:${image.id}:1`, enhancementSource: { url: outcome.delivered[0].serverUrl, sha256: digest(native), provenance: "generation_final" } },
+        ]);
+        expect(outcome.delivered[0]).not.toHaveProperty("enhancementSkip");
         const jobs = await import("./database/image-enhancement-job-repository");
-        expect(await jobs.listEnhancementJobsForTask(image.id, userId)).toStrictEqual([]);
+        expect(await jobs.listEnhancementJobsForTask(image.id, userId)).toMatchObject([{ status: "skipped", reason: "provider_unavailable" }]);
     }, 30_000);
 
     it("consumes an ordinary target result without renumbering the good slot after a corrupt native", async () => {
@@ -1476,45 +1477,59 @@ describe("File result modes consumed by the same ImageTask", () => {
         expect(outcome.delivered.map((output) => output.resultId)).toStrictEqual([`${image.id}:1`, `${image.id}:2`]);
     }, 90_000);
 
-    it("consumes a good scene slot with bound auxiliary source and mask and preserved outside pixels", async () => {
-        const conversation = await creative.createConversationForUser(userId, { surface: "chat", title: "Protected scene result" });
-        const source = await solid(6, 4, "#123456");
-        const registered = await registeredReference(conversation.id, source);
-        const buildDirectory = await mkdtemp(path.join(directory, "scene-mask-"));
-        const built = await operations.executeImageProcessing(
-            {
-                version: "image-processing.v1",
-                jobId: "fixture-scene-build",
-                executionId: "fixture-scene-build-execution",
-                operation: "build_protection",
-                inputs: [{ path: registered.path, assetId: registered.reference.id, assetVersion: "fixture-scene-source-v1", expectedSha256: digest(source) }],
-                outputDirectory: buildDirectory,
-                options: { mode: "scene_selection", region: { x: 2, y: 1, width: 2, height: 2 }, semantics: ["replace the selected background"], selectionSource: "user_selection" },
-            },
-            () => {},
-        );
-        const protection = built.geometry.sceneProtection;
-        assert.ok(protection);
-        const maskBytes = await readFile(built.artifacts[0].path);
-        const registeredMask = await registeredReference(conversation.id, maskBytes);
-        const mask = { ...registeredMask.reference, dataUrl: dataUrl(maskBytes) };
-        const image = await createImage({ kind: "edit", conversationId: conversation.id, config, references: [registered.reference], mask, sceneProtection: { ...protection, mask } });
-        const native = await solid(6, 4, "#abcdef");
-        const outcome = await consume(image, [Buffer.from("not an image"), native], "scene_protection", 2);
-        assert.ok(outcome.payload.options.mode === "scene_protection");
-        expect(outcome.payload.inputs[outcome.payload.options.sourceInputIndex]).toMatchObject({ assetId: registered.reference.id, expectedSha256: digest(source) });
-        expect(outcome.payload.inputs[outcome.payload.options.maskInputIndex]).toMatchObject({ assetId: mask.id, expectedSha256: digest(maskBytes) });
-        expect(outcome.bindings).toMatchObject([
-            { resultId: `${image.id}:1`, error: { failureStage: "decode" } },
-            { resultId: `${image.id}:2`, resultIndex: 2, sceneProtectionEvidence: { sourceDigest: digest(source), maskDigest: digest(maskBytes), nativeDigest: digest(native), compositeOutsideChangedPixels: 0 } },
-        ]);
-        const pixels = await sharp(outcome.finals[0].bytes).ensureAlpha().raw().toBuffer();
-        expect([...pixels.subarray(0, 4)]).toStrictEqual([18, 52, 86, 255]);
-        expect([...pixels.subarray(32, 36)]).toStrictEqual([171, 205, 239, 255]);
-        expect(outcome.delivered[0].sceneProtectionEvidence).toMatchObject({ sourceDigest: digest(source), maskDigest: digest(maskBytes), nativeDigest: digest(native), compositeDigest: digest(outcome.finals[0].bytes), compositeOutsideChangedPixels: 0 });
-    }, 90_000);
+    it.each([
+        { background: "#123456", outside: [18, 52, 86, 255], hasAlpha: false },
+        { background: { r: 18, g: 52, b: 86, alpha: 0.5 }, outside: [18, 52, 86, 128], hasAlpha: true },
+    ])(
+        "consumes a protected scene with actual final transparency=$hasAlpha before full-image enhancement",
+        async ({ background, outside, hasAlpha }) => {
+            const conversation = await creative.createConversationForUser(userId, { surface: "chat", title: "Protected scene result" });
+            const source = await solid(6, 4, background);
+            const registered = await registeredReference(conversation.id, source);
+            const buildDirectory = await mkdtemp(path.join(directory, "scene-mask-"));
+            const built = await operations.executeImageProcessing(
+                {
+                    version: "image-processing.v1",
+                    jobId: "fixture-scene-build",
+                    executionId: "fixture-scene-build-execution",
+                    operation: "build_protection",
+                    inputs: [{ path: registered.path, assetId: registered.reference.id, assetVersion: "fixture-scene-source-v1", expectedSha256: digest(source) }],
+                    outputDirectory: buildDirectory,
+                    options: { mode: "scene_selection", region: { x: 2, y: 1, width: 2, height: 2 }, semantics: ["replace the selected background"], selectionSource: "user_selection" },
+                },
+                () => {},
+            );
+            const protection = built.geometry.sceneProtection;
+            assert.ok(protection);
+            const maskBytes = await readFile(built.artifacts[0].path);
+            const registeredMask = await registeredReference(conversation.id, maskBytes);
+            const mask = { ...registeredMask.reference, dataUrl: dataUrl(maskBytes) };
+            const image = await createImage({ kind: "edit", conversationId: conversation.id, config, references: [registered.reference], mask, sceneProtection: { ...protection, mask } });
+            const native = await solid(6, 4, "#abcdef");
+            const outcome = await consume(image, [Buffer.from("not an image"), native], "scene_protection", 2);
+            assert.ok(outcome.payload.options.mode === "scene_protection");
+            expect(outcome.payload.inputs[outcome.payload.options.sourceInputIndex]).toMatchObject({ assetId: registered.reference.id, expectedSha256: digest(source) });
+            expect(outcome.payload.inputs[outcome.payload.options.maskInputIndex]).toMatchObject({ assetId: mask.id, expectedSha256: digest(maskBytes) });
+            expect(outcome.bindings).toMatchObject([
+                { resultId: `${image.id}:1`, error: { failureStage: "decode" } },
+                { resultId: `${image.id}:2`, resultIndex: 2, sceneProtectionEvidence: { sourceDigest: digest(source), maskDigest: digest(maskBytes), nativeDigest: digest(native), compositeOutsideChangedPixels: 0 } },
+            ]);
+            const pixels = await sharp(outcome.finals[0].bytes).ensureAlpha().raw().toBuffer();
+            expect([...pixels.subarray(0, 4)]).toStrictEqual(outside);
+            expect([...pixels.subarray(32, 36)]).toStrictEqual([171, 205, 239, 255]);
+            expect(outcome.bindings[1]).toMatchObject({ finalImage: { format: "png", hasAlpha } });
+            expect(outcome.delivered[0].sceneProtectionEvidence).toMatchObject({
+                sourceDigest: digest(source),
+                maskDigest: digest(maskBytes),
+                nativeDigest: digest(native),
+                compositeDigest: digest(outcome.finals[0].bytes),
+                compositeOutsideChangedPixels: 0,
+            });
+        },
+        90_000,
+    );
 
-    it("consumes a true 4k product baseline and durably queues the existing protected enhancement plan", async () => {
+    it("consumes a qualified product final and durably queues full-image enhancement", async () => {
         const [deliveryService, enhancement, jobs, settings, secrets] = await Promise.all([
             import("./image-enhancement-delivery"),
             import("./image-enhancement-enqueue"),
@@ -1588,7 +1603,7 @@ describe("File result modes consumed by the same ImageTask", () => {
             fusionHalo: [],
             editableBackground: [],
         };
-        const input = { kind: "edit" as const, conversationId: conversation.id, config: { ...config, quality: "4k", size: "1:1" }, references: [registered.reference], mask, productProtection };
+        const input = { kind: "edit" as const, conversationId: conversation.id, config: { ...config, quality: "4k", size: "32x32" }, references: [registered.reference], mask, productProtection };
         const files = new Map<string, string>([
             [registered.reference.id, registered.path],
             [mask.id, registeredMask.path],
@@ -1632,15 +1647,15 @@ describe("File result modes consumed by the same ImageTask", () => {
             nativeSource: { url: nativeUrl, sha256: digest(native), width: 8, height: 8, byteLength: native.length, format: "png", hasAlpha: false, provenance: "provider_native" },
             productEnhancementEvidence: { version: "product-baseline.v2", nativeUrl, nativeSha256: digest(native), baselineUrl: delivered.serverUrl, baselineSha256: digest(outcome.finals[0].bytes), composition: binding.productEnhancementEvidence },
         });
+        expect(delivered.enhancementSource).toMatchObject({ url: delivered.serverUrl, sha256: digest(outcome.finals[0].bytes), format: "png", hasAlpha: false, provenance: "generation_final" });
         const decision = enhancement.planImageTaskEnhancement(outcome.published, delivered);
+        expect(decision).not.toHaveProperty("delivery");
         expect(decision).toMatchObject({
             status: "queued",
             reason: null,
-            source: delivered.nativeSource,
-            target: { width: 8, height: 8 },
-            requestedTarget: { width: 2880, height: 2880 },
+            source: delivered.enhancementSource,
+            target: { width: 32, height: 32 },
             inference: { width: 32, height: 32 },
-            delivery: { contract: enhancementDelivery, baseline: { url: delivered.serverUrl, sha256: digest(outcome.finals[0].bytes), width: 8, height: 8, format: "png", hasAlpha: false } },
         });
         const queued = await jobs.listEnhancementJobsForTask(image.id, userId);
         expect(queued).toHaveLength(1);

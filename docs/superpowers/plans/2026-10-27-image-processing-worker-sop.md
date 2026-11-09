@@ -62,7 +62,7 @@ File本例另轮20064ms通过（1通过/27名称过滤，28项；scope24.35s）�
 
 增强发布producer沿Worker完整AI PNG→闭合文件流核对长度/SHA/字节上限→临时自有 `enhancement-raw-ai`→冻结实际原图绑定→原子入队独立 `process_enhancement`。旧模型下File及单连接PostgreSQL实际创建无execution的资源暂停，并由新进程读回；原图/资产不变，无提前永久发布或ACK。此前producer、任务客户端、CPU恢复和离线G4证据保持各自范围。
 
-当前 `image-processing-memory.s3.v4` 与CPU编译产物已核对：global JPEG为1536MiB，legacy PNG/product/scene各1280MiB，仅覆盖当前producer/B0和已定义的PNG8 RGB(A)/JPEG3角色与几何域；未知域继续uncalibrated，工程reserve不是通用内存上界或并发容量。成功consumer核验闭合child的完整AI及CPU交付物，先固定永久promotion键并保存原字节，再沿PostgreSQL同事务或File既有creative→generation→enhancement→registry锁序提交资产父链，最后发送原receipt/ACK；保留原ImageTask/native、原资产、remote ID、binding和raw TTL。媒体保存失败后的显式retry仅续publication，不新增CPU、RAW下载或CREATE。
+当前 `image-processing-memory.s8.v1` 与CPU编译产物已核对：global JPEG为1536MiB，legacy PNG/product/scene各1280MiB，仅覆盖当前producer/B0和已定义的PNG8 RGB(A)/JPEG3角色与几何域；未知域继续uncalibrated，工程reserve不是通用内存上界或并发容量。成功consumer核验闭合child的完整AI及CPU交付物，先固定永久promotion键并保存原字节，再沿PostgreSQL同事务或File既有creative→generation→enhancement→registry锁序提交资产父链，最后发送原receipt/ACK；保留原ImageTask/native、原资产、remote ID、binding和raw TTL。媒体保存失败后的显式retry仅续publication，不新增CPU、RAW下载或CREATE。
 
 无保护全局增强的原File publication/ACK尾段、单连接PostgreSQL原资源暂停→显式retry/新execution→正式supervisor CPU/真实产物上传/complete→publication/HTTP ACK，以及隔离File副本一次媒体I/O失败后恢复，分别为1通过/4名称过滤；File尾段及故障恢复复用原闭合child，未重跑CPU。该资格限受控本地Worker fixture与真实CPU边界，不覆盖磁盘满、S3网络故障、常驻HTTP CPU Worker、GPU/照片质量或完整Agent `/create`。旧25项为历史迁移清单，按本阶段真实行为与可达性核定，不作为当前未完成计数；本条历史资格不单独授完整阶段通过。
 
@@ -474,7 +474,7 @@ pnpm、Node、安装目录和锁文件遵循仓库。依赖未变不重复安装
 
 ### 当前S7结果
 
-已合入主线修复，构建源为 `e1241ed`；冻结增强预算已沿当前独立文件处理链贯通。固定源码通过规格/质量独审、受影响检查、完整类型与镜像构建后，Web/Worker已同镜像发布测试环境；旧Worker排空，实际资源限制、schema、新心跳、原暂停任务、媒体挂载与桌面入口已读回，恢复材料保持。资源和副本由部署方配置。新增大于40MP完整AI输入仅取得合法预算检查后持久未校准暂停的资格，不扩大既有增强CPU容量域；S8真实模型、原照片与用户质量仍待。
+已合入主线修复，构建源为 `e1241ed`；冻结增强预算已沿当前独立文件处理链贯通。固定源码通过规格/质量独审、受影响检查、完整类型与镜像构建后，Web/Worker已同镜像发布测试环境；旧Worker排空，实际资源限制、schema、新心跳、原暂停任务、媒体挂载与桌面入口已读回，恢复材料保持。资源和副本由部署方配置。新增大于40MP完整AI输入仅取得合法预算检查后持久未校准暂停的资格，不扩大既有增强CPU容量域；最新S8原照片技术验收已补齐，用户商品保真与画质确认见第15节。
 
 ### 发布前
 
@@ -503,6 +503,12 @@ pnpm、Node、安装目录和锁文件遵循仓库。依赖未变不重复安装
 
 ## 15. S8：用户验收与文档收尾
 
+输入副本补充：同原件重新编码仍被上游拒绝，缩小参考与蒙版的受控对照可生成；尚未证明具体上游阈值。按用户批准例外，原生商品编辑首次build冻结本轮请求边界/画质，并在独立进程生成等比参考与蒙版对，保留原件和原尺寸保护。实际约42.7MP原件的新路径已测得约565MiB子进程峰值，未改变原件或原mask哈希；这是单图路径实测，不是任意输入容量或完整业务验收。三工件登记、恢复冻结、创建绑定和实际adapter传输按固定契约验收；原失败轮次保留。后继固定镜像发布、原照片完整生成／刷新及人工质量结果见下述S8收口记录。
+
+当前S8已按所定范围完成用户验收与文档收尾。原照片生成效果已获用户确认；M轮沿原Run首次图片调用完成生成和结果处理，再以保存的最终完整成图自动执行整图GPU增强。原生结果1536×1024 PNG，完整AI结果6144×4096 PNG，最终增强交付3520×2347 JPEG；页面原图／增强版切换及刷新恢复已验证，用户明确确认M轮增强画质通过。验收、输入拒绝根因、源码／镜像身份和剩余限制统一记录在[S8验收结果](2026-10-27-image-processing-worker-s8-results.md)。
+
+大副参考原尺寸7997×5334直接提交遭上游拒绝，受控对照只替换为3526×2352等比副本后成功；后续完成HTTP接口遗漏单个generation_reference类别的问题也已修复。原件与全分辨率保护数据保留，供应商精确阈值仍未知。历史失败、Unknown、未校准容量与其他分支的验收范围保持，不据本轮照片通过宣称43项设计用例或全仓测试全部通过。
+
 1. 在用户确认的测试路径使用原照片，分别验证大商品锚点与风格参考角色。
 2. 验证等待资源、完整生成、结果尺寸、保护行为和刷新恢复，保存独立验收结论。
 3. fixture 验收、真实模型成功、人眼质量确认分别记录。
@@ -526,4 +532,10 @@ pnpm、Node、安装目录和锁文件遵循仓库。依赖未变不重复安装
 已有副作用标记与禁止重复项：
 ```
 
-当前进度：S0/S1与S2证据保留；S3/S4技术开发、S5运行资源配置及S6限定负载/长稳与桌面代表链已按各自分轮范围核验。S7已完成固定源码、独立审阅、干净镜像及测试环境发布和读回，发布清单与恢复材料保持；尚未推送，未操作生产或GPU。后续为S8原照片、真实模型和用户质量验收，原失败、Unknown与容量资格限制继续保留。
+当前进度：S0—S7已按各自所定分轮范围完成；S8原照片生成及M轮生成后整图增强、版本切换／刷新和用户画质确认均已完成，正式功能说明与状态文稿已同步。测试发布源码、镜像与本次文档收尾分开记录；生产发布及更广容量、GPU和商业就绪仍独立验收，原失败与Unknown保留。
+
+### S8 副参考生成准备
+
+图像接口的临时输入副本同时覆盖过大的副参考。最终画布和画质确定后，在原参考分析与保护完成基础上，以生成用途的 `prepare_reference` 排队处理；每张所需副本完成后再派发图片任务。生成阶段拥有独立checkpoint和指纹，不能覆盖分析或使用预览图。副本只改变供应商传输表示，原素材、原保护坐标和原始蒙版继续保留。
+
+资源模型新增 `generation_reference`：仅对已经测量的8bit PNG/JPEG输入使用原有白底保护保守预留 `140MiB + 13 × decodedPixels`，按MiB向上取整，输入域最多64MP；未校准的布局继续暂停。原照片、64MP PNG及高熵PNG的完整与拟合输出必须保留独立子进程、监督进程和cgroup测量，不能把分析2048像素／4MiB产物的预算借给生成副本。已登记工件的准确字节数也是最后编码读取边界。

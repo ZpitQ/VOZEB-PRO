@@ -877,7 +877,7 @@ type EnhancementSettingsRow = { id: string; value: StoredImageEnhancementSetting
         expect(outcome.delivered[0].sceneProtectionEvidence).toMatchObject({ sourceDigest: digest(source), maskDigest: digest(maskBytes), nativeDigest: digest(native), compositeDigest: digest(outcome.finals[0].bytes), compositeOutsideChangedPixels: 0 });
     }, 90_000);
 
-    it("consumes a true 4k product baseline and durably queues the existing protected enhancement plan", async () => {
+    it("consumes a qualified product final and durably queues full-image enhancement", async () => {
         const [deliveryService, enhancement, jobs, settings, secrets] = await Promise.all([
             import("./image-enhancement-delivery"),
             import("./image-enhancement-enqueue"),
@@ -956,7 +956,7 @@ type EnhancementSettingsRow = { id: string; value: StoredImageEnhancementSetting
                 fusionHalo: [],
                 editableBackground: [],
             };
-            const input = { kind: "edit" as const, conversationId: conversation.id, config: { ...config, quality: "4k", size: "1:1" }, references: [registered.reference], mask, productProtection };
+            const input = { kind: "edit" as const, conversationId: conversation.id, config: { ...config, quality: "4k", size: "32x32" }, references: [registered.reference], mask, productProtection };
             const files = new Map<string, string>([
                 [registered.reference.id, registered.path],
                 [mask.id, registeredMask.path],
@@ -1000,15 +1000,15 @@ type EnhancementSettingsRow = { id: string; value: StoredImageEnhancementSetting
                 nativeSource: { url: nativeUrl, sha256: digest(native), width: 8, height: 8, byteLength: native.length, format: "png", hasAlpha: false, provenance: "provider_native" },
                 productEnhancementEvidence: { version: "product-baseline.v2", nativeUrl, nativeSha256: digest(native), baselineUrl: delivered.serverUrl, baselineSha256: digest(outcome.finals[0].bytes), composition: binding.productEnhancementEvidence },
             });
+            expect(delivered.enhancementSource).toMatchObject({ url: delivered.serverUrl, sha256: digest(outcome.finals[0].bytes), format: "png", hasAlpha: false, provenance: "generation_final" });
             const decision = enhancement.planImageTaskEnhancement(outcome.published, delivered);
+            expect(decision).not.toHaveProperty("delivery");
             expect(decision).toMatchObject({
                 status: "queued",
                 reason: null,
-                source: delivered.nativeSource,
-                target: { width: 8, height: 8 },
-                requestedTarget: { width: 2880, height: 2880 },
+                source: delivered.enhancementSource,
+                target: { width: 32, height: 32 },
                 inference: { width: 32, height: 32 },
-                delivery: { contract: enhancementDelivery, baseline: { url: delivered.serverUrl, sha256: digest(outcome.finals[0].bytes), width: 8, height: 8, format: "png", hasAlpha: false } },
             });
             const queued = await jobs.listEnhancementJobsForTask(image.id, userId);
             expect(queued).toHaveLength(1);

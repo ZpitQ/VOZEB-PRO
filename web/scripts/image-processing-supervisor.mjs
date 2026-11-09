@@ -96,7 +96,12 @@ function validateRequest(request) {
     }
     if (!request.options || typeof request.options !== "object" || Array.isArray(request.options)) throw new TypeError("图像操作参数无效");
     if (request.operation === "prepare_reference") {
-        if (Object.keys(request.options).length !== 0) throw new TypeError("参考预处理不接受额外操作参数");
+        const generation = request.options.generationInput;
+        if (
+            Object.keys(request.options).some((key) => key !== "generationInput") ||
+            (generation !== undefined && (!generation || !positiveInteger(generation.bounds?.width) || !positiveInteger(generation.bounds?.height) || typeof generation.quality !== "string" || !generation.quality.trim()))
+        )
+            throw new TypeError("生成参考预处理需要有效的请求边界和冻结画质");
     } else if (request.operation === "prepare_review") {
         const region = request.options.region;
         if (
@@ -131,10 +136,17 @@ function validateRequest(request) {
             if (request.options.freezeEnhancementBaseline !== undefined && request.options.freezeEnhancementBaseline !== true) throw new TypeError("场景基线资格标记无效");
         } else if (
             typeof request.options.transparentBackground !== "boolean" ||
-            Object.keys(request.options).some((key) => !["transparentBackground", "freezeEnhancementBaseline"].includes(key)) ||
+            Object.keys(request.options).some((key) => !["transparentBackground", "sourceFraming", "generationInput", "freezeEnhancementBaseline"].includes(key)) ||
+            (request.options.sourceFraming !== undefined && request.options.sourceFraming !== "visible_extent") ||
             (request.options.freezeEnhancementBaseline !== undefined && request.options.freezeEnhancementBaseline !== true)
         )
             throw new TypeError("商品保护需要透明背景判别参数");
+        const generation = request.options.generationInput;
+        if (
+            generation !== undefined &&
+            (request.options.mode !== undefined || !generation || !positiveInteger(generation.bounds?.width) || !positiveInteger(generation.bounds?.height) || typeof generation.quality !== "string" || !generation.quality.trim())
+        )
+            throw new TypeError("生成输入需要有效的请求边界和冻结画质");
     } else if (request.operation === "process_enhancement") {
         validateEnhancementRequest(request);
     } else if (request.operation === "process_result") {
@@ -211,14 +223,16 @@ function controlledPath(directory, candidate) {
 
 async function validateResult(result, request, taskDirectory, pid) {
     if (request.operation !== "process_enhancement" && result.enhancement !== undefined) throw new Error("Enhancement receipt belongs only to enhancement processing");
-    const count = request.operation === "process_result" ? request.options.results.length : 1;
+    const generationInput = (request.operation === "build_protection" || request.operation === "prepare_reference") && request.options.generationInput;
+    const generationPrepare = request.operation === "prepare_reference" && generationInput;
+    const count = request.operation === "process_result" ? request.options.results.length : generationInput && !generationPrepare ? 3 : 1;
     if (
         !Array.isArray(result.sourceIdentities) ||
         result.sourceIdentities.length !== request.inputs.length ||
         !Array.isArray(result.artifacts) ||
         !result.artifacts.length ||
         result.artifacts.length > count ||
-        (request.operation !== "process_result" && result.artifacts.length !== 1)
+        (request.operation !== "process_result" && result.artifacts.length !== count)
     )
         throw new Error("子进程工件或源图身份无效");
     for (const [index, source] of result.sourceIdentities.entries()) {
@@ -262,7 +276,16 @@ async function validateResult(result, request, taskDirectory, pid) {
     const artifactPaths = new Set();
     for (const artifact of result.artifacts) {
         if (
-            artifact.kind !== (request.operation === "prepare_reference" || request.operation === "prepare_review" ? "analysis" : request.operation === "build_protection" ? "mask" : "final") ||
+            artifact.kind !==
+                (request.operation === "prepare_reference" || request.operation === "prepare_review"
+                    ? generationPrepare
+                        ? "generation_reference"
+                        : "analysis"
+                    : request.operation === "build_protection"
+                      ? generationInput
+                          ? ["mask", "generation_reference", "generation_mask"][result.artifacts.indexOf(artifact)]
+                          : "mask"
+                      : "final") ||
             !/^[a-f0-9]{64}$/.test(artifact.sha256) ||
             !positiveInteger(artifact.width) ||
             !positiveInteger(artifact.height) ||
@@ -276,6 +299,27 @@ async function validateResult(result, request, taskDirectory, pid) {
         artifactPaths.add(artifactPath);
         const file = statSync(artifactPath);
         if (!file.isFile() || file.size !== artifact.bytes || (await fileDigest(artifactPath)) !== artifact.sha256) throw new Error("子进程工件文件不匹配");
+    }
+    if (generationPrepare) {
+        const reference = result.artifacts[0];
+        const scale = Math.min(1, generationInput.bounds.width / source.width, generationInput.bounds.height / source.height);
+        if (!["image/png", "image/jpeg"].includes(reference.mimeType) || reference.width !== Math.round(source.width * scale) || reference.height !== Math.round(source.height * scale)) throw new Error("生成参考副本与原件或请求边界不一致");
+    } else if (generationInput) {
+        const [mask, reference, generationMask] = result.artifacts;
+        if (
+            mask.width !== source.width ||
+            mask.height !== source.height ||
+            mask.mimeType !== "image/png" ||
+            !["image/png", "image/jpeg"].includes(reference.mimeType) ||
+            generationMask.mimeType !== "image/png" ||
+            generationMask.width !== reference.width ||
+            generationMask.height !== reference.height ||
+            reference.width > generationInput.bounds.width ||
+            reference.height > generationInput.bounds.height ||
+            reference.width > source.width ||
+            reference.height > source.height
+        )
+            throw new Error("生成输入对与原件、蒙版或请求边界不一致");
     }
     if (request.operation === "prepare_review") {
         const artifact = result.artifacts[0];

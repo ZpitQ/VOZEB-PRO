@@ -102,6 +102,7 @@ export type AgentRun = {
     assetIds: string[];
     status: AgentRunStatus;
     executionId?: string;
+    planningRequestId?: string;
     tasks: AgentRunTask[];
     foundation?: CreativeFoundation;
     projectHandoff?: CreativeProjectHandoffPlan;
@@ -312,14 +313,14 @@ async function savedNativeResult(asset: CreativeAsset, run: AgentRun, sourceTask
     const task = sourceTask === undefined ? await getStoredGenerationTask<ImageTask>("image", asset.sourceTaskId) : sourceTask;
     if (!task || task.id !== asset.sourceTaskId || task.userId !== run.userId || task.conversationId !== run.conversationId || task.runId !== run.id || task.status !== "success") return null;
     const result = (task.result?.results?.length ? task.result.results : task.result ? [task.result] : []).find((candidate) => candidate.resultId === asset.metadata.resultId);
-    const source = result?.nativeSource;
+    const source = result?.enhancementSource || result?.nativeSource;
     if (!result || !source) return null;
-    const delivery = imageTaskEnhancementDelivery(task, result);
-    if ((task.enhancementDelivery || result.productEnhancementEvidence || asset.metadata.provenance === "protected_baseline") && !delivery) return null;
+    const delivery = result.enhancementSource ? undefined : imageTaskEnhancementDelivery(task, result);
+    if (!result.enhancementSource && (task.enhancementDelivery || result.productEnhancementEvidence || asset.metadata.provenance === "protected_baseline") && !delivery) return null;
     const baseline = delivery?.baseline || source;
     return result.resultId &&
         result.resultId === asset.metadata.resultId &&
-        source.provenance === "provider_native" &&
+        (source.provenance === "provider_native" || source.provenance === "generation_final") &&
         /^[a-f0-9]{64}$/.test(source.sha256) &&
         [source.width, source.height, source.byteLength].every((value) => Number.isSafeInteger(value) && value > 0) &&
         enhancementNativeIdentityMatches(task, result, source, delivery) &&
@@ -331,8 +332,8 @@ async function savedNativeResult(asset: CreativeAsset, run: AgentRun, sourceTask
         baseline.height === asset.height &&
         baseline.byteLength === result.bytes &&
         baseline.byteLength === asset.bytes &&
-        (!asset.metadata.nativeSource || isDeepStrictEqual(asset.metadata.nativeSource, source))
-        ? { result, delivery, task }
+        (!asset.metadata.nativeSource || isDeepStrictEqual(asset.metadata.nativeSource, result.nativeSource))
+        ? { result, source, delivery, task }
         : null;
 }
 
@@ -368,9 +369,9 @@ async function publishedEnhancementBaseline(asset: CreativeAsset, run: AgentRun)
         !original ||
         original.result.resultId !== job.resultId ||
         original.result.enhancementId !== job.id ||
-        !isDeepStrictEqual(original.result.nativeSource, job.decision.source) ||
+        !isDeepStrictEqual(original.source, job.decision.source) ||
         !isDeepStrictEqual(original.delivery, job.decision.delivery) ||
-        asset.metadata.nativeSha256 !== original.result.nativeSource?.sha256
+        asset.metadata.nativeSha256 !== original.source.sha256
     )
         return null;
     const delivery = original.delivery;
@@ -547,6 +548,7 @@ export async function updateAgentRunById(
             AgentRun,
             | "status"
             | "executionId"
+            | "planningRequestId"
             | "tasks"
             | "foundation"
             | "projectHandoff"

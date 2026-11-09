@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { after, NextResponse } from "next/server";
 import { readJsonBodyResult } from "@/lib/auth/request";
 import { getCurrentUser } from "@/lib/auth/session";
@@ -116,6 +117,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
                           run.id,
                           {
                               status: "planning",
+                              planningRequestId: `${run.id}:planning:${randomUUID()}`,
                               executionId: undefined,
                               tasks: [],
                               foundation: undefined,

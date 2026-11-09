@@ -11,6 +11,7 @@ import { runImageProcessing } from "../../../scripts/image-processing-supervisor
 import type { AuthSettings } from "@/lib/auth/store";
 import type { ImageProcessingOperation } from "../image-processing/contracts";
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
+import type { ImageTask } from "./image-task-store";
 import type { ClosedImageProcessingFailure } from "./image-processing-service";
 import type { StructuredTextRequest } from "./text-planning-runtime";
 import { settings } from "./agent-run-executor.test-fixtures";
@@ -299,8 +300,8 @@ describe("Agent persists its plan before native protection and resumes the same 
         return arrangeProduct(conversationId, 0, true);
     }
 
-    async function arrangeLocal(conversationId: string) {
-        const product = await registerSource(conversationId, 0, await productSource(1));
+    async function arrangeLocal(conversationId: string, prompt = "参考图片1的商品身份，把图片2 这张图修改成厨房背景并保留商品外观", createProduct = productSource) {
+        const product = await registerSource(conversationId, 0, await createProduct(1));
         const sceneBytes = await sharp({ create: { width: 100, height: 80, channels: 4, background: "#a0b0c0" } })
             .composite([{ input: { create: { width: 20, height: 40, channels: 4, background: "#8a6243" } }, left: 40, top: 20 }])
             .png()
@@ -317,7 +318,7 @@ describe("Agent persists its plan before native protection and resumes the same 
             },
             "local_edit",
         );
-        const run = await startRun(conversationId, [product.asset.id, scene.asset.id], "参考图片1的商品身份，把图片2 这张图修改成厨房背景并保留商品外观");
+        const run = await startRun(conversationId, [product.asset.id, scene.asset.id], prompt);
         const firstPrepare = await completeReference(run.id, product.asset.id, 1);
         await claimAndExecute(run.id, "prepare-parent-two");
         const secondPrepare = await completeReference(run.id, scene.asset.id, 2);
@@ -325,12 +326,119 @@ describe("Agent persists its plan before native protection and resumes the same 
         return { run, planned, product, baseline: scene, prepareJobs: [firstPrepare, secondPrepare] };
     }
 
+    async function arrangeGlobalLighting(conversationId: string) {
+        const fixture = await arrangeLocal(conversationId, "参考图片1的商品身份，把图片2的自然光略微提亮，保留商品外观");
+        expect(fixture.planned.ecommerceSnapshot?.plan?.protection).toMatchObject({ scope: "global", protectedObjectIds: [fixture.product.asset.id], preserveOutsideMask: false, allowLightingChange: true });
+        return fixture;
+    }
+
+    it("keeps local-edit generation quality across a queued auxiliary prepare and a changed default", async () => {
+        const conversation = await runtime.createCreativeConversation(userId, { surface: "chat" });
+        const fixture = await arrangeLocal(conversation.id, "参考图片1的商品身份，把图片2 这张图修改成厨房背景并保留商品外观", async (alpha) =>
+            sharp(await productSource(alpha))
+                .resize(200, 160)
+                .png()
+                .toBuffer(),
+        );
+        const protection = await waitingStage(fixture.run.id, "build_protection", 1, "ecommerce-local-edit");
+        await completeStage(protection.id);
+        const executionId = "fixture-generation-preparation";
+        const ready = await tasks.mutateStoredGenerationTask<import("./agent-run-store").AgentRun>("agent", fixture.run.id, 60_000, (run) => {
+            assert(run.ecommerceSnapshot?.plan && run.ecommerceSnapshot.modelRouteSnapshots?.image_generation);
+            const image = run.ecommerceSnapshot.modelRouteSnapshots.image_generation;
+            return {
+                ...run,
+                executionId,
+                ecommerceSnapshot: {
+                    ...run.ecommerceSnapshot,
+                    plan: { ...run.ecommerceSnapshot.plan, canvas: { mode: "exact", size: { width: 100, height: 80 }, source: "user_text", allowReframe: false } },
+                    modelRouteSnapshots: { ...run.ecommerceSnapshot.modelRouteSnapshots, image_generation: { ...image, imageEdit: { protocol: "sub2api", editPath: "/images/edits", transport: "json", supportsIndependentMask: true } } },
+                },
+            };
+        });
+        assert(ready?.ecommerceSnapshot?.visualAnalysis);
+        await scheduler.scheduleGenerationTask("agent", ready.id, { executionPhase: "created", nextPollAt: Date.now() });
+        expect(await scheduler.claimDueGenerationTasks({ workerId: "fixture-generation-parent", taskIds: [ready.id], limit: 1 })).toHaveLength(1);
+        const { prepareEcommerceProtectionTask } = await import("./ecommerce-protection-preparation");
+        const { toLegacyEcommerceVisualAnalysis } = await import("./ecommerce-reference-roles");
+        const analysis = toLegacyEcommerceVisualAnalysis(ready.ecommerceSnapshot.visualAnalysis, fixture.baseline.asset.id);
+        const checkpoint = structuredClone(ready.ecommerceSnapshot.referenceCheckpoint);
+        expect(await prepareEcommerceProtectionTask(ready, executionId, analysis, { imageQuality: "high", imageSize: "100x80" })).toBeUndefined();
+        const pending = await waitingStage(ready.id, "prepare_reference", 3, "ecommerce-local-edit");
+        expect(pending.payload.options).toEqual({ generationInput: { bounds: { width: 100, height: 80 }, quality: "high" } });
+        const { imageProcessingResourceConfig } = await import("../image-processing/resource-config");
+        const leases = await service.claimImageProcessingTasks({ workerId: "fixture-local-generation", profileVersion: imageProcessingResourceConfig(process.env).profileVersion, availableMemoryBytes: 1024 * 1024 * 1024, slots: 1 });
+        expect(leases.tasks).toHaveLength(1);
+        const { completeClaimedImageProcessingFixture } = await import("./image-processing.test-fixture");
+        await completeClaimedImageProcessingFixture(leases.tasks[0], "fixture-local-generation", directory);
+        const resumed = await tasks.mutateStoredGenerationTask<import("./agent-run-store").AgentRun>("agent", ready.id, 60_000, (run) => ({ ...run, executionId: "fixture-generation-resumed" }));
+        assert(resumed);
+        await scheduler.scheduleGenerationTask("agent", ready.id, { executionPhase: "created", nextPollAt: Date.now() });
+        expect(await scheduler.claimDueGenerationTasks({ workerId: "fixture-local-resumed", taskIds: [ready.id], limit: 1 })).toHaveLength(1);
+        const executable = await prepareEcommerceProtectionTask(resumed, "fixture-generation-resumed", analysis, { imageQuality: "low", imageSize: "1024x1024" });
+        expect(executable).toMatchObject({ id: "ecommerce-local-edit", quality: "high", ratio: "100x80", references: [{ assetId: fixture.baseline.asset.id }, { assetId: fixture.product.asset.id, width: 200, height: 160 }] });
+        expect(resumed.ecommerceSnapshot?.referenceCheckpoint).toEqual(checkpoint);
+        expect(boundary.model.mock.calls.map(([request]) => request.tool.name)).toEqual(["analyze_ecommerce_references", "plan_ecommerce_edit"]);
+    }, 30_000);
+
+    it("retries failed planning with a new persisted billing identity in the same Run", async () => {
+        const conversation = await runtime.createCreativeConversation(userId, { surface: "chat", title: "planning retry" });
+        const product = await registerSource(conversation.id, 0, await productSource(1));
+        const analysis = { analysisVersion: "ecommerce-visual-analysis.v4", references: [productObservation(product.asset.id, false)], purposeSuggestions: [] };
+        installModelReplies(analysis, "product_to_scene");
+        const respond = boundary.model.getMockImplementation()!;
+        let failedBillingKey: string | null = null;
+        boundary.model.mockImplementation(async (request) => {
+            if (request.tool.name === "plan_ecommerce_edit") {
+                failedBillingKey = new Headers(request.headers).get("x-vozeb-pro-points-idempotency-key");
+                throw new Error("Fixture planning response failed validation");
+            }
+            return respond(request);
+        });
+        const run = await startRun(conversation.id, [product.asset.id], "修改图片1，把背景换成厨房，保留商品外观");
+        await completeReference(run.id, product.asset.id, 1);
+        const failed = await claimAndExecute(run.id, "failed-planning-parent");
+        expect(failed).toMatchObject({ status: "failed", tasks: [], failure: "Fixture planning response failed validation" });
+        expect(failedBillingKey).toBeTruthy();
+        expect(await scheduler.releaseGenerationTaskLease("agent", run.id, "failed-planning-parent", { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "fixture-planning-failed" })).not.toBeNull();
+        const frozenAnalysis = failed.ecommerceSnapshot!.referenceCheckpoint!.analysis;
+        const { POST } = await import("@/app/api/agent/runs/[id]/[action]/route");
+        const retry = () =>
+            POST(new Request(origin + `/api/agent/runs/${run.id}/retry`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversationId: conversation.id }) }), {
+                params: Promise.resolve({ id: run.id, action: "retry" }),
+            });
+        expect((await retry()).status).toBe(200);
+        const accepted = await runs.getAgentRun(run.id);
+        expect(accepted).toMatchObject({ id: run.id, conversationId: run.conversationId, inputMessageId: run.inputMessageId, assistantMessageId: run.assistantMessageId, status: "planning" });
+        installModelReplies(analysis, "product_to_scene");
+        const complete = boundary.model.getMockImplementation()!;
+        let retryBillingKey: string | null = null;
+        boundary.model.mockImplementation(async (request) => {
+            retryBillingKey = new Headers(request.headers).get("x-vozeb-pro-points-idempotency-key");
+            return complete(request);
+        });
+        const planned = await claimAndExecute(run.id, "retry-planning-parent");
+        expect(retryBillingKey).toBeTruthy();
+        expect(retryBillingKey).not.toBe(failedBillingKey);
+        expect(planned.ecommerceSnapshot?.referenceCheckpoint?.analysis).toEqual(frozenAnalysis);
+        expect(planned.ecommerceSnapshot?.plan).toMatchObject({ operation: "product_to_scene" });
+        expect((await retry()).status).toBe(409);
+        expect((await runs.getAgentRun(run.id))?.ecommerceSnapshot?.plan).toEqual(planned.ecommerceSnapshot?.plan);
+    }, 30_000);
+
     it.each([
         { name: "white background product", arrange: arrangeWhite, operation: "product_to_scene", parentTaskId: "ecommerce-product-scene", expectedOptions: { transparentBackground: false } },
         { name: "transparent background product", arrange: arrangeTransparent, operation: "product_to_scene", parentTaskId: "ecommerce-product-scene", expectedOptions: { transparentBackground: true } },
         {
             name: "local product edit",
             arrange: arrangeLocal,
+            operation: "local_edit",
+            parentTaskId: "ecommerce-local-edit",
+            expectedOptions: { mode: "local_edit", targetRegion: { x: 0, y: 0, width: 1, height: 1 }, protectedRectangles: expect.arrayContaining([{ x: 40, y: 20, width: 20, height: 40 }]) },
+        },
+        {
+            name: "global product lighting",
+            arrange: arrangeGlobalLighting,
             operation: "local_edit",
             parentTaskId: "ecommerce-local-edit",
             expectedOptions: { mode: "local_edit", targetRegion: { x: 0, y: 0, width: 1, height: 1 }, protectedRectangles: expect.arrayContaining([{ x: 40, y: 20, width: 20, height: 40 }]) },
@@ -384,6 +492,9 @@ describe("Agent persists its plan before native protection and resumes the same 
             expect(afterBuild?.ecommerceSnapshot).toMatchObject(frozen);
             expect(afterBuild?.ecommerceSnapshot?.referenceCheckpoint).toMatchObject(frozenReference);
             expect(afterBuild?.ecommerceSnapshot?.processing?.protection).toEqual({ jobId: protection.id, inputDigest: protection.payload.inputDigest, manifest: completed.manifest });
+            assert(afterBuild);
+            const evidence = await service.readCompletedEcommerceProductProtection(afterBuild);
+            expect(evidence.regions).toMatchObject({ productAnchorId: fixture.product.asset.id, sourceAssetId: fixture.baseline.asset.id, sourceSize: { width: 100, height: 80 } });
             const resumed = await claimAndExecute(fixture.run.id, "protection-complete-parent");
             expect(resumed).toMatchObject({ id: fixture.run.id, conversationId: fixture.run.conversationId, inputMessageId: fixture.run.inputMessageId, assistantMessageId: fixture.run.assistantMessageId });
             expect(resumed.ecommerceSnapshot).toMatchObject(frozen);
@@ -400,6 +511,28 @@ describe("Agent persists its plan before native protection and resumes the same 
             const submitted = String(submissions[0][1]?.body);
             expect(submitted).toContain(completed.artifact.storageKey);
             expect(submitted).not.toContain("data:image/png;base64,");
+            const submittedInput: Pick<ImageTask, "config" | "prompt" | "references" | "ecommerceExecution"> & { kind: "edit" } = JSON.parse(submitted);
+            const { compileStrictProductEdit } = await import("./ecommerce-product-regions");
+            const compiled = compileStrictProductEdit(submittedInput, evidence.regions);
+            expect(compiled.state).toBe("ready");
+            const image: ImageTask = {
+                ...compiled.task,
+                id: "fixture-image-result",
+                userId,
+                username: "fixture-user",
+                displayName: "Fixture User",
+                source: "agent",
+                kind: "edit",
+                status: "running",
+                createdAt: 1,
+                updatedAt: 1,
+                conversationId: conversation.id,
+                runId: fixture.run.id,
+                parentTaskId,
+            };
+            const { isNativeProductImageTaskResult, usesImageTaskResultProcessing } = await import("./image-task-result-contract");
+            expect(isNativeProductImageTaskResult(image)).toBe(true);
+            expect(usesImageTaskResultProcessing(image)).toBe(true);
             expect(resumed.tasks).toMatchObject([{ status: "failed", productProtectionRegions: { productAnchorId: fixture.product.asset.id, sourceAssetId: fixture.baseline.asset.id, sourceSize: { width: 100, height: 80 } } }]);
         },
         30_000,

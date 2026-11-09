@@ -50,6 +50,11 @@ describe("file enhancement publication through real HTTP and permanent media", (
         directory = await mkdtemp(join(tmpdir(), "vozeb-enhancement-publication-cpu-"));
         vi.stubEnv("VOZEB_PRO_DATA_DIR", directory);
         vi.stubEnv("VOZEB_PRO_DATABASE_PROVIDER", "file");
+        vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_MEMORY_MB", "8192");
+        vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_HEAP_MB", "64");
+        vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB", "6144");
+        vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_HEAP_MB", "384");
+        vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_CONCURRENCY", "1");
         vi.stubEnv("VOZEB_PRO_ENCRYPTION_KEY", "a".repeat(64));
         vi.stubEnv("VOZEB_PRO_MAINTENANCE_TOKEN", "fixture-maintenance-token-".repeat(3));
         vi.stubEnv("VOZEB_PRO_WORKER_TOKEN", "fixture-worker-token-".repeat(3));
@@ -78,7 +83,7 @@ describe("file enhancement publication through real HTTP and permanent media", (
         }
     });
 
-    it("keeps global enhancement unpublished until a real CPU child receipt with zero parent pixel work", async () => {
+    it("enhances the saved protected final through a real CPU receipt while preserving the original and raw native", async () => {
         const userId = `enhancement-publication-cpu-${randomUUID()}`;
         const { mutateAuthDb } = await import("@/lib/auth/store-repository");
         await mutateAuthDb((db) => {
@@ -107,8 +112,14 @@ describe("file enhancement publication through real HTTP and permanent media", (
         const ai = await sharp(source).resize(128, 128).png().toBuffer();
         const nativeAsset = await storage.writeAssetBytes(source, "image/png", "image", { ownerUserId: userId, source: "image-workbench", conversationId: conversation.id, taskId });
         assert.ok(nativeAsset.serverUrl);
-        const native = { url: nativeAsset.serverUrl, sha256: digest(source), width: 32, height: 32, byteLength: source.length, format: "png", hasAlpha: false, provenance: "provider_native" as const };
-        const result = { resultId: `${taskId}:1`, enhancementId, dataUrl: native.url, serverUrl: native.url, nativeSource: native, width: 32, height: 32, bytes: source.length, mimeType: "image/png" };
+        const rawBytes = await sharp({ create: { width: 32, height: 32, channels: 3, background: "red" } })
+            .png()
+            .toBuffer();
+        const rawAsset = await storage.writeAssetBytes(rawBytes, "image/png", "image", { ownerUserId: userId, source: "image-workbench", conversationId: conversation.id, taskId });
+        assert.ok(rawAsset.serverUrl);
+        const rawNative = { url: rawAsset.serverUrl, sha256: digest(rawBytes), width: 32, height: 32, byteLength: rawBytes.length, format: "png", hasAlpha: false, provenance: "provider_native" as const };
+        const native = { url: nativeAsset.serverUrl, sha256: digest(source), width: 32, height: 32, byteLength: source.length, format: "png", hasAlpha: false, provenance: "generation_final" as const };
+        const result = { resultId: `${taskId}:1`, enhancementId, dataUrl: native.url, serverUrl: native.url, nativeSource: rawNative, enhancementSource: native, width: 32, height: 32, bytes: source.length, mimeType: "image/png" };
         const running = await tasks.createStoredGenerationTask<ImageTask>(
             "image",
             {
@@ -125,6 +136,7 @@ describe("file enhancement publication through real HTTP and permanent media", (
                 config: { baseUrl: "https://fixture.invalid", apiKey: "system", apiFormat: "openai", model: "fixture", quality: "4k", size: "64x64" },
                 prompt: "Enhancement CPU fixture",
                 references: [],
+                mask: { dataUrl: `data:image/png;base64,${source.toString("base64")}` },
                 enhancementPolicy: structuredClone(policy),
             },
             60_000,
@@ -328,5 +340,29 @@ describe("file enhancement publication through real HTTP and permanent media", (
         } finally {
             vi.restoreAllMocks();
         }
+        const processing = await import("./image-processing-service");
+        const { imageProcessingResourceConfig } = await import("../image-processing/resource-config");
+        const { completeClaimedImageProcessingFixture, readImageTaskResultBytesFixture } = await import("./image-processing.test-fixture");
+        const resources = imageProcessingResourceConfig(process.env);
+        const claimed = await processing.claimImageProcessingTasks({ workerId: "fixture-final-enhancement-cpu", profileVersion: resources.profileVersion, availableMemoryBytes: resources.budgetBytes, slots: 1 });
+        expect(claimed.tasks).toHaveLength(1);
+        expect(claimed.tasks[0].payload).toMatchObject({ operation: "process_enhancement", options: { scope: "full_image" } });
+        await completeClaimedImageProcessingFixture(claimed.tasks[0], "fixture-final-enhancement-cpu", directory);
+        await due();
+        await run();
+        const published = await jobs.getEnhancementJob(enhancementId, userId);
+        expect(published).toMatchObject({ status: "succeeded", decision: { source: native }, publication: { delivered: { format: "jpeg", width: 64, height: 64 } } });
+        assert.ok(published?.publication);
+        expect(published.decision).not.toHaveProperty("delivery");
+        expect(published.publication.protection).toBeUndefined();
+        expect(await readImageTaskResultBytesFixture(native.url)).toEqual(source);
+        expect(await readImageTaskResultBytesFixture(rawNative.url)).toEqual(rawBytes);
+        expect((await images.getImageTask(taskId))!.result).toEqual(originalResult);
+        const assets = await runtime.listCreativeAssets(conversation.id, userId);
+        expect(assets).toHaveLength(2);
+        expect(assets.find((asset) => asset.id === published.publication!.assetId)).toMatchObject({ parentAssetId: originalAssets[0].id, mimeType: "image/jpeg", metadata: { nativeSha256: native.sha256 } });
+        await due();
+        await run();
+        expect(traffic).toMatchObject({ submit: 1, download: 1, receipts: 1 });
     }, 30_000);
 });
