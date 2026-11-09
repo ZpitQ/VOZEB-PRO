@@ -134,7 +134,7 @@ export async function createImageTaskUpstreamStep(task: ImageTask, origin: strin
               : config.apiFormat === "gemini"
                 ? await runGeminiImageTask(submission, origin, authContext)
                 : await runOpenAiImageTask(submission, origin, publicOrigin, authContext, true);
-        return await handleImageProviderResult(candidate, result, origin, authContext);
+        return await handleImageProviderResult({ ...candidate, ecommerceCanvasRequest: submission.ecommerceCanvasRequest }, result, origin, authContext);
     } catch (error) {
         if (error instanceof EcommerceCanvasAdapterReview) return { state: "needs_review", reason: error.message, status: "canvas_adapter_unsupported" };
         if (error instanceof ImageUpstreamTerminalError) return { state: "failed", error: error.message || "图片生成失败", status: "failed", retryReason: "upstream_failed" };

@@ -1110,9 +1110,13 @@ describe("scene confirmation persists its receipt before a new claim builds the 
         30_000,
     );
 
-    it("submits the same native-confirmed scene ImageTask after claim B without an inline mask", async () => {
+    it("submits the same native-confirmed scene ImageTask after claim B without an inline stored mask and seals a direct PNG result", async () => {
         const fixture = await nativeSceneSubmissionFixture();
         const { images, imageRuntime, first, second, cookie, claimedImage, claim, task, paused, registeredSource, registeredMask, original, native, receiptBefore, prepareBefore, build, buildBefore, moneyBefore } = fixture;
+        boundary.create.mockImplementationOnce(async (submission, requestOrigin, _publicOrigin, requestCookie) => {
+            const { pending: _pending, ...result } = await fixture.submitProviderAttempt(submission, requestOrigin, requestCookie, "fixture-native-scene-submit:" + submission.id);
+            return { ...result, dataUrl: "data:image/png;base64," + original.toString("base64") };
+        });
         const step = await imageRuntime.createImageTaskUpstreamStep(claimedImage, origin, origin, cookie);
         const charge = fixture.charge();
         const afterStep = await images.getImageTask(first.taskId);
@@ -1123,10 +1127,7 @@ describe("scene confirmation persists its receipt before a new claim builds the 
         expect((await runs.getAgentRun(paused.id))?.ecommerceSnapshot?.processing?.sceneSelection).toStrictEqual(receiptBefore);
         expect(await tasks.getStoredGenerationTaskRecord("image_processing", prepareBefore.id)).toStrictEqual(prepareBefore);
         expect(await tasks.getStoredGenerationTaskRecord("image_processing", build.id)).toStrictEqual(buildBefore);
-        assert("status" in step, "SETUP: a fresh unsubmitted ImageTask must reach submission review or a pending upstream");
-        expect(["scene_mask_review_required", "submitted"], "SETUP: real create step must pass source/config validation before the native-mask submission gate; actual=" + JSON.stringify(step)).toContain(step.status);
-        // First business assertion. On current code the valid native mask reaches the
-        // real inline PNG gate and returns scene_mask_review_required before any debit.
+        // Direct results must use the canvas recorded on the transient provider submission.
         expect(
             step,
             JSON.stringify({
@@ -1139,10 +1140,8 @@ describe("scene confirmation persists its receipt before a new claim builds the 
                 submittedAt: afterSchedule?.submittedAt,
                 financialUnchanged: JSON.stringify(moneyAfter) === JSON.stringify(moneyBefore),
             }),
-        ).toMatchObject({ state: "pending", status: "submitted", upstream: { id: "fixture-native-scene-upstream" } });
+        ).toMatchObject({ state: "result_ready", status: "native_ready", resultUrl: expect.stringMatching(/^\/api\/reference-assets\//) });
 
-        // UNREACHED in the initial native-mask RED. A later GREEN qualifies submission
-        // only, with the actual original attempt/debit; no result query or Worker here.
         expect(boundary.create).toHaveBeenCalledOnce();
         assert(charge && afterStep);
         expect(charge).toMatchObject({ cost: 2 });
@@ -1151,14 +1150,23 @@ describe("scene confirmation persists its receipt before a new claim builds the 
             runId: paused.id,
             executionId: claim.payload.executionId,
             attemptNo: 1,
-            upstream: { id: "fixture-native-scene-upstream" },
             billing: { pointsCost: 2, pointsRecordId: charge.recordId, refunded: false },
+            mask: claimedImage.mask,
             sceneProtection: task.sceneProtection,
             ecommerceCanvasRequest: { size: "100x80" },
+            nativeResults: { version: "image-task-native-results.v1", attemptNo: 1, upstreamTaskId: null, slots: [{ status: "stored", resultId: first.taskId + ":1", resultIndex: 1, sha256: fixture.baseline.sourceSha256, bytes: original.length }] },
         });
+        expect(afterStep.upstream).toBeUndefined();
+        expect(afterStep.result).toBeUndefined();
+        const slot = afterStep.nativeResults?.slots[0];
+        assert(slot?.status === "stored");
+        const storedNative = await references.readReferenceAsset(slot.storageKey);
+        assert(storedNative);
+        expect(await readFile(storedNative.filePath)).toEqual(original);
         expect(afterStep.attempts).toHaveLength(1);
         expect(afterStep.attempts?.[0]).toMatchObject({ attemptNo: 1, status: "running" });
-        expect(afterSchedule).toMatchObject({ executionPhase: "submitted", upstreamTaskId: "fixture-native-scene-upstream" });
+        expect(afterSchedule).toMatchObject({ executionPhase: "submitting" });
+        expect(afterSchedule?.upstreamTaskId).toBeUndefined();
         expect(moneyAfter.pointRecords.filter((record) => record.type === "consume")).toMatchObject([{ id: charge.recordId, amount: -2, userId }]);
         expect((await images.getImageTask(second.taskId))?.attempts).toBeUndefined();
         expect((await runs.getAgentRun(paused.id))?.tasks[0].childTasks).toStrictEqual(task.childTasks);

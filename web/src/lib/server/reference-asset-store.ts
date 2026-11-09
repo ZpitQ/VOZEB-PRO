@@ -161,6 +161,7 @@ function extensionFromMime(mimeType: string) {
 
 function mimeTypeFromToken(token: string) {
     const lower = token.toLowerCase();
+    if (lower.endsWith(".bin")) return "application/octet-stream";
     if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
     if (lower.endsWith(".webp")) return "image/webp";
     if (lower.endsWith(".gif")) return "image/gif";
@@ -178,5 +179,8 @@ function mimeTypeFromToken(token: string) {
 }
 
 export function isReferenceAssetPath(value: string) {
-    return /^(?:temporary|permanent)\/\d{4}\/\d{2}\/\d{2}\/(?:images|videos|audio)\/\d{8}-\d{6}-[0-9a-f-]{36}\.(?:png|jpg|jpeg|webp|gif|tiff|avif|mp4|webm|mov|mp3|wav|ogg|aac|flac)$/i.test(value);
+    return (
+        /^(?:temporary|permanent)\/\d{4}\/\d{2}\/\d{2}\/(?:images|videos|audio)\/\d{8}-\d{6}-[0-9a-f-]{36}\.(?:png|jpg|jpeg|webp|gif|tiff|avif|mp4|webm|mov|mp3|wav|ogg|aac|flac)$/i.test(value) ||
+        /^permanent\/\d{4}\/\d{2}\/\d{2}\/attachments\/\d{8}-\d{6}-[0-9a-f-]{36}\.bin$/i.test(value)
+    );
 }
