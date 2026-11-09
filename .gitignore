@@ -3,6 +3,7 @@
 .next-*/
 out/
 node_modules/
+.image-processing-runtime/
 .pnpm-store/
 /pnpm-lock.yaml
 .env*

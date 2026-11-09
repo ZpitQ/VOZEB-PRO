@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { createPostgresRepositories, ensurePostgresSchema, isPostgresDatabaseEnabled, withPostgresTransaction } from "@/lib/server/database";
+import { createPostgresRepositories, ensurePostgresSchema, isPostgresDatabaseEnabled, withPostgresTransaction, type QueryExecutor } from "@/lib/server/database";
 import { collectLocalMediaStorageKeys } from "@/lib/server/local-media-references";
 import { deleteUserMediaAssetsCascade } from "@/lib/server/user-media-deletion-service";
 import {
@@ -40,32 +40,38 @@ export async function recordGenerationLogDraft(input: GenerationLogInput) {
     return mutateOwnedGenerationLog(id, input.userId, (existing) => buildGenerationLogDraft({ ...input, requestSnapshot }, id, existing));
 }
 
-export async function recordGenerationTaskLogResult(input: GenerationTaskLogResultInput): Promise<{ log?: StoredGenerationLog; asset?: GenerationLogAsset; assets?: GenerationLogAsset[] }> {
+export async function recordGenerationTaskLogResult(input: GenerationTaskLogResultInput, beforePersist?: () => void, executor?: QueryExecutor): Promise<{ log?: StoredGenerationLog; asset?: GenerationLogAsset; assets?: GenerationLogAsset[] }> {
     const logId = optionalText(input.logId, 120);
     const slotId = optionalText(input.slotId, 200);
     if (!logId || !slotId) {
-        const log = await recordStandaloneGenerationTaskLog(input);
+        const log = await recordStandaloneGenerationTaskLog(input, beforePersist, executor);
         return { log, asset: log.assets[0], assets: log.assets };
     }
 
     let missing = false;
     let asset: GenerationLogAsset | undefined;
     let assets: GenerationLogAsset[] = [];
-    const log = await mutateOwnedGenerationLog(logId, input.userId, async (current) => {
-        if (!current) {
-            missing = true;
-            return undefined;
-        }
-        const slot = findGenerationLogSlot(current, slotId, input.clientRequestId);
-        if (!slot) return current;
-        if (slot.status === "success") {
-            if (slot.taskId === input.taskId && slot.assetIndex !== undefined) asset = current.assets[slot.assetIndex];
-            return current;
-        }
-        assets = await normalizeTaskResultAssets(input, current);
-        [asset] = assets;
-        return applyGenerationTaskLogResult(current, input, slot.id, assets);
-    });
+    const log = await mutateOwnedGenerationLog(
+        logId,
+        input.userId,
+        async (current) => {
+            if (!current) {
+                missing = true;
+                return undefined;
+            }
+            const slot = findGenerationLogSlot(current, slotId, input.clientRequestId);
+            if (!slot) return current;
+            if (slot.status === "success") {
+                if (slot.taskId === input.taskId && slot.assetIndex !== undefined) asset = current.assets[slot.assetIndex];
+                return current;
+            }
+            assets = await normalizeTaskResultAssets(input, current);
+            [asset] = assets;
+            return applyGenerationTaskLogResult(current, input, slot.id, assets);
+        },
+        beforePersist,
+        executor,
+    );
     if (missing) {
         assets = await normalizeTaskResultAssets(input);
         [asset] = assets;
@@ -104,24 +110,32 @@ export async function deleteGenerationLogResultsForUser(userId: string, id: stri
     return log;
 }
 
-async function mutateOwnedGenerationLog(id: string, userId: string, mutate: (current: StoredGenerationLog | undefined) => StoredGenerationLog | undefined | Promise<StoredGenerationLog | undefined>): Promise<StoredGenerationLog | null> {
+async function mutateOwnedGenerationLog(
+    id: string,
+    userId: string,
+    mutate: (current: StoredGenerationLog | undefined) => StoredGenerationLog | undefined | Promise<StoredGenerationLog | undefined>,
+    beforePersist?: () => void,
+    executor?: QueryExecutor,
+): Promise<StoredGenerationLog | null> {
     if (!id || !userId) return null;
     if (isPostgresDatabaseEnabled()) {
-        await ensurePostgresSchema();
-        return withPostgresTransaction(async (client) => {
+        if (!executor) await ensurePostgresSchema();
+        const persist = async (client: QueryExecutor) => {
             const repository = createPostgresRepositories(client).generationLogs;
             const record = await repository.getById(id, true);
             const current = record ? normalizeStoredLog(record as Partial<StoredGenerationLog>) : undefined;
             if (current && current.userId !== userId) throw new GenerationLogOwnershipError();
             const next = await mutate(current);
             return next ? normalizeStoredLog((await repository.upsert(next)) as Partial<StoredGenerationLog>) : null;
-        });
+        };
+        return executor ? persist(executor) : withPostgresTransaction(persist);
     }
     return mutateGenerationLogDb(async (db) => {
         const current = db.logs.find((log) => log.id === id);
         if (current && current.userId !== userId) throw new GenerationLogOwnershipError();
         const next = await mutate(current);
         if (!next) return null;
+        beforePersist?.();
         db.logs = [next, ...db.logs.filter((log) => log.id !== id)];
         return next;
     });
@@ -206,29 +220,33 @@ function normalizeTaskResultAssets(input: GenerationTaskLogResultInput, existing
     });
 }
 
-function recordStandaloneGenerationTaskLog(input: GenerationTaskLogResultInput) {
-    return recordGenerationLog({
-        id: `${input.kind}-task:${input.taskId}`,
-        taskId: input.taskId,
-        userId: input.userId,
-        username: input.username,
-        displayName: input.displayName,
-        kind: input.kind,
-        source: input.source,
-        status: input.status,
-        title: input.title,
-        prompt: input.prompt,
-        model: input.model,
-        summary: input.summary,
-        durationMs: input.durationMs,
-        count: Math.max(1, input.assets?.length || (input.asset?.url ? 1 : 0)),
-        successCount: input.status === "success" ? Math.max(1, input.assets?.length || (input.asset?.url ? 1 : 0)) : 0,
-        failCount: input.status === "failed" ? 1 : 0,
-        assets: input.assets?.length ? input.assets : input.asset?.url ? [input.asset] : [],
-        error: input.error,
-        createdAt: input.createdAt,
-        completedAt: Date.now(),
-    });
+function recordStandaloneGenerationTaskLog(input: GenerationTaskLogResultInput, beforePersist?: () => void, executor?: QueryExecutor) {
+    return recordGenerationLog(
+        {
+            id: `${input.kind}-task:${input.taskId}`,
+            taskId: input.taskId,
+            userId: input.userId,
+            username: input.username,
+            displayName: input.displayName,
+            kind: input.kind,
+            source: input.source,
+            status: input.status,
+            title: input.title,
+            prompt: input.prompt,
+            model: input.model,
+            summary: input.summary,
+            durationMs: input.durationMs,
+            count: Math.max(1, input.assets?.length || (input.asset?.url ? 1 : 0)),
+            successCount: input.status === "success" ? Math.max(1, input.assets?.length || (input.asset?.url ? 1 : 0)) : 0,
+            failCount: input.status === "failed" ? 1 : 0,
+            assets: input.assets?.length ? input.assets : input.asset?.url ? [input.asset] : [],
+            error: input.error,
+            createdAt: input.createdAt,
+            completedAt: Date.now(),
+        },
+        beforePersist,
+        executor,
+    );
 }
 
 function applyGenerationTaskLogResult(current: StoredGenerationLog | undefined, input: GenerationTaskLogResultInput, slotId: string, resultAssets: GenerationLogAsset[]) {

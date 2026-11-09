@@ -45,6 +45,7 @@ export function CreativeMessages({
     onConfirmSceneSelection,
     onRecoverReference,
     onCheckStatus,
+    onResumeImageProcessing,
     onEnhancementComplete,
     selectedAssetIds,
     onToggleAsset,
@@ -66,6 +67,7 @@ export function CreativeMessages({
     onConfirmSceneSelection?: (runId: string, selection: CreativeSceneSelection) => Promise<void>;
     onRecoverReference?: (runId: string, recovery: CreativeReferenceRecovery) => Promise<void>;
     onCheckStatus?: (runId: string) => Promise<void>;
+    onResumeImageProcessing?: (runId: string) => Promise<void>;
     onEnhancementComplete?: (conversationId: string) => Promise<void>;
     selectedAssetIds: string[];
     onToggleAsset: (id: string) => void;
@@ -152,6 +154,7 @@ export function CreativeMessages({
                             onConfirmSceneSelection={onConfirmSceneSelection}
                             onRecoverReference={onRecoverReference}
                             onCheckStatus={onCheckStatus}
+                            onResumeImageProcessing={onResumeImageProcessing}
                             onEnhancementComplete={onEnhancementComplete}
                             selectedAssetIds={selectedAssetIds}
                             onToggleAsset={onToggleAsset}
@@ -169,6 +172,7 @@ export function CreativeMessages({
                     .join("\n\n");
                 const downloads = agentAssetDownloads(itemAssets);
                 const run = item.runId ? runDetails[item.runId] : undefined;
+                const running = item.status === "running" || run?.status === "planning" || run?.status === "running";
                 const failedTasks = run?.tasks.filter((task) => task.status === "failed") || [];
                 const failedRound = failedRoundsByAssistantId.get(item.id);
                 return (
@@ -176,8 +180,15 @@ export function CreativeMessages({
                         {item.role === "assistant" ? <CreativeAssistantAvatar className="mt-0" logoUrl={site.logoUrl} /> : null}
                         <div className={cn("min-w-0", item.role === "user" ? "max-w-[520px] text-right" : "min-w-0 flex-1")}>
                             {item.role === "user" && itemAssets.length ? <CreativeRoundReferenceStrip assets={itemAssets} /> : null}
-                            {item.role === "assistant" && (item.status === "running" || (run?.status === "paused" && Boolean(run.ecommerceReferenceReview || run.canCheckStatus))) ? (
-                                <CreativeGenerationWaiting run={run} message={item} onConfirmSceneSelection={onConfirmSceneSelection} onRecoverReference={onRecoverReference} onCheckStatus={onCheckStatus} />
+                            {item.role === "assistant" && (running || (run?.status === "paused" && Boolean(run.ecommerceReferenceReview || run.canCheckStatus || run.imageProcessingRecovery))) ? (
+                                <CreativeGenerationWaiting
+                                    run={run}
+                                    message={item}
+                                    onConfirmSceneSelection={onConfirmSceneSelection}
+                                    onRecoverReference={onRecoverReference}
+                                    onCheckStatus={onCheckStatus}
+                                    onResumeImageProcessing={onResumeImageProcessing}
+                                />
                             ) : textAssetContent && item.role === "assistant" && item.status === "completed" ? null : (
                                 <div
                                     className={cn(
@@ -203,7 +214,7 @@ export function CreativeMessages({
                                 />
                             ) : null}
                             {item.role === "assistant" && failedRound ? <RetryAction onRetry={() => onRetryMessage(failedRound.assistant, failedRound.run)} detail={failedTasks.length ? `${failedTasks.length} 项生成失败` : undefined} /> : null}
-                            {item.role !== "user" && item.status !== "running" ? <AgentMessageActions text={textAssetContent || (downloads.length ? "" : displayContent)} downloads={downloads.length ? [] : downloads} /> : null}
+                            {item.role !== "user" && !running ? <AgentMessageActions text={textAssetContent || (downloads.length ? "" : displayContent)} downloads={downloads.length ? [] : downloads} /> : null}
                         </div>
                         {item.role === "user" ? <CreativeUserAvatar className="mt-2 !size-8" avatarUrl={avatarUrl} fallback={avatarFallback} label={user?.displayName || user?.username || "用户"} /> : null}
                     </article>
@@ -230,6 +241,7 @@ function CreativeMediaRound({
     onConfirmSceneSelection,
     onRecoverReference,
     onCheckStatus,
+    onResumeImageProcessing,
     onEnhancementComplete,
     selectedAssetIds,
     onToggleAsset,
@@ -249,6 +261,7 @@ function CreativeMediaRound({
     onConfirmSceneSelection?: (runId: string, selection: CreativeSceneSelection) => Promise<void>;
     onRecoverReference?: (runId: string, recovery: CreativeReferenceRecovery) => Promise<void>;
     onCheckStatus?: (runId: string) => Promise<void>;
+    onResumeImageProcessing?: (runId: string) => Promise<void>;
     onEnhancementComplete?: (conversationId: string) => Promise<void>;
     selectedAssetIds: string[];
     onToggleAsset: (id: string) => void;
@@ -266,28 +279,34 @@ function CreativeMediaRound({
     const qualityReviewPending = run?.ecommerceQualityStatus === "needs_review" || run?.ecommerceQualityStatus === "needs_adjustment";
     const sceneSelectionPending = run?.status === "paused" && Boolean(run.ecommerceSceneSelection);
     const referenceReviewPending = run?.status === "paused" && Boolean(run.ecommerceReferenceReview);
+    const imageProcessingPending = run?.status === "paused" && Boolean(run.imageProcessingRecovery);
+    const running = assistantMessage.status === "running" || run?.status === "planning" || run?.status === "running";
     const mode = creativeRunMode(run);
     const taskTitle = run?.tasks.find((task) => task.type === mode)?.title.trim();
     const resultTitle =
-        qualityReviewPending && !run?.ecommerceQualityReview?.advisory
-            ? run?.ecommerceQualityStatus === "needs_adjustment"
-                ? "需要调整"
-                : "待复核"
-            : referenceReviewPending
-              ? run?.ecommerceReferenceReview?.kind === "confirm_purposes"
-                  ? "确认参考用途"
-                  : run?.ecommerceReferenceReview?.kind === "retry_source"
-                    ? "参考图片待核对"
-                    : "参考图片待分析"
-              : sceneSelectionPending
-                ? "确认修改位置"
-                : taskTitle?.startsWith("生成")
-                  ? `已为你${taskTitle}`
-                  : mode === "video"
-                    ? "已为你生成视频"
-                    : mode === "audio"
-                      ? "已为你生成音频"
-                      : "已为你生成图片";
+        assistantMessage.status === "cancelled" || run?.status === "cancelled"
+            ? "已取消生成"
+            : qualityReviewPending && !run?.ecommerceQualityReview?.advisory
+              ? run?.ecommerceQualityStatus === "needs_adjustment"
+                  ? "需要调整"
+                  : "待复核"
+              : referenceReviewPending
+                ? run?.ecommerceReferenceReview?.kind === "confirm_purposes"
+                    ? "确认参考用途"
+                    : run?.ecommerceReferenceReview?.kind === "retry_source"
+                      ? "参考图片待核对"
+                      : "参考图片待分析"
+                : sceneSelectionPending
+                  ? "确认修改位置"
+                  : imageProcessingPending
+                    ? "图像处理已暂停"
+                    : taskTitle?.startsWith("生成")
+                      ? `已为你${taskTitle}`
+                      : mode === "video"
+                        ? "已为你生成视频"
+                        : mode === "audio"
+                          ? "已为你生成音频"
+                          : "已为你生成图片";
     const renderRoundActions = (activeAsset: CreativeAsset) =>
         activeAsset.status === "ready" ? <CreativeRoundActions outputAssets={outputAssets} activeAsset={activeAsset} run={run} selectedAssetIds={selectedAssetIds} onToggleAsset={onToggleAsset} /> : null;
 
@@ -310,7 +329,7 @@ function CreativeMediaRound({
                 <div className="flex min-w-0 items-start gap-4 sm:gap-5">
                     <CreativeAssistantAvatar logoUrl={siteLogoUrl} />
                     <div className="min-w-0 flex-1">
-                        {!isFailedMediaRound && (assistantMessage.status !== "running" || qualityReviewPending || mediaOutputs.length > 0) ? (
+                        {!isFailedMediaRound && (!running || qualityReviewPending || mediaOutputs.length > 0) ? (
                             <>
                                 <div className="mb-2 flex w-fit max-w-full flex-wrap items-baseline gap-x-3 gap-y-0.5">
                                     <h2 className="truncate text-[17px] font-semibold leading-7 text-[#1f2937] dark:text-[#f3f5f7]">{resultTitle}</h2>
@@ -324,8 +343,15 @@ function CreativeMediaRound({
                                 <CreativeQualityReview run={run!} message={displayContent} onAdjust={onAdjustRequest ? () => onAdjustRequest(userMessage, run) : undefined} />
                             ) : isFailedMediaRound ? (
                                 <CreativeGenerationFailure message={failedTasks.length === 1 ? failedTasks[0]?.error || displayContent : displayContent} onRetry={() => onRetryMessage(assistantMessage, run)} />
-                            ) : (!mediaOutputs.length && assistantMessage.status === "running") || sceneSelectionPending || referenceReviewPending || run?.canCheckStatus ? (
-                                <CreativeGenerationWaiting run={run} message={assistantMessage} onConfirmSceneSelection={onConfirmSceneSelection} onRecoverReference={onRecoverReference} onCheckStatus={onCheckStatus} />
+                            ) : (!mediaOutputs.length && running) || sceneSelectionPending || referenceReviewPending || imageProcessingPending || run?.canCheckStatus ? (
+                                <CreativeGenerationWaiting
+                                    run={run}
+                                    message={assistantMessage}
+                                    onConfirmSceneSelection={onConfirmSceneSelection}
+                                    onRecoverReference={onRecoverReference}
+                                    onCheckStatus={onCheckStatus}
+                                    onResumeImageProcessing={onResumeImageProcessing}
+                                />
                             ) : showAssistantText ? (
                                 <div
                                     className={cn(

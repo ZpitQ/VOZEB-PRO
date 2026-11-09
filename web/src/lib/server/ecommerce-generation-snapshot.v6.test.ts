@@ -49,6 +49,7 @@ describe("ecommerce v6 scene selection projection", () => {
                 plan: {
                     planVersion: "ecommerce-edit.v6",
                     operation: "scene_edit",
+                    strategy: "integrated_scene",
                     source: { currentSceneBaselineId: "scene-baseline" },
                     protection: { scope: "local" },
                 },

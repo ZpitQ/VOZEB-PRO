@@ -8,6 +8,9 @@ import type { EcommerceLogicalModelRole } from "./agent-run-surface-policy";
 import type { EcommerceVisualAnalysis, EcommerceVisualAnalysisV4, EcommerceVisualAnalysisFailure } from "./ecommerce-visual-analysis";
 import { parseExplicitEcommerceReferenceBindings, type EcommerceReferenceAlias, type EcommerceReferenceBinding, type EcommerceReferenceDecision } from "./ecommerce-reference-purpose";
 import type { EcommerceReferenceCheckpoint } from "./ecommerce-reference-recovery";
+import type { ImageProcessingCheckpoint, ImageProcessingManifest, ImageProcessingMediaReference } from "./image-processing-service";
+import type { EncodedImageProcessingInput } from "../image-processing/resource-model";
+import type { ImageProcessingRectangle } from "../image-processing/contracts";
 
 export const ECOMMERCE_GENERATION_SNAPSHOT_VERSION = "ecommerce-generation.v1" as const;
 
@@ -43,6 +46,34 @@ export type EcommerceSnapshotInput = {
     inheritedReferences?: EcommercePlanningInput["inheritedReferences"];
 };
 
+export type EcommerceVisualReviewSource = {
+    source: "baseline" | "productAnchor" | `result:${string}`;
+    original: { assetId: string; assetVersion: string; url: string; imageTaskId?: string; resultId?: string; resultDigest?: string; sha256?: string };
+    frozen?: {
+        input: { assetId: string; assetVersion: string; expectedSha256: string };
+        location: ImageProcessingMediaReference;
+        bytes: number;
+        mimeType: string;
+        encoded: EncodedImageProcessingInput;
+    };
+};
+
+export type EcommerceVisualReviewCheckpoint = {
+    version: "ecommerce-visual-review.v1";
+    attempt: number;
+    contextDigest: string;
+    algorithmVersion: "ecommerce-review-preparation.v1";
+    sources: EcommerceVisualReviewSource[];
+    views: Array<{ sourceIndex: number; region?: ImageProcessingRectangle; jobId: string; inputDigest: string; receipt?: { executionId: string; manifest: ImageProcessingManifest } }>;
+    failure?: { code: string; message: string; jobId?: string };
+    submission:
+        | { state: "not_submitted" }
+        | { state: "started"; modelRole: EcommerceRoleRouteSnapshot; protocol: string; variant: string; requestDigest: string; startedAt: number }
+        | { state: "completed"; requestDigest: string; completedAt: number }
+        | { state: "failed"; requestDigest?: string; reason: string }
+        | { state: "unknown"; requestDigest: string; reason: string };
+};
+
 export type EcommerceGenerationSnapshot = {
     version: typeof ECOMMERCE_GENERATION_SNAPSHOT_VERSION;
     mode: "shadow" | "legacy" | "active";
@@ -52,6 +83,8 @@ export type EcommerceGenerationSnapshot = {
     visualAnalysisFailure?: EcommerceVisualAnalysisFailure;
     referenceDecision?: EcommerceReferenceDecision;
     referenceCheckpoint?: EcommerceReferenceCheckpoint;
+    processing?: ImageProcessingCheckpoint;
+    visualReview?: EcommerceVisualReviewCheckpoint;
     plan?: EcommerceEditPlan;
     modelRoles?: Record<string, string | null>;
     modelRouteSnapshots?: Partial<Record<EcommerceLogicalModelRole, EcommerceRoleRouteSnapshot>>;
@@ -85,9 +118,12 @@ export function ecommerceSceneSelectionTask(run: AgentRun) {
         snapshot?.mode !== "active" ||
         snapshot.fallback?.reason !== "scene_selection_required" ||
         snapshot.qualityCheck ||
+        snapshot.processing?.sceneSelection ||
         !plan ||
         !["ecommerce-edit.v3", "ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(plan.planVersion) ||
         plan.operation !== "scene_edit" ||
+        plan.strategy !== "integrated_scene" ||
+        plan.source.productAnchorId ||
         plan.protection?.scope !== "local" ||
         !plan.source.currentSceneBaselineId ||
         run.tasks.length !== 1 ||
@@ -147,6 +183,8 @@ export function recordEcommerceGenerationSnapshot(run: Pick<AgentRun, "id" | "us
         ...(snapshot.visualAnalysisFailure ? { visualAnalysisFailure: structuredClone(snapshot.visualAnalysisFailure) } : {}),
         ...(snapshot.referenceDecision ? { referenceDecision: structuredClone(snapshot.referenceDecision) } : {}),
         ...(snapshot.referenceCheckpoint ? { referenceCheckpoint: structuredClone(snapshot.referenceCheckpoint) } : {}),
+        ...(snapshot.processing ? { processing: structuredClone(snapshot.processing) } : {}),
+        ...(snapshot.visualReview ? { visualReview: structuredClone(snapshot.visualReview) } : {}),
         ...(snapshot.plan ? { plan: structuredClone(snapshot.plan) } : {}),
         ...(snapshot.modelRoles ? { modelRoles: { ...snapshot.modelRoles } } : {}),
         ...(snapshot.modelRouteSnapshots

@@ -57,4 +57,12 @@ describe("reference asset lifecycle boundaries", () => {
         await expect(readReferenceAsset(registration.storageKey)).resolves.toMatchObject({ size: 12, registration });
         expect(mocks.unlink).not.toHaveBeenCalled();
     });
+
+    it("reads a sealed native attachment with its original content type", async () => {
+        const registration = { storageKey: "permanent/2026/01/01/attachments/20260101-000000-00000000-0000-4000-8000-000000000000.bin" };
+        mocks.stat.mockResolvedValue({ size: 12, mtimeMs: 0 });
+        mocks.getRegistration.mockResolvedValue(registration);
+
+        await expect(readReferenceAsset(registration.storageKey)).resolves.toMatchObject({ size: 12, mimeType: "application/octet-stream", registration });
+    });
 });

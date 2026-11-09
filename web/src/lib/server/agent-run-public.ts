@@ -105,6 +105,11 @@ export function publicAgentRunEvent(event: CreativeRunEvent): CreativeRunEvent {
         const text = textValue(data.text);
         return { ...event, data: { ...(status ? { status } : {}), ...(text ? { text } : {}) } };
     }
+    const data = recordValue(event.data);
+    if (Object.hasOwn(data, "imageProcessingProjectionKey")) {
+        const { imageProcessingProjectionKey: _projectionKey, ...publicData } = data;
+        return { ...event, data: publicData };
+    }
     return event;
 }
 

@@ -1,16 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AuthSettings } from "@/lib/auth/store";
+import { settings } from "./agent-run-executor.test-fixtures";
+import { assertEcommerceImageExecutionSnapshot } from "./ecommerce-image-task-orchestration";
 
 import { ECOMMERCE_EDIT_PLAN_VERSION, type EcommerceEditPlan } from "./ecommerce-edit-plan";
-import { normalizePlannedEdit, planEcommerceEdit } from "./ecommerce-edit-planner";
+import { normalizePlannedEdit, planEcommerceEdit, resolveLocalEditTarget } from "./ecommerce-edit-planner";
 import { referenceUsesFromEcommerceDecision, resolveEcommerceReferenceDecision, type EcommerceReferenceDecision } from "./ecommerce-reference-purpose";
 import type { EcommerceVisualAnalysisV4 } from "./ecommerce-visual-analysis";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import { resolveImageEditProtocol } from "./image-edit-protocol";
 import type { EcommercePlanningInput } from "./ecommerce-generation-snapshot";
-import type { EcommerceRoleCandidate } from "./ecommerce-model-routing";
+import { resolveEcommerceRoleCandidates, type EcommerceRoleCandidate } from "./ecommerce-model-routing";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
 import { normalizeEcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
-import { resolveSourcesFromEcommerceReferenceDecision } from "./ecommerce-reference-roles";
+import { resolveSourcesFromEcommerceReferenceDecision, toLegacyEcommerceVisualAnalysis } from "./ecommerce-reference-roles";
 import { requestStructuredText, type TextPlanningCandidate } from "./text-planning-runtime";
 
 const mocks = vi.hoisted(() => ({ refundUserPoints: vi.fn(async () => undefined) }));
@@ -25,6 +28,22 @@ vi.mock("./text-planning-runtime", () => ({
 const mockedRequest = vi.mocked(requestStructuredText);
 
 describe("ecommerce edit planner", () => {
+    it("freezes the visible extent of a qualified product detail in the plan and generation prompt", () => {
+        const { input, analysis, plan } = productPurposeFixture("参考图片1风格，修改图片2背景");
+        analysis.references.find((reference) => reference.assetId === "product")!.contentType = "product_detail";
+        const normalized = normalizePlannedEdit(plan, input, analysis, "planner-model");
+        expect(normalized?.preserve).toMatchObject({ sourceFraming: "visible_extent" });
+        const profile = resolveEcommerceImageProviderProfile({
+            logicalRole: "image_generation",
+            capability: "image",
+            logicalModelId: "image-generation",
+            channelId: "fixture",
+            upstreamModel: "gpt-image-2.5-flare",
+            apiFormat: "openai",
+            imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
+        })!;
+        expect(compileEcommerceImageRequest(normalized!, profile).prompt).toContain("不得补全画面外的商品结构");
+    });
     it.each(["operation", "strategy"] as const)("rejects an unexecutable v6 product-only %s without rewriting the request or raw output", (field) => {
         const { input, analysis, plan } = productPurposeFixture("参考图片1的风格，修改图片2");
         if (field === "operation") plan.operation = "local_edit";
@@ -177,6 +196,7 @@ describe("ecommerce edit planner", () => {
         "参考图片1光线，修改图片2背景结构和墙面材质，保留商品抽屉数量",
         "参考图片1光线和风格，修改图片2场景，商品结构从原图继承",
         "参考图片1光线，修改图片2场景，不要删除商品把手，只改背景",
+        "参考图片1光线，修改图片2场景，不添加或删除商品结构，只改背景",
         "参考图片1光线，修改图片2场景，商品抽屉数量不要增加到四个，只改背景",
         "参考图片1光线，修改图片2场景，禁止新增商品抽屉，只改背景",
         "参考图片1光线，修改图片2场景，不要同时增加商品抽屉数量和背景结构",
@@ -742,6 +762,103 @@ describe("ecommerce edit planner", () => {
     beforeEach(() => {
         mockedRequest.mockReset();
         mocks.refundUserPoints.mockClear();
+    });
+
+    it("keeps the historical detail as the first execution reference during natural-light brightening", async () => {
+        const { input: base, analysis } = productPurposeFixture("把当前结果的自然光略微提亮，保持取景和商品不变");
+        const planningInput = { ...base.planningInput, referenceAliases: [{ assetId: "scene", alias: "图片1" }], inheritedReferences: { editTargetId: "scene", productAnchorId: "product" } };
+        const target = analysis.references[1];
+        target.contentType = "product_detail";
+        target.sceneFacts = null;
+        target.editableTargets = [{ id: "scene-light", kind: "lighting", label: "室内自然光", region: { x: 0, y: 0, width: 1, height: 1 } }];
+        target.productFacts = productFacts();
+        target.productCore = { x: 0.2, y: 0.15, width: 0.6, height: 0.7 };
+        target.fusionHalo = { x: 0.16, y: 0.11, width: 0.68, height: 0.78 };
+        target.visualEvidence = { whiteBackground: false, transparentBackground: false, isolatedSubject: false, completeScene: false };
+        const input = {
+            ...base,
+            planningInput,
+            referenceDecision: resolveEcommerceReferenceDecision({ planningInput, analysis }),
+            sources: { ...base.sources, currentSceneBaselineId: "scene", sceneReferenceIds: [], parentResultId: "scene", startsNewProductAnchor: false },
+        };
+        expect(input.referenceDecision).toMatchObject({ state: "resolved", editTargetId: "scene", productAnchorId: "product", currentSceneBaselineId: "scene" });
+        mockedRequest.mockResolvedValue(
+            modelCall(
+                validPlan({
+                    planVersion: "ecommerce-edit.v6",
+                    operation: "local_edit",
+                    delta: { requestedChanges: [planningInput.userRequest], targetObjects: ["scene-light"], targetRegions: [] },
+                    source: { productAnchorId: "product", currentSceneBaselineId: "scene", sceneReferenceIds: [] },
+                    baseline: { productFacts: productFacts(), sceneFacts: null },
+                    continuity: { parentResultId: "scene", branchId: "branch-one" },
+                    referenceUses: [
+                        { assetId: "scene", alias: "图片1", purposes: ["edit_target"], usedCueIds: [] },
+                        { assetId: "product", alias: null, purposes: ["product_identity"], usedCueIds: [] },
+                    ],
+                }),
+            ),
+        );
+
+        const result = await planEcommerceEdit(input, analysis, plannerRole([candidate("planner")]));
+        const request = mockedRequest.mock.lastCall![0];
+        expect(request.validateArguments!(JSON.stringify({ ...result.plan, delta: { ...result.plan.delta, targetRegions: ["当前场景图全画面，仅调整室内自然光亮度"] } }))).toMatchObject({ valid: false, issues: [{ path: "delta.targetRegions" }] });
+        const user = request.messages.find((message) => message.role === "user")!;
+        expect(JSON.parse(String(user.content))).toMatchObject({
+            visualAnalysis: { references: [{ assetId: "product" }, { assetId: "scene" }] },
+            allowedLocalEditTargetIds: ["scene-light"],
+            requiredReferenceUses: [
+                { assetId: "scene", alias: "图片1", purposes: ["edit_target"], usedCueIds: [] },
+                { assetId: "product", alias: null, purposes: ["product_identity"], usedCueIds: [] },
+            ],
+        });
+        expect(request.tool.parameters).toMatchObject({
+            properties: {
+                referenceUses: { minItems: 2, maxItems: 2, items: { properties: { assetId: { enum: ["scene", "product"] } } } },
+                delta: { properties: { targetObjects: { items: { enum: ["scene-light"] } }, targetRegions: { items: { enum: ["scene-light"] } } } },
+            },
+        });
+        expect(result.plan.referenceUses).toEqual([
+            { assetId: "scene", alias: "图片1", purposes: ["edit_target"], usedCueIds: [] },
+            { assetId: "product", alias: null, purposes: ["product_identity"], usedCueIds: [] },
+        ]);
+        expect(result.plan.protection).toMatchObject({ scope: "global", allowLightingChange: true });
+        expect(resolveLocalEditTarget(result.plan, analysis)).toMatchObject({ state: "resolved", target: { id: "scene-light" } });
+        const legacy = toLegacyEcommerceVisualAnalysis(analysis, "scene");
+        expect(legacy.references).toMatchObject([
+            { assetId: "product", role: "product" },
+            { assetId: "scene", role: "scene", sceneFacts: null },
+        ]);
+        const configured: AuthSettings = settings("image-generation", "fixture");
+        configured.systemChannels[1].models = ["gpt-image-2.5-flare"];
+        configured.logicalModels[1].bindings[0].upstreamModel = "gpt-image-2.5-flare";
+        const [route] = resolveEcommerceRoleCandidates(configured, "image_generation", "image");
+        const execution = compileEcommerceImageRequest(result.plan, resolveEcommerceImageProviderProfile(route.snapshot)!);
+        expect(execution.referenceRoles).toEqual([
+            { assetId: "scene", role: "scene" },
+            { assetId: "product", role: "product" },
+        ]);
+        expect(() => assertEcommerceImageExecutionSnapshot(configured, execution)).not.toThrow();
+    });
+
+    it("replays the same billable planning body after nested JSON object key reordering", async () => {
+        mockedRequest.mockResolvedValue(modelCall(validPlan()));
+        const input = planningRequest();
+        input.planningInput.conversationContext = { summary: "frozen context", recentMessages: [{ role: "user", content: "keep the product", sequence: 1 }] };
+        const analysis = visualAnalysis();
+        await planEcommerceEdit(input, analysis, plannerRole([candidate("planner")]));
+        const first = mockedRequest.mock.lastCall![0];
+        const restoredInput = structuredClone(input);
+        restoredInput.planningInput.conversationContext = { recentMessages: [{ sequence: 1, content: "keep the product", role: "user" }], summary: "frozen context" };
+        const restoredAnalysis = structuredClone(analysis);
+        const facts = restoredAnalysis.references[0].productFacts!;
+        restoredAnalysis.references[0].productFacts = { view: facts.view, brandText: facts.brandText, material: facts.material, color: facts.color, outline: facts.outline, identity: facts.identity };
+        await planEcommerceEdit(restoredInput, restoredAnalysis, plannerRole([candidate("planner")]));
+        const replay = mockedRequest.mock.lastCall![0];
+
+        expect(restoredInput).toEqual(input);
+        expect(restoredAnalysis).toEqual(analysis);
+        expect(replay.messages).toEqual(first.messages);
+        expect(replay.headers).toEqual(first.headers);
     });
 
     it("rejects a plan when a required model field is missing", async () => {

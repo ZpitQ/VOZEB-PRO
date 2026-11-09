@@ -1,6 +1,9 @@
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createEnhancementTaskClient } from "./image-enhancement-worker-client";
@@ -18,6 +21,8 @@ const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex
 let server: Server;
 let client: ReturnType<typeof createEnhancementTaskClient>;
 let endpoint: string;
+let directory: string;
+let downloadPath: string;
 let mode: string;
 let source: Buffer;
 let ai: Buffer;
@@ -48,6 +53,8 @@ const job = () => ({
 });
 
 beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), "vozeb-enhancement-task-client-"));
+    downloadPath = join(directory, "raw-ai.png");
     mode = "ok";
     requests = [];
     submissions = [];
@@ -123,9 +130,13 @@ beforeEach(async () => {
     client = createEnhancementTaskClient({ endpoint, token, trust: "system", caPem: "", serviceId, timeoutMs: 10000 });
 });
 afterEach(async () => {
-    await client?.close();
-    server?.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    try {
+        await client?.close();
+        server?.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+    } finally {
+        await rm(directory, { recursive: true, force: true });
+    }
 });
 async function prepare(snapshotServiceId = serviceId, target = { width: 6, height: 6 }, frozenModel: EnhancementModel = model) {
     const decision = planImageEnhancement({
@@ -273,7 +284,8 @@ describe("frozen enhancement task client over HTTP", () => {
         const accepted = await client.submit(frozen, source, "qualified-local");
         expect(submissions).toHaveLength(1);
         expect(submissions[0].plan).toMatchObject({ scope: "full_image", sourceSha256: digest(source), target: { width: 8, height: 8 } });
-        await expect(client.download(frozen, jobId, accepted.job.result!)).resolves.toEqual(ai);
+        await client.download(frozen, jobId, accepted.job.result!, downloadPath);
+        expect(await readFile(downloadPath)).toEqual(ai);
         mode = "budget";
         await expect(client.prepare(decision)).rejects.toMatchObject({ reason: "budget_exceeded" });
     });
@@ -370,20 +382,26 @@ describe("frozen enhancement task client over HTTP", () => {
         const plan = await prepare();
         mode = "identity";
         await expect(client.query(plan, jobId)).rejects.toMatchObject({ reason: "service_identity_changed" });
-        await expect(client.download(plan, jobId, result())).rejects.toMatchObject({ reason: "service_identity_changed" });
+        await expect(client.download(plan, jobId, result(), downloadPath)).rejects.toMatchObject({ reason: "service_identity_changed" });
         expect(requests.every((item) => item === "GET /v1/capabilities")).toBe(true);
     });
-    it("downloads the full native AI artifact and leaves downsampling to publication", async () => {
+    it("streams the full native AI artifact to a closed file for CPU validation", async () => {
         const plan = await prepare();
         expect(await client.query(plan, jobId)).toMatchObject({ jobId, status: "succeeded", result: { width: 8, height: 8 } });
-        const bytes = await client.download(plan, jobId, result());
-        expect(bytes.equals(ai)).toBe(true);
-        expect((await sharp(bytes).metadata()).width).toBe(8);
+        await client.download(plan, jobId, result(), downloadPath);
+        expect(await readFile(downloadPath)).toEqual(ai);
+        expect((await sharp(downloadPath).metadata()).width).toBe(8);
     });
-    it.each(["corrupt", "truncated-consistent"])("fully verifies downloaded bytes even with consistent declarations: %s", async (failure) => {
+    it("rejects streamed bytes that differ from the declared length or SHA", async () => {
         const plan = await prepare();
-        mode = failure;
-        await expect(client.download(plan, jobId, result())).rejects.toMatchObject({ reason: "output_invalid" });
+        mode = "corrupt";
+        await expect(client.download(plan, jobId, result(), downloadPath)).rejects.toMatchObject({ reason: "output_invalid" });
+    });
+    it("streams self-consistent truncated bytes without claiming CPU pixel validity", async () => {
+        const plan = await prepare();
+        mode = "truncated-consistent";
+        await client.download(plan, jobId, result(), downloadPath);
+        expect(await readFile(downloadPath)).toEqual(ai.subarray(0, 50));
     });
     it("recovers only the same receipt after response loss", async () => {
         const plan = await prepare();

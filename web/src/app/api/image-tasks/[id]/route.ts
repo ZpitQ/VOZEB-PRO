@@ -3,12 +3,11 @@ import { after, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/session";
 import { readJsonBodyResult } from "@/lib/auth/request";
 import { requestPublicOrigin } from "@/app/api/image-tasks/image-task-reference-urls";
-import { getImageTask, transitionImageTask, type ImageTask } from "@/lib/server/image-task-store";
+import { getImageTask, type ImageTask } from "@/lib/server/image-task-store";
 import { runGenerationTaskRecoveryBatch } from "@/lib/server/generation-task-recovery-service";
 import { resolveInternalOrigin } from "@/lib/server/internal-origin";
 import { pointsResponseHeaders } from "@/lib/server/points-response";
 import { generationModelId } from "@/lib/server/generation-channel";
-import { cancellationExecutionPatch, type GenerationCancellationTarget } from "@/lib/server/generation-task-cancellation-service";
 import { refundImageTask } from "@/lib/server/image-task-refund";
 import { getStoredGenerationTaskRecord } from "@/lib/server/generation-task-store";
 import { recoverGenerationTaskFromUpstream } from "@/lib/server/generation-task-user-recovery";
@@ -16,6 +15,7 @@ import { canRecoverUnsubmittedImageMask, canRecoverUnsubmittedImageReference, sc
 import { assertEcommerceImageExecutionSnapshot } from "@/lib/server/ecommerce-image-task-orchestration";
 import { getAuthSettings } from "@/lib/auth/store";
 import { publicImageResultEnhancement } from "@/lib/image-enhancement-contract";
+import { cancelImageTask, checkImageProcessingTaskForImage, ImageProcessingInputError } from "@/lib/server/image-processing-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -74,6 +74,15 @@ export async function POST(request: Request, context: RouteContext) {
     if (parsed.data.action !== "recover") return NextResponse.json({ error: "不支持的图片任务操作" }, { status: 400 });
     if (task.status === "success") return NextResponse.json({ task: publicTask(task) }, { headers: pointsResponseHeaders(user) });
     if (!["pending", "running"].includes(task.status)) return NextResponse.json({ error: "当前图片任务无法继续检查" }, { status: 409 });
+    if (task.nativeResults && task.resultProcessing) {
+        try {
+            const checked = await checkImageProcessingTaskForImage({ userId: task.userId, taskId: task.id });
+            return NextResponse.json({ task: publicTask(checked) }, { headers: pointsResponseHeaders(user) });
+        } catch (error) {
+            if (error instanceof ImageProcessingInputError) return NextResponse.json({ error: error.message }, { status: error.status });
+            throw error;
+        }
+    }
 
     const schedule = await getStoredGenerationTaskRecord("image", task.id);
     const upstreamTaskId = task.upstream?.id || schedule?.upstreamTaskId;
@@ -158,17 +167,13 @@ export async function PATCH(request: Request, context: RouteContext) {
     if (!parsed.ok) return NextResponse.json({ error: parsed.message }, { status: parsed.status });
     const body = parsed.data;
     if (body.status !== "cancelled" || !["pending", "running"].includes(task.status)) return NextResponse.json({ error: "当前任务无法取消" }, { status: 409 });
-    const target: GenerationCancellationTarget = {
-        type: "image",
-        taskId: task.id,
-        userId: task.userId,
-        executionPhase,
-        upstreamTaskId: task.upstream?.id,
-        queryPath: task.config.advancedConfig?.queryPath,
-        config: task.config,
-    };
-    const cancelled = await transitionImageTask(task, ["pending", "running"], { status: "cancelled", error: "任务已取消", retryable: false }, cancellationExecutionPatch(target));
-    if (!cancelled) return NextResponse.json({ error: "当前任务无法取消" }, { status: 409 });
+    let cancelled: ImageTask;
+    try {
+        cancelled = await cancelImageTask(task, executionPhase);
+    } catch (error) {
+        if (error instanceof ImageProcessingInputError) return NextResponse.json({ error: error.message }, { status: error.status });
+        throw error;
+    }
     const origin = resolveInternalOrigin(new URL(request.url).origin);
     after(() => runGenerationTaskRecoveryBatch({ origin, publicOrigin: requestPublicOrigin(request), limit: 1, taskIds: [task.id] }));
     const refreshedUser = await getCurrentUser(request);

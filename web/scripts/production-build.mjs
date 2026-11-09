@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { prepareStandaloneAssets } from "./standalone-assets.mjs";
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const skipTypeCheck = process.env.NEXT_SKIP_BUILD_TYPECHECK === "1";
@@ -9,13 +10,15 @@ const trackedBuildFiles = ["tsconfig.json", "next-env.d.ts"].map((fileName) => (
 let exitCode = 0;
 
 try {
-    if (!skipTypeCheck) {
+    exitCode = runNode(path.join(webRoot, "scripts/build-image-processing.mjs"), [], "独立图像处理 runtime 构建");
+    if (exitCode === 0 && !skipTypeCheck) {
         exitCode = runNode(path.join(webRoot, "node_modules/typescript/bin/tsc"), ["--noEmit", "--pretty", "false"], "TypeScript 类型检查");
     }
     if (exitCode === 0) {
         exitCode = runNode(path.join(webRoot, "node_modules/next/dist/bin/next"), ["build", ...process.argv.slice(2)], "Next.js production 构建", {
             NEXT_SKIP_BUILD_TYPECHECK: "1",
         });
+        if (exitCode === 0) await prepareStandaloneAssets({ webRoot, distDir: process.env.NEXT_DIST_DIR?.trim() || ".next" });
     }
 } finally {
     restoreBuildFiles();
@@ -35,7 +38,7 @@ function runNode(entry, args, label, environment = {}) {
         console.error(label + "无法启动：" + result.error.message);
         return 1;
     }
-    return result.status || 0;
+    return result.status ?? 1;
 }
 
 function readBuildFile(fileName) {

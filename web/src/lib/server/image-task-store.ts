@@ -53,6 +53,7 @@ export type ImageTaskReference = {
 export type StoredImageTaskMediaResult = {
     resultId?: string;
     nativeSource?: Readonly<EnhancementSource>;
+    enhancementSource?: Readonly<EnhancementSource>;
     enhancementId?: string;
     productEnhancementEvidence?: ProductEnhancementBaselineEvidence;
     enhancementSkip?: ImageEnhancementSkip;
@@ -90,6 +91,41 @@ export type ImageTask = GenerationTaskContext & {
     status: ImageTaskStatus;
     createdAt: number;
     updatedAt: number;
+    executionId?: string;
+    nativeAcquisition?: {
+        version: "image-task-native-acquisition.v1";
+        attemptNo: number;
+        upstreamTaskId: null;
+        slots: Array<{ resultId: string; resultIndex: number; source?: { url: string; remoteUrl?: string } }>;
+    };
+    nativeResults?: {
+        version: "image-task-native-results.v1";
+        attemptNo: number;
+        upstreamTaskId: string | null;
+        slots: Array<
+            | ({
+                  resultId: string;
+                  resultIndex: number;
+                  status: "stored";
+                  assetId: string;
+                  assetVersion: string;
+                  scope: "reference";
+                  storageKey: string;
+                  storageProvider: "local" | "object";
+                  externalStorageId?: string;
+                  sha256: string;
+                  bytes: number;
+              } & ({ layout: { format: string; depth: string; channels: number }; metadataRejected?: never } | { metadataRejected: true; layout?: never }))
+            | {
+                  resultId: string;
+                  resultIndex: number;
+                  status: "failed";
+                  failureStage: "read";
+                  failureCode: "image_native_read_failed";
+              }
+        >;
+    };
+    resultProcessing?: { jobId: string; inputDigest: string };
     config: ImageTaskConfig;
     prompt: string;
     references: ImageTaskReference[];
@@ -113,10 +149,14 @@ export type ImageTask = GenerationTaskContext & {
 };
 
 const TASK_STALE_MS = 3 * 60 * 1000;
-export async function createImageTask(input: Omit<ImageTask, "id" | "status" | "createdAt" | "updatedAt" | "enhancementPolicy">) {
+export async function createImageTask(input: Omit<ImageTask, "id" | "status" | "createdAt" | "updatedAt" | "enhancementPolicy" | "executionId" | "nativeAcquisition" | "nativeResults" | "resultProcessing">) {
     const now = Date.now();
     const task: ImageTask = {
         ...input,
+        executionId: undefined,
+        nativeAcquisition: undefined,
+        nativeResults: undefined,
+        resultProcessing: undefined,
         enhancementPolicy: await captureImageEnhancementPolicy(),
         id: randomUUID(),
         status: "pending",

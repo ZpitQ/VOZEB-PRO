@@ -3,6 +3,7 @@ import { getCurrentUser } from "@/lib/auth/session";
 import { readJsonBodyResult } from "@/lib/auth/request";
 import { getEnhancementJob } from "@/lib/server/database/image-enhancement-job-repository";
 import { retryImageEnhancement, cancelImageEnhancement } from "@/lib/server/image-enhancement-service";
+import { ImageProcessingInputError } from "@/lib/server/image-processing-service";
 import { publicImageEnhancement } from "@/lib/server/image-enhancement-public";
 
 export const runtime = "nodejs";
@@ -35,7 +36,8 @@ async function handle(request: Request, context: RouteContext, operation: "read"
         const changed = await (action === "retry" ? retryImageEnhancement : cancelImageEnhancement)(job.id, job.userId);
         if (!changed) return reply(409, null, "当前增强任务无法执行此操作，请刷新后重试");
         return reply(200, publicImageEnhancement(changed), "OK");
-    } catch {
+    } catch (error) {
+        if (error instanceof ImageProcessingInputError) return reply(error.status, null, error.message);
         return reply(500, null, "增强任务操作失败，请稍后重试");
     }
 }

@@ -9,7 +9,7 @@ import { planImageEnhancement } from "../image-enhancement-plan";
 
 const userId = "enhancement-job-fixture-owner";
 const pg = process.env.VOZEB_PRO_RUN_POSTGRES_INTEGRATION === "1" && process.env.VOZEB_PRO_ECOMMERCE_ISOLATED_DATABASE === "1";
-const now = 1000;
+let now: number;
 const leaseMs = 90_000;
 function candidate(): ImageEnhancementJob {
     const id = randomUUID();
@@ -48,6 +48,7 @@ for (const provider of ["file", "postgres"] as const) {
     describe.skipIf(provider === "postgres" && !pg)(`${provider} durable enhancement queue`, () => {
         let directory: string;
         beforeEach(async () => {
+            now = Date.now();
             directory = await mkdtemp(join(tmpdir(), "vozeb-enhancement-jobs-"));
             vi.stubEnv("VOZEB_PRO_DATA_DIR", directory);
             vi.stubEnv("VOZEB_PRO_DATABASE_PROVIDER", provider);
@@ -82,17 +83,20 @@ for (const provider of ["file", "postgres"] as const) {
             await insertEnhancementJob(candidate());
             const batches = await Promise.all(["worker-a", "worker-b"].map((workerId) => claimEnhancementJobs({ workerId, now, leaseMs, limit: 1 })));
             expect(batches.flat()).toHaveLength(1);
-            expect(batches.flat()[0]).toMatchObject({ leaseToken: expect.any(String), leaseUntil: now + leaseMs });
-            expect(await nextEnhancementDueAt()).toBe(now + leaseMs);
+            const claimed = batches.flat()[0];
+            expect(claimed.leaseToken).toEqual(expect.any(String));
+            expect(claimed.leaseUntil).toBe(claimed.updatedAt + leaseMs);
+            expect(await nextEnhancementDueAt()).toBe(claimed.leaseUntil);
         });
         it("takes over an expired lease and fences the old execution from publication", async () => {
             const original = await insertEnhancementJob(candidate());
             const [old] = await claimEnhancementJobs({ workerId: "worker-a", now, leaseMs, limit: 1 });
-            const [next] = await claimEnhancementJobs({ workerId: "worker-b", now: now + leaseMs, leaseMs, limit: 1 });
+            await mutateEnhancementJob(original.id, userId, (job) => ({ ...job, leaseUntil: Date.now() - 1 }));
+            const [next] = await claimEnhancementJobs({ workerId: "worker-b", now: Date.now(), leaseMs, limit: 1 });
             expect(next.id).toBe(old.id);
             expect(next.leaseToken).not.toBe(old.leaseToken);
-            expect(await mutateEnhancementJob(original.id, userId, (job) => ({ ...job, status: "succeeded" }), { token: old.leaseToken!, now: now + leaseMs })).toBeNull();
-            const done = await mutateEnhancementJob(original.id, userId, (job) => ({ ...job, status: "succeeded", phase: "completed", nextPollAt: null }), { token: next.leaseToken!, now: now + leaseMs });
+            expect(await mutateEnhancementJob(original.id, userId, (job) => ({ ...job, status: "succeeded" }), { token: old.leaseToken!, now: Date.now() })).toBeNull();
+            const done = await mutateEnhancementJob(original.id, userId, (job) => ({ ...job, status: "succeeded", phase: "completed", nextPollAt: null }), { token: next.leaseToken!, now: Date.now() });
             expect(done?.status).toBe("succeeded");
             expect(await nextEnhancementDueAt()).toBeNull();
         });
@@ -163,10 +167,10 @@ for (const provider of ["file", "postgres"] as const) {
             expect(await getEnhancementJob(original.id, userId)).toEqual(original);
         });
         it("does not claim future work or completed results", async () => {
-            const future = { ...candidate(), nextPollAt: now + 1 };
+            const future = { ...candidate(), nextPollAt: now + leaseMs };
             await insertEnhancementJob(future);
             expect(await claimEnhancementJobs({ workerId: "worker-a", now, leaseMs, limit: 1 })).toEqual([]);
-            expect(await nextEnhancementDueAt()).toBe(now + 1);
+            expect(await nextEnhancementDueAt()).toBe(future.nextPollAt);
             await mutateEnhancementJob(future.id, userId, (job) => ({ ...job, status: "failed", nextPollAt: null }));
             expect(await nextEnhancementDueAt()).toBeNull();
         });

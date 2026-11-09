@@ -1,38 +1,13 @@
 import type { ImageTaskConfig, ImageTaskReference } from "./image-task-store";
 import type { EcommerceNormalizedRegion, EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
 import { createHash } from "node:crypto";
-import sharp from "sharp";
+import type { SceneProtectionSnapshot, SceneProtectionEvidence, ProductProtectionSnapshot } from "../image-processing/contracts";
+import { decodeScenePixels, validateSceneProtectionBytes, compositeSceneEditBytes } from "../image-processing/scene-protection";
 import { resolveImageEditProtocol } from "./image-edit-protocol";
+import { buildSceneSelectionMask } from "../image-processing/protection-masks";
 
-export type SceneEditProtection = {
-    version: "scene-edit-protection.v1";
-    sourceAssetId: string;
-    sourceSize: ProductProtectionSourceSize;
-    sourceDigest: string;
-    maskSize: ProductProtectionSourceSize;
-    maskDigest: string;
-    targetRegion: ProductProtectionRectangle;
-    semantics: string[];
-    selectionSource: "user_selection";
-    confirmation?: { actorUserId: string; confirmedAt: number };
-    maskSemantics: "alpha_zero_edit";
-    method: "source_pixels_copy";
-    mask: ImageTaskReference;
-};
-export type SceneEditProtectionEvidence = Omit<SceneEditProtection, "mask"> & {
-    nativeSize: ProductProtectionSourceSize;
-    normalization: "none" | "uniform_scale" | "pixel_grid_scale";
-    nativeDigest: string;
-    compositeDigest: string;
-    outsidePixels: number;
-    mappedOutsideChangedPixels: number;
-    nativeOutsideChangedPixels?: number;
-    compositeOutsideChangedPixels: 0;
-    maskUrl?: string;
-    nativeUrl?: string;
-    compositeUrl?: string;
-};
-
+export type SceneEditProtection = SceneProtectionSnapshot & { mask: ImageTaskReference };
+export type SceneEditProtectionEvidence = SceneProtectionEvidence & { maskUrl?: string; nativeUrl?: string; compositeUrl?: string };
 export async function buildSceneEditProtection(source: Buffer, sourceAssetId: string, region: ProductProtectionRectangle, semantics: string[], selectionSource: "user_selection" | "analysis_hint"): Promise<SceneEditProtection> {
     if (selectionSource !== "user_selection") throw new Error("局部场景编辑需要用户确认允许区域，自动矩形不是可信语义蒙版");
     const { info } = await decodeScenePixels(source);
@@ -40,11 +15,7 @@ export async function buildSceneEditProtection(source: Buffer, sourceAssetId: st
     if (!sourceAssetId?.trim() || !validRectangle(region, sourceSize)) throw new Error("允许编辑区域越界或尺寸无效");
     if (region.width * region.height === sourceSize.width * sourceSize.height) throw new Error("整图选区必须使用全局编辑范围");
     if (!semantics.length || semantics.some((value) => typeof value !== "string" || !value.trim())) throw new Error("允许编辑区域缺少语义");
-    const pixels = Buffer.alloc(sourceSize.width * sourceSize.height * 4, 255);
-    for (let y = region.y; y < region.y + region.height; y++) for (let x = region.x; x < region.x + region.width; x++) pixels[(y * sourceSize.width + x) * 4 + 3] = 0;
-    const bytes = await sharp(pixels, { raw: { ...sourceSize, channels: 4 } })
-        .png()
-        .toBuffer();
+    const bytes = await buildSceneSelectionMask(sourceSize, region, semantics, selectionSource);
     return {
         version: "scene-edit-protection.v1",
         sourceAssetId,
@@ -62,82 +33,17 @@ export async function buildSceneEditProtection(source: Buffer, sourceAssetId: st
 }
 
 export async function validateSceneEditProtection(source: Buffer, protection: SceneEditProtection) {
-    if (protection?.version !== "scene-edit-protection.v1" || protection.selectionSource !== "user_selection" || protection.maskSemantics !== "alpha_zero_edit" || protection.method !== "source_pixels_copy" || protection.sourceDigest !== digest(source))
-        throw new Error("局部场景保护来源或语义无效");
-    const decoded = await decodeScenePixels(source);
-    if (!sameSize(decoded.info, protection.sourceSize) || !sameSize(protection.maskSize, protection.sourceSize) || !sameSize(protection.mask, protection.sourceSize) || !validRectangle(protection.targetRegion, protection.sourceSize))
-        throw new Error("源图或蒙版尺寸与保护快照不一致");
-    if (protection.targetRegion.width * protection.targetRegion.height === protection.sourceSize.width * protection.sourceSize.height) throw new Error("局部场景保护不能覆盖整图");
-    const bytes = inlinePngBytes(protection.mask.dataUrl);
-    const mask = await decodeScenePixels(bytes);
-    if (!sameSize(mask.info, protection.sourceSize)) throw new Error("蒙版尺寸必须与源图一致");
-    for (let y = 0; y < mask.info.height; y++)
-        for (let x = 0; x < mask.info.width; x++) {
-            const alpha = mask.data[(y * mask.info.width + x) * 4 + 3];
-            if (alpha !== (inside(protection.targetRegion, x, y) ? 0 : 255)) throw new Error("蒙版反向或覆盖了允许区域之外的像素");
-        }
-    if (digest(bytes) !== protection.maskDigest) throw new Error("蒙版与不可变快照不一致");
-    return decoded;
+    if (!sameSize(protection.mask, protection.sourceSize)) throw new Error("源图或蒙版尺寸与保护快照不一致");
+    const { mask, ...snapshot } = protection;
+    return validateSceneProtectionBytes(source, inlinePngBytes(mask.dataUrl), snapshot);
 }
 
 export async function compositeSceneEdit(source: Buffer, generated: Buffer, protection: SceneEditProtection): Promise<{ bytes: Buffer; evidence: SceneEditProtectionEvidence }> {
-    const original = await validateSceneEditProtection(source, protection);
-    const native = await decodeScenePixels(generated);
-    const sourceSize = protection.sourceSize;
-    const nativeSize = { width: native.info.width, height: native.info.height };
-    const cross = BigInt(nativeSize.width) * BigInt(sourceSize.height) - BigInt(nativeSize.height) * BigInt(sourceSize.width);
-    // Both rounded edges must admit one common scale: each half-up interval excludes its upper bound.
-    if (BigInt(2) * (cross < BigInt(0) ? -cross : cross) >= BigInt(sourceSize.width) + BigInt(sourceSize.height))
-        throw new Error(`局部编辑上游原生画幅比例与源图不一致，禁止拉伸或裁切（源图 ${sourceSize.width}x${sourceSize.height}，原生 ${nativeSize.width}x${nativeSize.height}）`);
-    const normalization = sameSize(nativeSize, sourceSize) ? "none" : cross === BigInt(0) ? "uniform_scale" : "pixel_grid_scale";
-    const pixels =
-        normalization === "none"
-            ? Buffer.from(native.data)
-            : await sharp(native.data, { raw: { ...nativeSize, channels: 4 } })
-                  .resize(sourceSize.width, sourceSize.height, { fit: "fill" })
-                  .raw()
-                  .toBuffer();
-    let outsidePixels = 0;
-    let mappedOutsideChangedPixels = 0;
-    for (let y = 0; y < sourceSize.height; y++)
-        for (let x = 0; x < sourceSize.width; x++) {
-            if (inside(protection.targetRegion, x, y)) continue;
-            const offset = (y * sourceSize.width + x) * 4;
-            outsidePixels++;
-            const originalPixel = original.data.readUInt32LE(offset);
-            if (pixels.readUInt32LE(offset) !== originalPixel) mappedOutsideChangedPixels++;
-            pixels.writeUInt32LE(originalPixel, offset);
-        }
-    const bytes = await sharp(pixels, { raw: { ...sourceSize, channels: 4 } })
-        .png()
-        .toBuffer();
-    const persistedPixels = (await decodeScenePixels(bytes)).data;
-    for (let y = 0; y < sourceSize.height; y++)
-        for (let x = 0; x < sourceSize.width; x++) {
-            if (inside(protection.targetRegion, x, y)) continue;
-            const offset = (y * sourceSize.width + x) * 4;
-            if (persistedPixels.readUInt32LE(offset) !== original.data.readUInt32LE(offset)) throw new Error("选区外像素保护验证失败");
-        }
-    const { mask: _mask, ...snapshot } = protection;
-    return {
-        bytes,
-        evidence: {
-            ...structuredClone(snapshot),
-            nativeSize,
-            normalization,
-            nativeDigest: digest(generated),
-            compositeDigest: digest(bytes),
-            outsidePixels,
-            mappedOutsideChangedPixels,
-            ...(normalization === "none" ? { nativeOutsideChangedPixels: mappedOutsideChangedPixels } : {}),
-            compositeOutsideChangedPixels: 0,
-        },
-    };
+    if (!sameSize(protection.mask, protection.sourceSize)) throw new Error("源图或蒙版尺寸与保护快照不一致");
+    const { mask, ...snapshot } = protection;
+    return compositeSceneEditBytes(source, generated, inlinePngBytes(mask.dataUrl), snapshot);
 }
 
-function decodeScenePixels(bytes: Buffer) {
-    return sharp(bytes).rotate().toColourspace("srgb").ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-}
 function inlinePngBytes(value: string) {
     if (!/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(value || "")) throw new Error("独立蒙版必须为可验证的 PNG");
     return Buffer.from(value.split(",")[1], "base64");
@@ -145,10 +51,6 @@ function inlinePngBytes(value: string) {
 function digest(bytes: Buffer) {
     return createHash("sha256").update(bytes).digest("hex");
 }
-function inside(region: ProductProtectionRectangle, x: number, y: number) {
-    return x >= region.x && x < region.x + region.width && y >= region.y && y < region.y + region.height;
-}
-
 export const STRICT_PRODUCT_COMPILER_VERSION = "strict-product.v1" as const;
 
 export type ProductProtectionSourceSize = { width: number; height: number };
@@ -171,18 +73,7 @@ export type ProductProtectionRegions = {
     fusionHalo: ProductProtectionMask;
     editableBackground: ProductProtectionMask;
 };
-export type ProductProtectionSnapshot = {
-    compilerVersion: typeof STRICT_PRODUCT_COMPILER_VERSION;
-    state: "ready" | "needs_review";
-    productAnchorId: string;
-    sourceAssetId: string;
-    sourceSize: ProductProtectionSourceSize;
-    productCore: ProductProtectionRectangle[];
-    fusionHalo: ProductProtectionRectangle[];
-    editableBackground: ProductProtectionRectangle[];
-    maskProvider?: string;
-    reason?: string;
-};
+export type { ProductProtectionSnapshot } from "../image-processing/contracts";
 
 type StrictProductEditTask = {
     kind: "edit";

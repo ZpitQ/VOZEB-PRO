@@ -82,21 +82,7 @@ export type GeminiPayload = {
     promptFeedback?: { blockReason?: string };
 };
 
-export const QUALITY_BASE: Record<string, number> = {
-    low: 1024,
-    medium: 2048,
-    high: 2880,
-    standard: 1024,
-    hd: 2048,
-};
-export const QUALITY_ALIASES: Record<string, string> = {
-    "1k": "low",
-    "2k": "medium",
-    "4k": "high",
-};
-export const DEFAULT_IMAGE_SHORT_SIDE = 1024;
-export const IMAGE_SIZE_STEP = 16;
-export const IMAGE_MIN_PIXELS = 655360;
+export { QUALITY_BASE, QUALITY_ALIASES, DEFAULT_IMAGE_SHORT_SIDE, IMAGE_SIZE_STEP, IMAGE_MIN_PIXELS } from "@/lib/image-generation-size";
 export const IMAGE_OUTPUT_FORMAT = "png";
 export const TASK_HEARTBEAT_MS = 30 * 1000;
 export const MODEL_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;

@@ -1,6 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import sharp from "sharp";
 import { publicImageResultEnhancement } from "@/lib/image-enhancement-contract";
-import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 
 import { ensureMediaFileExtension, mediaFileExtension } from "@/lib/media-file";
@@ -11,10 +13,11 @@ import { normalizeGeneratedImageBytes } from "@/lib/server/generated-image-norma
 import { resolveMediaMimeType } from "@/lib/server/media-content-type";
 import { createDatedMediaPath, GENERATION_MEDIA_ROOT } from "@/lib/server/local-media-storage";
 import { deleteLocalMediaRegistrations, getLocalMediaRegistration, registerLocalMediaAsset } from "@/lib/server/local-media-registry";
-import { deleteExternalMediaObject, persistExternalMediaIfEnabled } from "@/lib/server/object-storage-service";
+import { deleteExternalMediaObject, persistExternalMediaIfEnabled, readExternalMediaStream } from "@/lib/server/object-storage-service";
 import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
 import { isSafeOutboundUrl } from "@/lib/server/security";
 import type { GenerationLogAsset, GenerationLogDatabase, GenerationLogKind, GenerationLogSource, GenerationLogStatus, StoredGenerationLog } from "./generation-log-types";
+import type { StoredEnhancementArtifact } from "./database/image-enhancement-job-repository";
 import { normalizeEcommerceGenerationTrace } from "./ecommerce-generation-trace";
 
 const LOG_DATA_FILE = "generation-logs.json";
@@ -159,6 +162,86 @@ export async function writeAssetBytes(bytes: Buffer, mimeType: string, type: Gen
         throw error;
     }
     return { type, url: serverUrl, serverUrl, mimeType, bytes: bytes.length, width: normalized.width, height: normalized.height };
+}
+
+/** The caller persists storageKey before promotion; a retry must reuse that same target. */
+export async function writeEnhancementArtifactFile(
+    sourcePath: string,
+    artifact: Omit<StoredEnhancementArtifact, "url">,
+    context: Omit<GenerationAssetContext, "targetSize" | "taskId"> & { taskId: string; storageKey: string },
+    limitInputPixels: number,
+): Promise<GenerationLogAsset> {
+    const { storageKey } = context;
+    const filePath = resolve(ASSET_ROOT, storageKey);
+    if (!storageKey.startsWith("permanent/") || storageKey.includes("\\") || filePath === ASSET_ROOT || !filePath.startsWith(`${ASSET_ROOT}${sep}`)) throw new Error("Enhancement permanent artifact path is invalid");
+    const mimeType = `image/${artifact.format}`;
+    const asset: GenerationLogAsset = { type: "image", url: `/api/generation-log-assets/${storageKey.split("/").map(encodeURIComponent).join("/")}`, mimeType, bytes: artifact.byteLength, width: artifact.width, height: artifact.height };
+    asset.serverUrl = asset.url;
+    const existing = await getLocalMediaRegistration(storageKey);
+    if (existing) {
+        if (
+            existing.scope !== "generation" ||
+            existing.storageClass !== "permanent" ||
+            existing.type !== "image" ||
+            existing.ownerUserId !== context.ownerUserId ||
+            existing.taskId !== context.taskId ||
+            existing.source !== context.source ||
+            existing.conversationId !== context.conversationId ||
+            existing.mimeType !== mimeType ||
+            existing.bytes !== artifact.byteLength ||
+            existing.expiresAt !== undefined
+        )
+            throw new Error("Enhancement permanent artifact registration changed");
+        await verifyEnhancementArtifactStream(existing.storageProvider === "object" ? await readExternalMediaStream(existing) : createReadStream(filePath), artifact);
+        return asset;
+    }
+    const source = await stat(sourcePath);
+    if (!source.isFile() || source.size !== artifact.byteLength) throw new Error("Enhancement source file does not match CPU receipt");
+    const metadata = await sharp(sourcePath, { limitInputPixels, failOn: "warning" }).metadata();
+    if (
+        metadata.format !== artifact.format ||
+        metadata.width !== artifact.width ||
+        metadata.height !== artifact.height ||
+        (metadata.pages !== undefined && metadata.pages !== 1) ||
+        (metadata.orientation !== undefined && metadata.orientation !== 1) ||
+        BigInt(artifact.width) * BigInt(artifact.height) > BigInt(limitInputPixels)
+    )
+        throw new Error("Enhancement source metadata does not match CPU receipt");
+    await verifyEnhancementArtifactStream(createReadStream(sourcePath), artifact);
+    const registration = {
+        storageKey,
+        scope: "generation" as const,
+        storageClass: "permanent" as const,
+        type: "image" as const,
+        ownerUserId: context.ownerUserId,
+        originalName: generationAssetFileName(context, mimeType),
+        source: context.source,
+        conversationId: context.conversationId,
+        taskId: context.taskId,
+        mimeType,
+        bytes: artifact.byteLength,
+    };
+    const external = await persistExternalMediaIfEnabled({ registration, filePath: sourcePath });
+    if (external) {
+        await verifyEnhancementArtifactStream(await readExternalMediaStream(external), artifact);
+        return asset;
+    }
+    await mkdir(dirname(filePath), { recursive: true });
+    await copyFile(sourcePath, filePath);
+    await verifyEnhancementArtifactStream(createReadStream(filePath), artifact);
+    await registerLocalMediaAsset(registration);
+    return asset;
+}
+
+async function verifyEnhancementArtifactStream(stream: AsyncIterable<Uint8Array>, expected: { byteLength: number; sha256: string }) {
+    const hash = createHash("sha256");
+    let bytes = 0;
+    for await (const chunk of stream) {
+        bytes += chunk.byteLength;
+        if (bytes > expected.byteLength) throw new Error("Enhancement artifact bytes do not match CPU receipt");
+        hash.update(chunk);
+    }
+    if (bytes !== expected.byteLength || hash.digest("hex") !== expected.sha256) throw new Error("Enhancement artifact bytes/hash do not match CPU receipt");
 }
 
 export function maxServerAssetBytes(type: GenerationLogKind) {

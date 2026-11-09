@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
     provider: "file" as "file" | "postgres",
@@ -28,8 +28,14 @@ import type { StoredGenerationTaskRecord } from "./generation-task-store";
 describe("generation task scheduler", () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(1_000);
         mocks.provider = "file";
         mocks.records = [record("due", 900), record("future", 2_000)];
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
     });
 
     it("claims each due task once and only renews the current owner lease", async () => {
@@ -37,8 +43,9 @@ describe("generation task scheduler", () => {
 
         expect(claimed.map((item) => item.id)).toEqual(["due"]);
         expect(await claimDueGenerationTasks({ workerId: "worker-two", now: 1_001, leaseMs: 60_000 })).toEqual([]);
-        expect(await renewGenerationTaskLeases("worker-two", ["due"], 60_000, 2_000)).toBe(0);
-        expect(await renewGenerationTaskLeases("worker-one", ["due"], 60_000, 2_000)).toBe(1);
+        vi.setSystemTime(2_000);
+        expect(await renewGenerationTaskLeases("worker-two", claimed, 60_000, 2_000)).toBe(0);
+        expect(await renewGenerationTaskLeases("worker-one", claimed, 60_000, 2_000)).toBe(1);
         expect(mocks.records.find((item) => item.id === "due")).toMatchObject({ workerId: "worker-one", leaseUntil: 62_000, lastHeartbeatAt: 2_000, updatedAt: 100 });
     });
 
@@ -51,12 +58,13 @@ describe("generation task scheduler", () => {
     });
 
     it("requires lease ownership when releasing and clears next poll for terminal phases", async () => {
-        await claimDueGenerationTasks({ workerId: "worker-one", now: 1_000, leaseMs: 60_000 });
+        const [claimed] = await claimDueGenerationTasks({ workerId: "worker-one", now: 1_000, leaseMs: 60_000 });
+        const options = { executionId: claimed.executionId };
 
-        await expect(releaseGenerationTaskLease("image", "due", "worker-two", { executionPhase: "completed", nextPollAt: undefined })).resolves.toBeNull();
+        await expect(releaseGenerationTaskLease("image", "due", "worker-two", { executionPhase: "completed", nextPollAt: undefined }, options)).resolves.toBeNull();
         expect(mocks.records[0]).toMatchObject({ workerId: "worker-one" });
 
-        await expect(releaseGenerationTaskLease("image", "due", "worker-one", { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "persisted" })).resolves.toMatchObject({
+        await expect(releaseGenerationTaskLease("image", "due", "worker-one", { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "persisted" }, options)).resolves.toMatchObject({
             executionPhase: "completed",
             nextPollAt: undefined,
             workerId: undefined,
@@ -139,6 +147,7 @@ describe("generation task scheduler", () => {
             ...mocks.records[0],
             workerId: "worker-one",
             leaseUntil: 60_000,
+            payload: { executionId: "held-image-execution" },
             upstreamTaskId: "upstream-failed",
             queryPath: "/jobs/upstream-failed",
             submittedAt: 500,
@@ -146,7 +155,7 @@ describe("generation task scheduler", () => {
             resultPayload: { previous: true },
         };
 
-        await releaseGenerationTaskLease("image", "due", "worker-one", { executionPhase: "created", nextPollAt: 1_000, lastUpstreamStatus: "automatic_retry_after_upstream_failure" }, { resetUpstreamIdentity: true });
+        await releaseGenerationTaskLease("image", "due", "worker-one", { executionPhase: "created", nextPollAt: 1_000, lastUpstreamStatus: "automatic_retry_after_upstream_failure" }, { resetUpstreamIdentity: true, executionId: "held-image-execution" });
 
         expect(mocks.records[0]).toMatchObject({ executionPhase: "created", nextPollAt: 1_000, lastUpstreamStatus: "automatic_retry_after_upstream_failure" });
         expect(mocks.records[0].upstreamTaskId).toBeUndefined();
@@ -164,19 +173,23 @@ describe("generation task scheduler", () => {
 
     it("uses SKIP LOCKED and an owner-qualified release in PostgreSQL", async () => {
         mocks.provider = "postgres";
-        mocks.transactionQuery.mockResolvedValueOnce({ rows: [] });
-        mocks.postgresQuery.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ next_due_at: new Date(2_000) }] });
+        mocks.transactionQuery.mockResolvedValue({ rows: [] });
+        mocks.postgresQuery.mockResolvedValueOnce({ rows: [{ next_due_at: new Date(2_000) }] });
 
         await claimDueGenerationTasks({ workerId: "worker-one", now: 1_000, taskIds: ["due"] });
-        await releaseGenerationTaskLease("image", "due", "worker-one", { executionPhase: "polling", nextPollAt: 2_000 });
+        await releaseGenerationTaskLease("image", "due", "worker-one", { executionPhase: "polling", nextPollAt: 2_000 }, { executionId: "held-image-execution" });
         await expect(getNextGenerationTaskDueAt(1_000)).resolves.toBe(2_000);
 
         expect(String(mocks.transactionQuery.mock.calls[0]?.[0])).toContain("FOR UPDATE SKIP LOCKED");
         expect(mocks.transactionQuery.mock.calls[0]?.[1]).toEqual([new Date(1_000), 20, "worker-one", ["due"], new Date(91_000), ["image", "video", "audio", "text", "agent"]]);
-        expect(String(mocks.postgresQuery.mock.calls[0]?.[0])).toContain("worker_id = $3");
-        expect(mocks.postgresQuery.mock.calls[0]?.[1]).toHaveLength(15);
-        expect(String(mocks.postgresQuery.mock.calls[1]?.[0])).toContain("min(GREATEST(next_poll_at");
-        expect(mocks.postgresQuery.mock.calls[1]?.[1]).toEqual([["image", "video", "audio", "text", "agent"], new Date(1_000)]);
+        expect(String(mocks.transactionQuery.mock.calls[1]?.[0])).toContain("FOR UPDATE");
+        expect(String(mocks.transactionQuery.mock.calls[1]?.[0])).toContain("task_type = $2");
+        expect(mocks.transactionQuery.mock.calls[1]?.[1]).toEqual(["due", "image"]);
+        expect(String(mocks.transactionQuery.mock.calls[2]?.[0])).toContain("worker_id = $3");
+        expect(mocks.transactionQuery.mock.calls[2]?.[1]).toHaveLength(16);
+        expect(mocks.transactionQuery.mock.calls[2]?.[1]?.[15]).toBe("held-image-execution");
+        expect(String(mocks.postgresQuery.mock.calls[0]?.[0])).toContain("min(GREATEST(next_poll_at");
+        expect(mocks.postgresQuery.mock.calls[0]?.[1]).toEqual([["image", "video", "audio", "text", "agent"], new Date(1_000)]);
     });
 
     it("uses adaptive polling and bounded network-error backoff", () => {

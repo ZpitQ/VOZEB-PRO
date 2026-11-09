@@ -1,3 +1,7 @@
+import { publishCompletedEnhancement } from "./image-enhancement-completed-publication";
+import { ImageEnhancementPublicationError } from "./image-enhancement-publication";
+import { EnhancementProcessingConflict, enqueueEnhancementPublication, repairEnhancementPublicationWakes } from "./image-enhancement-processing-store";
+import { retryEnhancementPublication, cancelEnhancementPublication } from "./image-processing-service";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { imageReferenceToDataUrl } from "@/app/api/image-tasks/image-task-support";
@@ -12,7 +16,7 @@ import { generationTaskNextPollAt } from "./generation-task-scheduler";
 import { runWithConcurrency } from "./generation-task-recovery-service";
 import { getImageTask } from "./image-task-store";
 import { maintenanceWorkerContext } from "./maintenance-auth";
-import { ImageEnhancementPublicationError, publishImageEnhancement } from "./image-enhancement-publication";
+import { prepareEnhancementPublication } from "./image-enhancement-publication-input";
 
 class EnhancementExecutionError extends Error {}
 class EnhancementLeaseLost extends Error {}
@@ -20,6 +24,7 @@ const leaseMs = 90_000;
 
 export async function runImageEnhancementBatch(input: { origin: string; workerId?: string; limit?: number }) {
     const workerId = input.workerId || `image-enhancement:${process.pid}:${randomUUID()}`;
+    await repairEnhancementPublicationWakes(input.limit ?? 50);
     const leases = await claimEnhancementJobs({ workerId, now: Date.now(), leaseMs, limit: input.limit ?? 50 });
     const heartbeat = setInterval(() => {
         void Promise.allSettled(leases.map((job) => mutateEnhancementJob(job.id, job.userId, (current) => ({ ...current, leaseUntil: Date.now() + leaseMs }), { token: job.leaseToken!, now: Date.now() })));
@@ -65,9 +70,10 @@ async function processEnhancement(lease: ImageEnhancementJob, origin: string) {
                 throw new EnhancementExecutionError("native_invalid");
         }
         if (current.decision.status !== "queued") throw new EnhancementExecutionError("invalid_enhancement_plan");
-        client = createEnhancementTaskClient(await resolveImageEnhancementConnection(current.decision.connection));
+        const connection = current.decision.connection;
+        const taskClient = async () => client || (client = createEnhancementTaskClient(await resolveImageEnhancementConnection(connection)));
         if (current.phase === "prepare") {
-            const remotePlan = await client.prepare(current.decision);
+            const remotePlan = await (await taskClient()).prepare(current.decision);
             return await update((job) => ({ ...job, status: "running", phase: "submit", remotePlan, nextPollAt: Date.now(), events: [...job.events, { stage: "prepared", at: Date.now(), attempt: job.attempt }] }));
         }
         const plan = current.remotePlan;
@@ -96,25 +102,31 @@ async function processEnhancement(lease: ImageEnhancementJob, origin: string) {
             if (bytes.length !== plan.source.byteLength || createHash("sha256").update(bytes).digest("hex") !== plan.sourceSha256) throw new EnhancementExecutionError("input_digest_mismatch");
             const marked = await update((job) => (job.cancelRequested && !job.submittedAt ? job : { ...job, submittedAt: job.submittedAt || Date.now() }));
             if (marked.cancelRequested && !marked.submittedAt) return await finish("cancelled", "cancelled_before_submission");
-            const accepted = await client.submit(plan, bytes, current.remoteKey);
+            const accepted = await (await taskClient()).submit(plan, bytes, current.remoteKey);
             return await recordRemote(accepted.job);
         }
         if (!current.remoteJobId) throw new EnhancementExecutionError("invalid_enhancement_plan");
         if (current.phase === "receipt" && current.publication && current.remoteResult) {
-            await client.acknowledge(plan, current.remoteJobId, current.receiptId, current.remoteResult);
+            await (await taskClient()).acknowledge(plan, current.remoteJobId, current.receiptId, current.remoteResult);
             return await update((job) => ({ ...job, status: "succeeded", phase: "completed", reason: null, receiptConfirmedAt: Date.now(), nextPollAt: null, events: [...job.events, { stage: "receipt_confirmed", at: Date.now(), attempt: job.attempt }] }));
         }
-        if (current.cancelRequested) return await recordRemote(await client.cancel(plan, current.remoteJobId));
-        if (current.phase === "poll") return await recordRemote(await client.query(plan, current.remoteJobId));
+        if (current.cancelRequested) return await recordRemote(await (await taskClient()).cancel(plan, current.remoteJobId));
+        if (current.phase === "poll") return await recordRemote(await (await taskClient()).query(plan, current.remoteJobId));
         if ((current.phase === "download" || current.phase === "publish") && current.remoteResult && task) {
-            const bytes = current.staged?.ai ? undefined : await client.download(plan, current.remoteJobId, current.remoteResult);
-            return await publishImageEnhancement(current, task, origin, bytes);
+            const outcome = current.publicationProcessing?.outcome;
+            if (outcome?.status === "failed") return await finish("failed", outcome.failure.status === "rejected" ? outcome.failure.error.code : outcome.failure.reason);
+            if (outcome?.status === "completed") return await publishCompletedEnhancement(current);
+            const remoteJobId = current.remoteJobId;
+            const remoteResult = current.remoteResult;
+            const prepared = await prepareEnhancementPublication(current, async (destination) => (await taskClient()).download(plan, remoteJobId, remoteResult, destination));
+            await enqueueEnhancementPublication(current, prepared);
+            return await getEnhancementJob(current.id, current.userId);
         }
         throw new EnhancementExecutionError("invalid_enhancement_plan");
     } catch (error) {
         if (error instanceof EnhancementLeaseLost) return null;
         const reason =
-            error instanceof EnhancementExecutionError || error instanceof ImageEnhancementPublicationError
+            error instanceof EnhancementExecutionError || error instanceof EnhancementProcessingConflict || error instanceof ImageEnhancementPublicationError
                 ? error.message
                 : error instanceof WorkerCheckError
                   ? error.reason
@@ -134,6 +146,7 @@ async function processEnhancement(lease: ImageEnhancementJob, origin: string) {
                 events: [...job.events, { stage: "receipt_deferred", at: Date.now(), attempt: job.attempt, reason }],
             }));
         try {
+            if (published?.cancelRequested && published.publicationProcessing?.outcome?.status === "completed") return await finish("cancelled", "cancelled");
             return await finish("failed", reason);
         } catch (failure) {
             if (failure instanceof EnhancementLeaseLost) return null;
@@ -147,11 +160,12 @@ async function processEnhancement(lease: ImageEnhancementJob, origin: string) {
 
 export async function retryImageEnhancement(id: string, userId: string) {
     const initial = await getEnhancementJob(id, userId);
+    if (initial?.publicationProcessing) return retryEnhancementPublication(initial);
     let resumed: Extract<ImageEnhancementJob["decision"], { status: "queued" }> | undefined;
     if (initial && canResumeSkippedEnhancement(initial)) {
         const task = await getImageTask(initial.imageTaskId);
         const native = (task?.result?.results?.length ? task.result.results : task?.result ? [task.result] : []).find((result) => result.resultId === initial.resultId && result.enhancementId === id);
-        if (!task || task.userId !== userId || task.status !== "success" || !native || !isDeepStrictEqual(native.nativeSource, initial.decision.source)) return null;
+        if (!task || task.userId !== userId || task.status !== "success" || !native || !enhancementNativeIdentityMatches(task, native, initial.decision.source, initial.decision.delivery)) return null;
         const decision = planImageTaskEnhancement(task, native);
         if (decision.status !== "queued" || !isDeepStrictEqual(decision.target, initial.decision.target) || !isDeepStrictEqual(decision.delivery, initial.decision.delivery)) return null;
         resumed = decision;
@@ -178,6 +192,8 @@ export async function retryImageEnhancement(id: string, userId: string) {
     return accepted ? changed : null;
 }
 export async function cancelImageEnhancement(id: string, userId: string) {
+    const initial = await getEnhancementJob(id, userId);
+    if (initial?.publicationProcessing) return cancelEnhancementPublication(initial);
     let accepted = false;
     const changed = await mutateEnhancementJob(id, userId, (job) => {
         if (!["queued", "running", "failed"].includes(job.status) || job.publication || (job.cancelRequested && job.status !== "failed")) return job;

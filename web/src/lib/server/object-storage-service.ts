@@ -1,5 +1,7 @@
 import { stat, unlink } from "node:fs/promises";
 import { basename, resolve, sep } from "node:path";
+import type { Readable } from "node:stream";
+import type { QueryExecutor } from "./database/postgres";
 
 import sharp from "sharp";
 
@@ -11,7 +13,7 @@ import { countLocalMediaReferences } from "@/lib/server/local-media-references";
 import { runImageVariantTaskOnce } from "@/lib/server/media-image-variant-cache";
 import { mediaContentDisposition, requestedImageVariant } from "@/lib/server/local-media-response";
 import { deleteLocalMediaRegistrations, listLocalMediaMigrationRegistrations, listMediaRegistrationsByExternalObjectKeys, registerLocalMediaAsset, type LocalMediaRegistration } from "@/lib/server/local-media-registry";
-import { deleteObjects, getObjectBytes, listObjects, objectExists, objectStorageErrorMessage, putObjectBytes, putObjectFile, signObjectRead, testObjectStorageConnection } from "@/lib/server/object-storage-client";
+import { deleteObjects, getObjectBytes, getObjectStream, listObjects, objectExists, objectStorageErrorMessage, putObjectBytes, putObjectFile, signObjectRead, testObjectStorageConnection } from "@/lib/server/object-storage-client";
 import { assertObjectStorageConfigured, getObjectStorageRuntimeConfig, type ObjectStorageRuntimeConfig } from "@/lib/server/object-storage-config";
 
 const MAX_INPUT_PIXELS = 100_000_000;
@@ -69,6 +71,13 @@ export async function createExternalMediaReadUrl(request: Request, registration:
         contentDisposition: mediaContentDisposition(download ? "attachment" : "inline", registration.originalName || basename(registration.storageKey), registration.mimeType, download ? registration.storageKey : ""),
         expiresIn: registration.type === "video" || registration.type === "audio" ? STREAMING_MEDIA_READ_URL_TTL_SECONDS : IMAGE_ORIGINAL_READ_URL_TTL_SECONDS,
     });
+}
+
+export async function readExternalMediaStream(registration: LocalMediaRegistration, signal?: AbortSignal, executor?: QueryExecutor): Promise<Readable> {
+    if (registration.storageProvider !== "object" || !registration.externalObjectKey) throw new Error("外部媒体登记缺少对象地址");
+    const config = await getObjectStorageRuntimeConfig(executor);
+    assertRegistrationConfig(config, registration);
+    return getObjectStream(config, registration.externalObjectKey, signal);
 }
 
 export async function createExternalStorageImagePreviewUrl(objectKey: string, width: unknown) {

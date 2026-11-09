@@ -30,7 +30,7 @@ export function createDatedMediaPath(storageClass: LocalMediaClass, type: LocalM
     const hours = String(now.getHours()).padStart(2, "0");
     const minutes = String(now.getMinutes()).padStart(2, "0");
     const seconds = String(now.getSeconds()).padStart(2, "0");
-    const folder = type === "image" ? "images" : type === "video" ? "videos" : "audio";
+    const folder = type === "image" ? "images" : type === "video" ? "videos" : type === "attachment" ? "attachments" : "audio";
     const suffix = extension.startsWith(".") ? extension : `.${extension}`;
     return `${storageClass}/${year}/${month}/${day}/${folder}/${year}${month}${day}-${hours}${minutes}${seconds}-${randomUUID()}${suffix.toLowerCase()}`;
 }
@@ -94,7 +94,7 @@ export async function cleanupExpiredLocalMediaAssets(limit?: number) {
     const registered = await listExpiredLocalMediaRegistrations(limit);
     const registeredResult = await deleteRegisteredMediaAssets(registered);
     if (getDatabaseProvider() === "postgres") return registeredResult;
-    const registeredKeys = new Set(registered.map((asset) => asset.storageKey));
+    const registeredKeys = new Set((await listFileLocalMediaRegistrations()).map((asset) => asset.storageKey));
     const legacy = (await scanReferenceMedia()).filter((asset) => asset.storageClass === "temporary" && asset.expiresAt && Date.parse(asset.expiresAt) <= Date.now() && !registeredKeys.has(asset.storageKey));
     if (!legacy.length) return registeredResult;
     const legacyResult = await deleteLocalMediaAssets(legacy.map((asset) => asset.id));
@@ -238,6 +238,7 @@ async function scanReferenceMedia() {
 function registrationMetadata(registration: Awaited<ReturnType<typeof getLocalMediaRegistration>>) {
     if (!registration) return {};
     return {
+        storageClass: registration.storageClass,
         ownerUserId: registration.ownerUserId,
         originalName: registration.originalName,
         source: registration.source,

@@ -1,4 +1,6 @@
-import { getDatabaseProvider, ensurePostgresSchema, postgresQuery, withPostgresTransaction } from "@/lib/server/database";
+import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { getDatabaseProvider, ensurePostgresSchema, postgresQuery, withPostgresTransaction, type QueryExecutor } from "@/lib/server/database";
 import { listStoredGenerationTaskRecords, withGenerationTaskFileMutation, type GenerationTaskType, type StoredGenerationTaskRecord } from "@/lib/server/generation-task-store";
 import type { ImageTask } from "./image-task-store";
 import { resolveImageEditProtocol } from "./image-edit-protocol";
@@ -25,15 +27,29 @@ export type GenerationTaskLease = Pick<
     | "workerId"
     | "leaseUntil"
     | "lastHeartbeatAt"
->;
+> & { executionId?: string };
 
 export type GenerationTaskSchedulePatch = Partial<Pick<GenerationTaskLease, "executionPhase" | "upstreamTaskId" | "channelId" | "provider" | "queryPath" | "submittedAt" | "nextPollAt" | "lastPollAt" | "lastUpstreamStatus" | "resultPayload">>;
-type GenerationTaskScheduleOptions = { cancellation?: boolean; resetUpstreamIdentity?: boolean; unsubmittedReferenceRecovery?: boolean; unsubmittedMaskRecovery?: StoredGenerationTaskRecord };
+type GenerationTaskScheduleOptions = { cancellation?: boolean; resetUpstreamIdentity?: boolean; unsubmittedReferenceRecovery?: boolean; unsubmittedMaskRecovery?: StoredGenerationTaskRecord; executionId?: string };
 
 const SCHEDULABLE_TYPES = new Set<GenerationTaskType>(["image", "video", "audio", "text", "agent"]);
 const ACTIVE_PHASES = new Set<GenerationTaskExecutionPhase>(["created", "submitting", "submitted", "polling", "result_ready", "persisting"]);
 const REVIEW_PHASES = new Set<GenerationTaskExecutionPhase>(["review_pending", "reviewing"]);
 const CANCELLATION_PHASES = new Set<GenerationTaskExecutionPhase>(["cancel_requested", "cancel_polling"]);
+const FENCED_REVIEW_SQL = `(task_type = 'agent' AND status = 'success' AND NULLIF(payload ->> 'executionId', '') IS NOT NULL
+    AND payload #>> '{ecommerceSnapshot,qualityPolicy}' = 'advisory'
+    AND payload #>> '{ecommerceSnapshot,plan,planVersion}' IN ('ecommerce-edit.v4', 'ecommerce-edit.v5', 'ecommerce-edit.v6'))`;
+const FENCED_EXECUTION_SQL = `(task_type = 'image' OR ${FENCED_REVIEW_SQL})`;
+
+function completedAdvisoryReview(task: { type: string; status: string; payload: Record<string, unknown> }) {
+    const snapshot = record(task.payload.ecommerceSnapshot);
+    const plan = record(snapshot?.plan);
+    return task.type === "agent" && task.status === "success" && snapshot?.qualityPolicy === "advisory" && ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(String(plan?.planVersion));
+}
+
+function fencedExecution(task: { type: string; status: string; payload: Record<string, unknown> }) {
+    return task.type === "image" || (completedAdvisoryReview(task) && typeof task.payload.executionId === "string");
+}
 
 export async function scheduleGenerationTask(type: GenerationTaskType, id: string, patch: GenerationTaskSchedulePatch, options: GenerationTaskScheduleOptions = {}) {
     const normalized = normalizePatch(patch);
@@ -81,12 +97,158 @@ export async function scheduleGenerationTask(type: GenerationTaskType, id: strin
     });
 }
 
+export async function rearmImageTaskForUser(input: { id: string; upstreamTaskId: string; channelId?: string; provider?: string; queryPath?: string; submittedAt: number }): Promise<GenerationTaskLease | null> {
+    const normalized = normalizePatch({
+        executionPhase: "polling",
+        upstreamTaskId: input.upstreamTaskId,
+        channelId: input.channelId,
+        provider: input.provider,
+        queryPath: input.queryPath,
+        submittedAt: input.submittedAt,
+        lastUpstreamStatus: "user_recovery_requested",
+    });
+    if (getDatabaseProvider() === "postgres") {
+        await ensurePostgresSchema();
+        return withPostgresTransaction(async (executor) => {
+            // Read the recovery clock after any competing row lock has been released.
+            await executor.query("SELECT id FROM generation_tasks WHERE id = $1 AND task_type = 'image' FOR UPDATE", [input.id]);
+            const result = await executor.query<Record<string, unknown>>(
+                `WITH recovery AS MATERIALIZED (
+                    SELECT id, NULLIF(payload -> 'nativeResults', 'null'::jsonb) IS NOT NULL AS has_native,
+                           clock_timestamp() AS checked_at
+                    FROM generation_tasks WHERE id = $1 AND task_type = 'image'
+                 )
+                 UPDATE generation_tasks AS task
+                 SET execution_phase = CASE WHEN recovery.has_native THEN 'persisting' ELSE 'polling' END,
+                     next_poll_at = recovery.checked_at,
+                     upstream_task_id = CASE WHEN recovery.has_native THEN task.upstream_task_id ELSE COALESCE($2::text, task.upstream_task_id) END,
+                     channel_id = CASE WHEN recovery.has_native THEN task.channel_id ELSE COALESCE($3::text, task.channel_id) END,
+                     provider = CASE WHEN recovery.has_native THEN task.provider ELSE COALESCE($4::text, task.provider) END,
+                     query_path = CASE WHEN recovery.has_native THEN task.query_path ELSE COALESCE($5::text, task.query_path) END,
+                     submitted_at = CASE WHEN recovery.has_native THEN task.submitted_at ELSE COALESCE($6::timestamptz, task.submitted_at) END,
+                     last_upstream_status = CASE WHEN recovery.has_native THEN task.last_upstream_status ELSE 'user_recovery_requested' END
+                 FROM recovery
+                 WHERE task.id = recovery.id AND task.task_type = 'image'
+                   AND task.status IN ('pending', 'running') AND task.expires_at > recovery.checked_at
+                   AND (task.lease_until IS NULL OR task.lease_until <= recovery.checked_at)
+                 RETURNING task.*`,
+                [input.id, normalized.upstreamTaskId || null, normalized.channelId || null, normalized.provider || null, normalized.queryPath || null, toDate(normalized.submittedAt)],
+            );
+            return result.rows[0] ? mapLease(result.rows[0]) : null;
+        });
+    }
+    return withGenerationTaskFileMutation(async (tasks) => {
+        const now = Date.now();
+        let result: GenerationTaskLease | null = null;
+        const next = tasks.map((task) => {
+            if (task.id !== input.id || !canRearmImageTaskForUser(task, now)) return task;
+            const updated = applyPatch(task, task.payload.nativeResults != null ? { executionPhase: "persisting", nextPollAt: now } : { ...normalized, nextPollAt: now });
+            result = toLease(updated);
+            return updated;
+        });
+        return { tasks: next, result };
+    });
+}
+
+export async function markImageTaskUserCheckPending(observed: StoredGenerationTaskRecord, reviewReason: string): Promise<GenerationTaskLease | null> {
+    const normalized = normalizePatch({
+        executionPhase: "needs_review",
+        lastUpstreamStatus: observed.lastUpstreamStatus || "user_check_pending",
+        resultPayload: { ...(observed.resultPayload || {}), reviewReason },
+    });
+    if (getDatabaseProvider() === "postgres") {
+        await ensurePostgresSchema();
+        return withPostgresTransaction(async (executor) => {
+            await executor.query("SELECT id FROM generation_tasks WHERE id = $1 AND task_type = 'image' FOR UPDATE", [observed.id]);
+            // Stored records expose timestamps in milliseconds.
+            const result = await executor.query<Record<string, unknown>>(
+                `WITH recovery_clock AS MATERIALIZED (SELECT clock_timestamp() AS checked_at)
+                 UPDATE generation_tasks AS task
+                 SET execution_phase = 'needs_review', next_poll_at = NULL,
+                     last_upstream_status = $15::text, result_payload = $16::jsonb
+                 FROM recovery_clock
+                 WHERE task.id = $1 AND task.task_type = 'image' AND task.user_id = $2
+                   AND task.status IN ('pending', 'running') AND task.status = $3
+                   AND task.expires_at > recovery_clock.checked_at
+                   AND (task.lease_until IS NULL OR task.lease_until <= recovery_clock.checked_at)
+                   AND task.execution_phase IS NOT DISTINCT FROM $4::text AND task.payload = $5::jsonb
+                   AND floor(extract(epoch FROM task.next_poll_at) * 1000)::bigint IS NOT DISTINCT FROM $6::bigint
+                   AND task.upstream_task_id IS NOT DISTINCT FROM $7::text
+                   AND task.channel_id IS NOT DISTINCT FROM $8::text
+                   AND task.provider IS NOT DISTINCT FROM $9::text
+                   AND task.query_path IS NOT DISTINCT FROM $10::text
+                   AND floor(extract(epoch FROM task.submitted_at) * 1000)::bigint IS NOT DISTINCT FROM $11::bigint
+                   AND task.last_upstream_status IS NOT DISTINCT FROM $12::text
+                   AND COALESCE(task.result_payload, '{}'::jsonb) = $13::jsonb
+                   AND floor(extract(epoch FROM task.last_poll_at) * 1000)::bigint IS NOT DISTINCT FROM $14::bigint
+                   AND NULLIF(task.payload -> 'nativeResults', 'null'::jsonb) IS NULL
+                   AND NULLIF(task.payload -> 'resultProcessing', 'null'::jsonb) IS NULL
+                 RETURNING task.*`,
+                [
+                    observed.id,
+                    observed.userId,
+                    observed.status,
+                    observed.executionPhase || null,
+                    JSON.stringify(observed.payload),
+                    observed.nextPollAt ?? null,
+                    observed.upstreamTaskId || null,
+                    observed.channelId || null,
+                    observed.provider || null,
+                    observed.queryPath || null,
+                    observed.submittedAt ?? null,
+                    observed.lastUpstreamStatus || null,
+                    JSON.stringify(observed.resultPayload || {}),
+                    observed.lastPollAt ?? null,
+                    normalized.lastUpstreamStatus,
+                    JSON.stringify(normalized.resultPayload),
+                ],
+            );
+            return result.rows[0] ? mapLease(result.rows[0]) : null;
+        });
+    }
+    return withGenerationTaskFileMutation(async (tasks) => {
+        const now = Date.now();
+        let result: GenerationTaskLease | null = null;
+        const next = tasks.map((task) => {
+            if (
+                task.id !== observed.id ||
+                !canRearmImageTaskForUser(task, now) ||
+                task.payload.nativeResults != null ||
+                task.payload.resultProcessing != null ||
+                task.userId !== observed.userId ||
+                task.status !== observed.status ||
+                task.executionPhase !== observed.executionPhase ||
+                !isDeepStrictEqual(task.payload, observed.payload) ||
+                task.nextPollAt !== observed.nextPollAt ||
+                task.upstreamTaskId !== observed.upstreamTaskId ||
+                task.channelId !== observed.channelId ||
+                task.provider !== observed.provider ||
+                task.queryPath !== observed.queryPath ||
+                task.submittedAt !== observed.submittedAt ||
+                task.lastUpstreamStatus !== observed.lastUpstreamStatus ||
+                task.lastPollAt !== observed.lastPollAt ||
+                !isDeepStrictEqual(task.resultPayload || {}, observed.resultPayload || {})
+            )
+                return task;
+            const updated = applyPatch(task, normalized);
+            result = toLease(updated);
+            return updated;
+        });
+        return { tasks: next, result };
+    });
+}
+
+function canRearmImageTaskForUser(task: StoredGenerationTaskRecord, now: number) {
+    return task.type === "image" && (task.status === "pending" || task.status === "running") && task.expiresAt > now && Number(task.leaseUntil || 0) <= now;
+}
+
 export async function claimDueGenerationTasks(input: { workerId: string; now?: number; limit?: number; leaseMs?: number; taskIds?: string[] }): Promise<GenerationTaskLease[]> {
     const workerId = clean(input.workerId, 160);
     if (!workerId) throw new Error("Worker ID is required");
     const now = finiteTime(input.now) || Date.now();
     const limit = Math.max(1, Math.min(50, Math.floor(Number(input.limit) || 20)));
-    const leaseUntil = now + Math.max(30_000, Math.min(5 * 60_000, Math.floor(Number(input.leaseMs) || 90_000)));
+    const duration = Math.max(30_000, Math.min(5 * 60_000, Math.floor(Number(input.leaseMs) || 90_000)));
+    const leaseUntil = now + duration;
     const taskIds = Array.from(new Set((input.taskIds || []).map((id) => clean(id, 160)).filter((id): id is string => Boolean(id)))).slice(0, 50);
     if (getDatabaseProvider() === "postgres") {
         await ensurePostgresSchema();
@@ -115,16 +277,42 @@ export async function claimDueGenerationTasks(input: { workerId: string; now?: n
                  RETURNING task.*`,
                 [new Date(now), limit, workerId, taskIds, new Date(leaseUntil), [...SCHEDULABLE_TYPES]],
             );
+            for (const row of result.rows) {
+                if (row.task_type !== "image" && !completedAdvisoryReview({ type: String(row.task_type), status: String(row.status), payload: record(row.payload) || {} })) continue;
+                const review = completedAdvisoryReview({ type: String(row.task_type), status: String(row.status), payload: record(row.payload) || {} });
+                const updated = await client.query<{ payload: Record<string, unknown>; lease_until: Date; last_heartbeat_at: Date }>(
+                    review
+                        ? "WITH claim_clock AS MATERIALIZED (SELECT clock_timestamp() AS checked_at) UPDATE generation_tasks SET payload = jsonb_set(payload, '{executionId}', to_jsonb($2::text)), lease_until = claim_clock.checked_at + $4::double precision * interval '1 millisecond', last_heartbeat_at = claim_clock.checked_at FROM claim_clock WHERE id = $1 AND task_type = $3 AND expires_at > claim_clock.checked_at RETURNING payload, lease_until, last_heartbeat_at"
+                        : "UPDATE generation_tasks SET payload = jsonb_set(payload, '{executionId}', to_jsonb($2::text)) WHERE id = $1 AND task_type = $3 RETURNING payload, lease_until, last_heartbeat_at",
+                    [row.id, randomUUID(), row.task_type, ...(review ? [duration] : [])],
+                );
+                const saved = updated.rows[0];
+                if (!saved) throw new Error("Claimed image task disappeared before its execution was saved");
+                row.payload = saved.payload;
+                row.lease_until = saved.lease_until;
+                row.last_heartbeat_at = saved.last_heartbeat_at;
+            }
             return result.rows.map(mapLease);
         });
     }
     return withGenerationTaskFileMutation(async (tasks) => {
+        const claimNow = Date.now();
         const eligible = tasks
-            .filter((task) => isDue(task, now, taskIds))
+            .filter((task) => isDue(task, completedAdvisoryReview(task) ? claimNow : now, taskIds))
             .sort((a, b) => Number(a.nextPollAt || 0) - Number(b.nextPollAt || 0) || a.id.localeCompare(b.id))
             .slice(0, limit);
         const claimedIds = new Set(eligible.map((task) => task.id));
-        const next = tasks.map((task) => (claimedIds.has(task.id) ? { ...task, workerId, leaseUntil, lastHeartbeatAt: now } : task));
+        const next = tasks.map((task) =>
+            claimedIds.has(task.id)
+                ? {
+                      ...task,
+                      ...(task.type === "image" || completedAdvisoryReview(task) ? { payload: { ...task.payload, executionId: randomUUID() } } : {}),
+                      workerId,
+                      leaseUntil: completedAdvisoryReview(task) ? claimNow + duration : leaseUntil,
+                      lastHeartbeatAt: completedAdvisoryReview(task) ? claimNow : now,
+                  }
+                : task,
+        );
         return { tasks: next, result: next.filter((task) => claimedIds.has(task.id)).map(toLease) };
     });
 }
@@ -155,25 +343,54 @@ export async function getNextGenerationTaskDueAt(now = Date.now()) {
     return Number.isFinite(nextDueAt) ? nextDueAt : undefined;
 }
 
-export async function renewGenerationTaskLeases(workerId: string, taskIds: string[], leaseMs = 90_000, now = Date.now()) {
+export async function renewGenerationTaskLeases(workerId: string, leases: readonly GenerationTaskLease[], leaseMs = 90_000, now = Date.now()) {
     const owner = clean(workerId, 160);
-    const ids = Array.from(new Set(taskIds.map((id) => clean(id, 160)).filter((id): id is string => Boolean(id)))).slice(0, 50);
+    const ids = Array.from(new Set(leases.map((lease) => clean(lease.id, 160)).filter((id): id is string => Boolean(id)))).slice(0, 50);
     if (!owner || !ids.length) return 0;
-    const leaseUntil = now + Math.max(30_000, Math.min(5 * 60_000, Math.floor(leaseMs)));
+    const duration = Math.max(30_000, Math.min(5 * 60_000, Math.floor(leaseMs)));
+    const leaseUntil = now + duration;
     if (getDatabaseProvider() === "postgres") {
         await ensurePostgresSchema();
-        const result = await postgresQuery("UPDATE generation_tasks SET lease_until = $3, last_heartbeat_at = $4 WHERE worker_id = $1 AND id = ANY($2::text[]) AND lease_until > $4", [owner, ids, new Date(leaseUntil), new Date(now)]);
-        return result.rowCount || 0;
+        const perform = async (client: QueryExecutor) => {
+            const result = await client.query(
+                `WITH lease_clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
+                 UPDATE generation_tasks AS task
+                 SET lease_until = CASE WHEN ${FENCED_EXECUTION_SQL} THEN lease_clock.observed_at + $6::double precision * interval '1 millisecond' ELSE $3::timestamptz END,
+                     last_heartbeat_at = CASE WHEN ${FENCED_EXECUTION_SQL} THEN lease_clock.observed_at ELSE $4::timestamptz END
+                 FROM lease_clock
+                 WHERE task.worker_id = $1 AND task.id = ANY($2::text[])
+                   AND (NOT ${FENCED_EXECUTION_SQL} OR task.expires_at > lease_clock.observed_at)
+                   AND task.lease_until > CASE WHEN ${FENCED_EXECUTION_SQL} THEN lease_clock.observed_at ELSE $4::timestamptz END
+                   AND (NOT ${FENCED_EXECUTION_SQL} OR EXISTS (
+                       SELECT 1 FROM jsonb_array_elements($5::jsonb) AS held(value)
+                       WHERE held.value ->> 'id' = task.id
+                         AND held.value ->> 'executionId' = task.payload ->> 'executionId'
+                   ))`,
+                [owner, ids, new Date(leaseUntil), new Date(now), JSON.stringify(leases.filter(fencedExecution).map((lease) => ({ id: lease.id, executionId: lease.executionId }))), duration],
+            );
+            return result.rowCount || 0;
+        };
+        if (!leases.some(fencedExecution)) return perform({ query: postgresQuery });
+        return withPostgresTransaction(async (client) => {
+            // UPDATE can wait after evaluating WHERE; acquire the row locks before reading the lease clock.
+            await client.query("SELECT id FROM generation_tasks WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE", [ids]);
+            return perform(client);
+        });
     }
     let count = 0;
-    await withGenerationTaskFileMutation(async (tasks) => ({
-        tasks: tasks.map((task) => {
-            if (task.workerId !== owner || !ids.includes(task.id) || Number(task.leaseUntil || 0) <= now) return task;
-            count += 1;
-            return { ...task, leaseUntil, lastHeartbeatAt: now };
-        }),
-        result: undefined,
-    }));
+    await withGenerationTaskFileMutation(async (tasks) => {
+        const leaseNow = Date.now();
+        return {
+            tasks: tasks.map((task) => {
+                const heartbeatAt = fencedExecution(task) ? leaseNow : now;
+                if (task.workerId !== owner || !ids.includes(task.id) || Number(task.leaseUntil || 0) <= heartbeatAt) return task;
+                if (fencedExecution(task) && (task.expiresAt <= heartbeatAt || !leases.some((lease) => lease.id === task.id && lease.executionId && lease.executionId === task.payload.executionId))) return task;
+                count += 1;
+                return { ...task, leaseUntil: heartbeatAt + duration, lastHeartbeatAt: heartbeatAt };
+            }),
+            result: undefined,
+        };
+    });
     return count;
 }
 
@@ -182,25 +399,35 @@ export async function releaseGenerationTaskLease(type: GenerationTaskType, id: s
     const owner = clean(workerId, 160);
     if (getDatabaseProvider() === "postgres") {
         await ensurePostgresSchema();
-        const result = await postgresQuery<Record<string, unknown>>(
-            `UPDATE generation_tasks
-             SET execution_phase = COALESCE($4, execution_phase), upstream_task_id = CASE WHEN $15::boolean THEN NULL ELSE COALESCE($5, upstream_task_id) END,
-                 channel_id = COALESCE($6, channel_id), provider = COALESCE($7, provider), query_path = CASE WHEN $15::boolean THEN NULL ELSE COALESCE($8, query_path) END,
-                 submitted_at = CASE WHEN $15::boolean THEN NULL ELSE COALESCE($9, submitted_at) END, next_poll_at = $10,
-                 last_poll_at = CASE WHEN $15::boolean THEN NULL ELSE COALESCE($11, last_poll_at) END,
-                 last_upstream_status = COALESCE($12, last_upstream_status), result_payload = CASE WHEN $15::boolean THEN $13::jsonb ELSE COALESCE($13::jsonb, result_payload) END,
-                 worker_id = NULL, lease_until = NULL
-             WHERE id = $1 AND task_type = $2 AND worker_id = $3
-               AND ($14::boolean OR status <> 'cancelled' OR execution_phase NOT IN ('cancel_requested', 'cancel_polling'))
-             RETURNING *`,
-            [id, type, owner, ...scheduleValues("", type, normalized).slice(2), options.cancellation === true, options.resetUpstreamIdentity === true],
-        );
-        return result.rows[0] ? mapLease(result.rows[0]) : null;
+        const perform = async (client: QueryExecutor) => {
+            const result = await client.query<Record<string, unknown>>(
+                `UPDATE generation_tasks
+                 SET execution_phase = COALESCE($4, execution_phase), upstream_task_id = CASE WHEN $15::boolean THEN NULL ELSE COALESCE($5, upstream_task_id) END,
+                     channel_id = COALESCE($6, channel_id), provider = COALESCE($7, provider), query_path = CASE WHEN $15::boolean THEN NULL ELSE COALESCE($8, query_path) END,
+                     submitted_at = CASE WHEN $15::boolean THEN NULL ELSE COALESCE($9, submitted_at) END, next_poll_at = $10,
+                     last_poll_at = CASE WHEN $15::boolean THEN NULL ELSE COALESCE($11, last_poll_at) END,
+                     last_upstream_status = COALESCE($12, last_upstream_status), result_payload = CASE WHEN $15::boolean THEN $13::jsonb ELSE COALESCE($13::jsonb, result_payload) END,
+                     worker_id = NULL, lease_until = NULL
+                 WHERE id = $1 AND task_type = $2 AND worker_id = $3
+                   AND ($14::boolean OR status <> 'cancelled' OR execution_phase NOT IN ('cancel_requested', 'cancel_polling'))
+                   AND (NOT ${FENCED_EXECUTION_SQL} OR (payload ->> 'executionId' = $16::text AND lease_until > clock_timestamp() AND expires_at > clock_timestamp()))
+                 RETURNING *`,
+                [id, type, owner, ...scheduleValues("", type, normalized).slice(2), options.cancellation === true, options.resetUpstreamIdentity === true, options.executionId ?? null],
+            );
+            return result.rows[0] ? mapLease(result.rows[0]) : null;
+        };
+        if (type !== "image" && type !== "agent") return perform({ query: postgresQuery });
+        return withPostgresTransaction(async (client) => {
+            // A pure external tuple lock can delay UPDATE without causing its WHERE to be checked again.
+            await client.query("SELECT id FROM generation_tasks WHERE id = $1 AND task_type = $2 FOR UPDATE", [id, type]);
+            return perform(client);
+        });
     }
     return withGenerationTaskFileMutation(async (tasks) => {
         let result: GenerationTaskLease | null = null;
         const next = tasks.map((task) => {
             if (task.id !== id || task.type !== type || task.workerId !== owner) return task;
+            if (fencedExecution(task) && (!options.executionId || options.executionId !== task.payload.executionId || !(Number(task.leaseUntil) > Date.now()) || task.expiresAt <= Date.now())) return task;
             if (!canApplySchedulePatch(task, options)) return task;
             const patched = applyPatch(task, normalized);
             const updated = {
@@ -318,8 +545,7 @@ function unsubmittedSceneMask(task: StoredGenerationTaskRecord) {
         protection?.selectionSource === "user_selection" &&
         protection.sourceAssetId === payload.references?.[0]?.id &&
         protection.sourceAssetId === payload.ecommerceExecution.referenceRoles?.[0]?.assetId &&
-        protection.mask?.dataUrl &&
-        protection.mask.dataUrl === payload.mask?.dataUrl &&
+        ((protection.mask?.dataUrl && protection.mask.dataUrl === payload.mask?.dataUrl) || (protection.mask?.serverUrl?.startsWith("/api/reference-assets/") && protection.mask.serverUrl === payload.mask?.serverUrl)) &&
         payload.config?.apiFormat === "openai" &&
         payload.ecommerceExecution.modelSnapshot?.imageEdit?.supportsIndependentMask !== false &&
         resolveImageEditProtocol(payload.config).supportsIndependentMask,
@@ -355,12 +581,14 @@ function unsubmittedImageReference(task: StoredGenerationTaskRecord, requireRefe
 }
 
 function mapLease(row: Record<string, unknown>): GenerationTaskLease {
+    const payload = record(row.payload) || {};
     return {
         id: String(row.id || ""),
         userId: String(row.user_id || ""),
         type: isTaskType(row.task_type) ? row.task_type : "text",
         status: row.status === "pending" || row.status === "running" || row.status === "success" || row.status === "error" || row.status === "paused" || row.status === "cancelled" ? row.status : "error",
-        payload: record(row.payload) || {},
+        payload,
+        ...(row.task_type === "image" || completedAdvisoryReview({ type: String(row.task_type), status: String(row.status), payload }) ? { executionId: clean(payload.executionId, 160) } : {}),
         executionPhase: isPhase(row.execution_phase) ? row.execution_phase : "created",
         upstreamTaskId: clean(row.upstream_task_id, 500),
         channelId: clean(row.channel_id, 160),
@@ -378,7 +606,7 @@ function mapLease(row: Record<string, unknown>): GenerationTaskLease {
 }
 
 function toLease(task: StoredGenerationTaskRecord): GenerationTaskLease {
-    return { ...task, executionPhase: task.executionPhase || "created" };
+    return { ...task, executionPhase: task.executionPhase || "created", ...(task.type === "image" || completedAdvisoryReview(task) ? { executionId: clean(task.payload.executionId, 160) } : {}) };
 }
 
 function clean(value: unknown, max: number) {
@@ -424,5 +652,5 @@ function isPhase(value: unknown): value is GenerationTaskExecutionPhase {
 }
 
 function isTaskType(value: unknown): value is GenerationTaskType {
-    return value === "text" || value === "image" || value === "video" || value === "audio" || value === "agent" || value === "render";
+    return value === "text" || value === "image" || value === "video" || value === "audio" || value === "agent" || value === "render" || value === "image_processing";
 }

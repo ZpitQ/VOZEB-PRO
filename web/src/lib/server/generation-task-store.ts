@@ -1,3 +1,4 @@
+import type { EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
 import { getDatabaseProvider, ensurePostgresSchema, postgresQuery, withPostgresTransaction, type QueryExecutor } from "@/lib/server/database";
 import { resolveGenerationReviewReason } from "@/lib/server/generation-task-review-reason";
 import { readJsonDataFile, withJsonDataFileLock, writeJsonDataFile } from "@/lib/server/data-adapter";
@@ -84,10 +85,13 @@ export async function getStoredGenerationTask<T>(type: GenerationTaskType, id: s
     return record ? withExecutionState(record.payload as T, record.executionPhase, record.lastUpstreamStatus, record.resultPayload) : null;
 }
 
-export async function getStoredGenerationTaskRecord(type: GenerationTaskType, id: string): Promise<StoredGenerationTaskRecord | null> {
+export async function getStoredGenerationTaskRecord(type: GenerationTaskType, id: string, executor?: QueryExecutor, lock = false): Promise<StoredGenerationTaskRecord | null> {
     if (getDatabaseProvider() === "postgres") {
-        await ensurePostgresSchema();
-        const result = await postgresQuery<Record<string, unknown>>("SELECT * FROM generation_tasks WHERE id = $1 AND task_type = $2 AND expires_at > now()", [id, type]);
+        if (!executor) await ensurePostgresSchema();
+        const query: QueryExecutor["query"] = executor ? executor.query.bind(executor) : postgresQuery;
+        if (lock) await query("SELECT id FROM generation_tasks WHERE id = $1 AND task_type = $2 FOR UPDATE", [id, type]);
+        const clock = executor ? "clock_timestamp()" : "now()";
+        const result = await query<Record<string, unknown>>(`SELECT * FROM generation_tasks WHERE id = $1 AND task_type = $2 AND expires_at > ${clock}`, [id, type]);
         return result.rows[0] ? mapStoredTaskRecord(result.rows[0]) : null;
     }
     return (await readFileTasks()).find((task) => task.id === id && task.type === type && task.expiresAt > Date.now()) || null;
@@ -882,7 +886,12 @@ async function upsertTask<T extends { id: string; userId: string; status: string
     });
 }
 
-async function insertTask<T extends { id: string; userId: string; status: string; createdAt: number; updatedAt: number }>(type: GenerationTaskType, task: T, ttlMs: number, options?: { referenceDispatch?: EcommerceReferenceDispatchFence }): Promise<T> {
+async function insertTask<T extends { id: string; userId: string; status: string; createdAt: number; updatedAt: number }>(
+    type: GenerationTaskType,
+    task: T & { ecommerceExecution?: EcommerceCompiledImageRequest },
+    ttlMs: number,
+    options?: { referenceDispatch?: EcommerceReferenceDispatchFence },
+): Promise<T> {
     const status = normalizeGenerationTaskStatus(task.status);
     const context = normalizeGenerationTaskContext(task as GenerationTaskContext);
     if (getDatabaseProvider() === "postgres") {
@@ -899,7 +908,7 @@ async function insertTask<T extends { id: string; userId: string; status: string
                 );
                 const existing = duplicate.rows[0];
                 if (existing) return withExecutionState(existing.payload, existing.execution_phase, existing.last_upstream_status, existing.result_payload);
-                assertEcommerceReferenceDispatch(parent.rows[0]?.payload, task.userId, context, options?.referenceDispatch || context.referenceDispatch);
+                assertEcommerceReferenceDispatch(parent.rows[0]?.payload, task.userId, context, options?.referenceDispatch || context.referenceDispatch, task.ecommerceExecution);
                 const inserted = await client.query<{ payload: T }>(
                     `INSERT INTO generation_tasks (id, user_id, task_type, status, payload, created_at, updated_at, expires_at, conversation_id, run_id, surface, project_id, parent_task_id, attempt_no, client_request_id)
                 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) ON CONFLICT DO NOTHING RETURNING payload`,
@@ -931,7 +940,13 @@ async function insertTask<T extends { id: string; userId: string; status: string
         );
         if (duplicate) return { tasks, result: type === "image" && context.runId ? withExecutionState(duplicate.payload as T, duplicate.executionPhase, duplicate.lastUpstreamStatus, duplicate.resultPayload) : (duplicate.payload as T) };
         if (type === "image" && context.runId)
-            assertEcommerceReferenceDispatch(tasks.find((item) => item.id === context.runId && item.type === "agent")?.payload as AgentRun | undefined, task.userId, context, options?.referenceDispatch || context.referenceDispatch);
+            assertEcommerceReferenceDispatch(
+                tasks.find((item) => item.id === context.runId && item.type === "agent")?.payload as AgentRun | undefined,
+                task.userId,
+                context,
+                options?.referenceDispatch || context.referenceDispatch,
+                task.ecommerceExecution,
+            );
         const record: StoredGenerationTaskRecord = {
             id: task.id,
             userId: task.userId,
@@ -974,6 +989,15 @@ async function readFileTasks() {
 
 function mutateFileTasks(mutator: (tasks: StoredGenerationTaskRecord[]) => StoredGenerationTaskRecord[]) {
     return withGenerationTaskFileMutation(async (tasks) => ({ tasks: mutator(tasks), result: undefined }));
+}
+
+export function withGenerationTaskFileRead<T>(read: (tasks: StoredGenerationTaskRecord[]) => Promise<T>) {
+    const result = fileMutationQueue.then(() => withJsonDataFileLock(TASK_FILE, async () => read(await readFileTasks())));
+    fileMutationQueue = result.then(
+        () => undefined,
+        () => undefined,
+    );
+    return result;
 }
 
 export function withGenerationTaskFileMutation<T>(mutator: (tasks: StoredGenerationTaskRecord[]) => Promise<{ tasks: StoredGenerationTaskRecord[]; result: T }>) {
@@ -1133,7 +1157,7 @@ function mapGenerationTaskCostAggregate(row: Record<string, unknown>): Generatio
 }
 
 function isTaskType(value: unknown): value is GenerationTaskType {
-    return value === "text" || value === "image" || value === "video" || value === "audio" || value === "agent" || value === "render";
+    return value === "text" || value === "image" || value === "video" || value === "audio" || value === "agent" || value === "render" || value === "image_processing";
 }
 
 function isTaskStatus(value: unknown): value is GenerationTaskStatus {

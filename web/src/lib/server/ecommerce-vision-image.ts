@@ -2,6 +2,7 @@ import sharp from "sharp";
 
 export const ECOMMERCE_VISION_IMAGE_MAX_BYTES = 4 * 1024 * 1024;
 export const ECOMMERCE_VISION_IMAGE_MAX_DIMENSION = 2048;
+export const ECOMMERCE_IMAGE_MAX_INPUT_PIXELS = 64_000_000;
 
 const DATA_IMAGE_PATTERN = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\r\n]+)$/i;
 
@@ -15,7 +16,7 @@ export async function boundEcommerceVisionImage(dataUrl: string): Promise<string
 
     let metadata;
     try {
-        metadata = await sharp(bytes, { failOn: "error", limitInputPixels: 64_000_000 }).metadata();
+        metadata = await sharp(bytes, { failOn: "error", limitInputPixels: ECOMMERCE_IMAGE_MAX_INPUT_PIXELS }).metadata();
     } catch {
         // Keep compatibility with protocol fixtures that use tiny placeholder bytes.
         if (bytes.length <= ECOMMERCE_VISION_IMAGE_MAX_BYTES) return dataUrl;
@@ -26,7 +27,7 @@ export async function boundEcommerceVisionImage(dataUrl: string): Promise<string
 
     for (const width of [ECOMMERCE_VISION_IMAGE_MAX_DIMENSION, 1600, 1280, 1024]) {
         for (const quality of [82, 72, 62]) {
-            const output = await sharp(bytes, { failOn: "error", limitInputPixels: 64_000_000 })
+            const output = await sharp(bytes, { failOn: "error", limitInputPixels: ECOMMERCE_IMAGE_MAX_INPUT_PIXELS })
                 .rotate()
                 .resize({ width, height: width, fit: "inside", withoutEnlargement: true })
                 .flatten({ background: "#ffffff" })

@@ -27,7 +27,7 @@ describe("ecommerce generation trace outbox", () => {
 
         expect(hydrated.ecommerceTrace).toEqual(trace);
         expect(mocks.getImageTask).toHaveBeenCalledWith("image-task-1");
-        expect(persist).toHaveBeenCalledWith(["image-task-1"], trace, null);
+        expect(persist).toHaveBeenCalledWith(["image-task-1"], trace, null, undefined);
     });
 
     it("reconciles pending advisory logs from the same child without overwriting a newer trace", async () => {
@@ -37,7 +37,7 @@ describe("ecommerce generation trace outbox", () => {
         const persist = vi.fn(async () => ({ updated: 1 }));
         const [hydrated] = await hydrateEcommerceTracesFromImageTasks([{ ...generationLog(), ecommerceTrace: pending }], persist);
         expect(hydrated.ecommerceTrace).toEqual(final);
-        expect(persist).toHaveBeenCalledWith(["image-task-1"], final, pending);
+        expect(persist).toHaveBeenCalledWith(["image-task-1"], final, pending, undefined);
         expect(mocks.getStoredGenerationTask).not.toHaveBeenCalled();
     });
 

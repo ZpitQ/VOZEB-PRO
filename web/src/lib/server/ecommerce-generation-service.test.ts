@@ -1,5 +1,5 @@
 import sharp from "sharp";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import { once } from "node:events";
 
@@ -11,11 +11,50 @@ import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } fr
 import type { EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 import { resolveImageEditProtocol } from "./image-edit-protocol";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
-import { createEcommerceSceneEditTask, createEcommerceLocalEditTask, loadEcommercePlanningImage } from "./ecommerce-generation-service";
+import { createEcommerceSceneEditTask, createEcommerceLocalEditTask, decodeEcommerceCanvasSize, loadEcommercePlanningImage } from "./ecommerce-generation-service";
 import { authorizedWorkerUserId, maintenanceWorkerContext } from "./maintenance-auth";
-import { buildWhiteBackgroundProductProtection, createEcommerceProductSceneTask, ecommerceGenerationEnabled, ecommerceRolloutStage, publicEcommerceProgress } from "./ecommerce-generation-service";
+import { buildWhiteBackgroundProductProtection, createEcommerceProductSceneTask, ecommerceGenerationEnabled, ecommerceRolloutStage, publicEcommerceProgress, EcommerceProductSegmentationError } from "./ecommerce-generation-service";
 
 describe("ecommerce generation service", () => {
+    describe("original reference dimensions", () => {
+        const sources = new Map<number, Buffer>();
+        beforeAll(async () => {
+            for (const height of [6000, 8000]) {
+                sources.set(
+                    height,
+                    await sharp({ create: { width: 8000, height, channels: 3, background: "#203040" } })
+                        .withMetadata({ orientation: 6 })
+                        .jpeg()
+                        .toBuffer(),
+                );
+            }
+        });
+
+        it.each([6000, 8000])("reads original oriented dimensions within the reference budget (8000 x %s)", async (height) => {
+            await expect(decodeEcommerceCanvasSize(sources.get(height)!)).resolves.toEqual({ width: height, height: 8000 });
+        });
+    });
+
+    it("rejects reference originals above the existing sixty-four-megapixel budget", async () => {
+        const source = await sharp({ create: { width: 8001, height: 8000, channels: 3, background: "#203040" } })
+            .jpeg()
+            .toBuffer();
+
+        await expect(decodeEcommerceCanvasSize(source)).rejects.toThrow(/pixel limit/i);
+    });
+
+    it("still fully decodes reference pixels with readable metadata", async () => {
+        const source = await sharp({ create: { width: 64, height: 64, channels: 3, background: "#203040" } })
+            .png()
+            .toBuffer();
+        const pixelChunk = source.indexOf(Buffer.from("IDAT"));
+        expect(pixelChunk).toBeGreaterThan(0);
+        source[pixelChunk + 4] ^= 0xff;
+        await expect(sharp(source, { failOn: "error" }).metadata()).resolves.toMatchObject({ width: 64, height: 64 });
+
+        await expect(decodeEcommerceCanvasSize(source)).rejects.toThrow();
+    });
+
     it.each(["local_edit", "scene_edit"] as const)("retains a v6 auxiliary image in the actual %s task", async (operation) => {
         const editPlan: EcommerceEditPlan = {
             ...plan(),
@@ -183,6 +222,38 @@ describe("ecommerce generation service", () => {
         expect(mask.data[(20 * 64 + 30) * 4 + 3]).toBe(255);
     });
 
+    it.each([
+        { name: "white", background: "#ffffff", makeAnalysis: analysis },
+        { name: "transparent", background: "#00000000", makeAnalysis: transparentAnalysis },
+    ])("preserves original one-pixel rods and the open background channel on $name F07", async ({ background, makeAnalysis }) => {
+        const source = await sharp({ create: { width: 128, height: 128, channels: 4, background } })
+            .composite([{ input: Buffer.from('<svg width="128" height="128" xmlns="http://www.w3.org/2000/svg"><path d="M40 24H64V48H65V24H88V72H84V112H83V72H45V112H44V72H40Z" fill="#252525"/></svg>') }])
+            .png()
+            .toBuffer();
+        const input = makeAnalysis();
+        const before = structuredClone(input);
+
+        const regions = await buildWhiteBackgroundProductProtection(source, input, "product");
+
+        expect(regions.sourceSize).toEqual({ width: 128, height: 128 });
+        expect(regions.productCore.rectangles).toEqual([{ x: 40, y: 24, width: 48, height: 88 }]);
+        const mask = await sharp(Buffer.from(regions.editableBackground.mask!.reference.dataUrl!.split(",")[1], "base64"))
+            .ensureAlpha()
+            .raw()
+            .toBuffer({ resolveWithObject: true });
+        expect(mask.info).toMatchObject({ width: 128, height: 128, channels: 4 });
+        expect(mask.data[(100 * 128 + 44) * 4 + 3]).toBe(255);
+        expect(mask.data[(111 * 128 + 83) * 4 + 3]).toBe(255);
+        expect(mask.data[(100 * 128 + 45) * 4 + 3]).toBe(0);
+        expect(mask.data[(111 * 128 + 82) * 4 + 3]).toBe(0);
+        expect(mask.data[(30 * 128 + 64) * 4 + 3]).toBe(0);
+        expect(mask.data[(47 * 128 + 64) * 4 + 3]).toBe(0);
+        expect(mask.data[(48 * 128 + 64) * 4 + 3]).toBe(255);
+        expect(mask.data[(30 * 128 + 63) * 4 + 3]).toBe(255);
+        expect(mask.data[(30 * 128 + 65) * 4 + 3]).toBe(255);
+        expect(input).toEqual(before);
+    });
+
     it.each([false, true])("builds protection only from the explicit anchor when an auxiliary detail has product regions (reversed=%s)", async (reversed) => {
         const source = await productImage({ background: "white", products: [{ left: 22, top: 10, width: 20, height: 28 }] });
         const input = analysis();
@@ -274,6 +345,32 @@ describe("ecommerce generation service", () => {
         ["empty subject", () => productImage({ background: "#ffffff", products: [] }), /没有检测到商品主体/],
     ])("fails closed for %s", async (_name, makeSource, expected) => {
         await expect(buildWhiteBackgroundProductProtection(await makeSource(), analysis(), "product")).rejects.toThrow(expected);
+    });
+
+    it.each([
+        { name: "a component below the minimum area", product: { left: 10, top: 10, width: 4, height: 4 }, noise: { left: 42, top: 10, width: 3, height: 5 } },
+        { name: "an eligible component below five percent", product: { left: 10, top: 10, width: 20, height: 28 }, noise: { left: 42, top: 10, width: 4, height: 4 } },
+    ])("keeps the single subject when ignoring $name", async ({ product, noise }) => {
+        const source = await productImage({ background: "#ffffff", products: [product, noise] });
+
+        const regions = await buildWhiteBackgroundProductProtection(source, analysis(), "product");
+
+        expect(regions.productCore.rectangles).toEqual([{ x: product.left, y: product.top, width: product.width, height: product.height }]);
+    });
+
+    it("rejects a second eligible subject at exactly five percent with the public segmentation error", async () => {
+        const source = await productImage({
+            background: "#ffffff",
+            products: [
+                { left: 10, top: 10, width: 20, height: 28 },
+                { left: 42, top: 10, width: 4, height: 7 },
+            ],
+        });
+
+        const result = buildWhiteBackgroundProductProtection(source, analysis(), "product");
+
+        await expect(result).rejects.toThrow(EcommerceProductSegmentationError);
+        await expect(result).rejects.toThrow("检测到多个独立主体，需要人工复核");
     });
 
     it("creates a strict task with product first, scene second, and a western-home default", async () => {

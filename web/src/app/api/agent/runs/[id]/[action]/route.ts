@@ -1,18 +1,20 @@
+import { randomUUID } from "node:crypto";
 import { after, NextResponse } from "next/server";
 import { readJsonBodyResult } from "@/lib/auth/request";
 import { getCurrentUser } from "@/lib/auth/session";
 import { getAuthSettings } from "@/lib/auth/store";
 import { abortAgentRun } from "@/lib/server/agent-run-executor";
-import { getAgentRun, setAgentRunStatus, updateAgentRunById, type AgentRun, type AgentRunStatus } from "@/lib/server/agent-run-store";
+import { getAgentRun, reconcileAgentRunImageProcessingFacts, setAgentRunStatus, updateAgentRunById, type AgentRun, type AgentRunStatus } from "@/lib/server/agent-run-store";
 import { runGenerationTaskRecoveryBatch } from "@/lib/server/generation-task-recovery-service";
 import { scheduleGenerationTask } from "@/lib/server/generation-task-scheduler";
-import { withGenerationConcurrencyLimit } from "@/lib/server/generation-task-store";
+import { listStoredGenerationTaskRecordsByRunIds, withGenerationConcurrencyLimit } from "@/lib/server/generation-task-store";
 import { fetchInternalApi, resolveInternalOrigin } from "@/lib/server/internal-origin";
 import { publicAgentRun } from "@/lib/server/agent-run-public";
 import { publicAgentRunForRequest } from "@/lib/server/agent-run-public-selection";
-import { prepareEcommerceSceneSelectionResume } from "@/lib/server/ecommerce-generation-service";
+import { replayEcommerceSceneSelection, resumeEcommerceSceneSelection } from "@/lib/server/ecommerce-scene-selection-service";
 import { parseCreativeReferenceRecovery, REFERENCE_CHECKPOINT_REASONS } from "@/lib/server/ecommerce-reference-recovery";
 import { recoverEcommerceReferences } from "@/lib/server/ecommerce-reference-recovery-service";
+import { cancelImageProcessingTaskForRun, ImageProcessingInputError, resumeImageProcessingTaskForRun } from "@/lib/server/image-processing-service";
 
 export const maxDuration = 2400;
 
@@ -29,12 +31,21 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (body?.conversationId !== undefined && !expectedConversationId) return NextResponse.json({ code: 400, data: null, msg: "对话标识无效" }, { status: 400 });
     const status = actions[action];
     if (!status && action !== "retry" && action !== "cancel") return NextResponse.json({ code: 400, data: null, msg: "不支持的 Agent 操作" }, { status: 400 });
-    const run = await getAgentRun(id);
-    if (!run || (run.userId !== user.id && user.role !== "admin")) return NextResponse.json({ code: 404, data: null, msg: "Agent 任务不存在" }, { status: 404 });
-    if (expectedConversationId && run.conversationId !== expectedConversationId) return NextResponse.json({ code: 409, data: null, msg: "当前对话与 Agent 任务不匹配" }, { status: 409 });
+    const authorizedRun = await getAgentRun(id);
+    if (!authorizedRun || (authorizedRun.userId !== user.id && user.role !== "admin")) return NextResponse.json({ code: 404, data: null, msg: "Agent 任务不存在" }, { status: 404 });
+    if (expectedConversationId && authorizedRun.conversationId !== expectedConversationId) return NextResponse.json({ code: 409, data: null, msg: "当前对话与 Agent 任务不匹配" }, { status: 409 });
+    const run = await reconcileAgentRunImageProcessingFacts(authorizedRun);
+    if (!run) return NextResponse.json({ code: 404, data: null, msg: "Agent 任务不存在" }, { status: 404 });
     if (action === "retry" && (run.status !== "failed" || run.tasks.length)) return NextResponse.json({ code: 409, data: null, msg: "只有规划阶段失败的任务可以整体重试" }, { status: 409 });
     if (action === "pause" && !["planning", "running"].includes(run.status)) return NextResponse.json({ code: 409, data: null, msg: "当前任务无法暂停" }, { status: 409 });
-    if (action === "resume" && (run.status !== "paused" || run.cancellation)) return NextResponse.json({ code: 409, data: null, msg: run.cancellation ? "任务正在取消，无法恢复" : "只有暂停中的任务可以恢复" }, { status: 409 });
+    if (body?.referenceRecovery !== undefined && body.sceneSelection !== undefined) return NextResponse.json({ code: 400, data: null, msg: "参考恢复必须对应原对话，且不能同时提交编辑区域" }, { status: 400 });
+    if (action === "resume" && run.cancellation) return NextResponse.json({ code: 409, data: null, msg: "任务正在取消，无法恢复" }, { status: 409 });
+    if (action === "resume" && body?.sceneSelection !== undefined && run.ecommerceSnapshot?.processing?.sceneSelection) {
+        const replay = replayEcommerceSceneSelection(run, body.sceneSelection, user.id);
+        if (!replay) return NextResponse.json({ code: 409, data: null, msg: "已确认的编辑区域不能替换，请刷新任务状态" }, { status: 409 });
+        return NextResponse.json({ code: 0, data: { run: await publicAgentRunForRequest(replay, request) }, msg: "OK" });
+    }
+    if (action === "resume" && run.status !== "paused") return NextResponse.json({ code: 409, data: null, msg: "只有暂停中的任务可以恢复" }, { status: 409 });
     if (action === "resume" && run.ecommerceSnapshot?.fallback?.reason === "reference_source_changed") return NextResponse.json({ code: 409, data: null, msg: "原参考图片内容已变化，请重新选择原图开始创作。" }, { status: 409 });
     if (body?.referenceRecovery !== undefined) {
         if (action !== "resume" || body.sceneSelection !== undefined || !expectedConversationId) return NextResponse.json({ code: 400, data: null, msg: "参考恢复必须对应原对话，且不能同时提交编辑区域" }, { status: 400 });
@@ -66,11 +77,25 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     }
     if (action === "resume" && REFERENCE_CHECKPOINT_REASONS.has(run.ecommerceSnapshot?.fallback?.reason || "") && run.tasks.every((task) => !task.attempts && !task.taskId && !task.taskIds?.length && !task.childTasks?.length))
         return NextResponse.json({ code: 409, data: null, msg: run.ecommerceSnapshot?.referenceCheckpoint ? "请使用本轮参考用途确认或重新分析入口" : "这条历史任务无法直接继续，请重新选择原图片开始创作。" }, { status: 409 });
-    let selectedTasks: AgentRun["tasks"] | undefined;
-    if (body?.sceneSelection !== undefined || (action === "resume" && run.ecommerceSnapshot?.fallback?.reason === "scene_selection_required" && !run.tasks.some((task) => task.sceneProtection))) {
+    if (body?.sceneSelection !== undefined || (action === "resume" && run.ecommerceSnapshot?.fallback?.reason === "scene_selection_required" && !run.ecommerceSnapshot.processing?.sceneSelection && !run.tasks.some((task) => task.sceneProtection))) {
         if (action !== "resume" || !body?.sceneSelection) return NextResponse.json({ code: 409, data: null, msg: "请在原图上选择需要修改的区域，并包含必要的周边空间" }, { status: 409 });
+        const origin = resolveInternalOrigin(new URL(request.url).origin);
+        const cookie = request.headers.get("cookie") || "";
+        const limit = (await getAuthSettings()).generationConcurrency.agent;
         try {
-            selectedTasks = await prepareEcommerceSceneSelectionResume(run, body.sceneSelection, resolveInternalOrigin(new URL(request.url).origin), request.headers.get("cookie") || "", user.id);
+            const result = await withGenerationConcurrencyLimit(
+                run.userId,
+                "agent",
+                10 * 60 * 1000,
+                limit,
+                async () => ({ confirmation: await resumeEcommerceSceneSelection({ run, selection: body.sceneSelection, actorUserId: user.id, origin, cookie }) }),
+                run.id,
+            );
+            if (result === null) return NextResponse.json({ code: 429, data: null, msg: `当前最多同时运行 ${limit} 个 Agent 任务` }, { status: 429 });
+            if (!result.confirmation) return NextResponse.json({ code: 409, data: null, msg: "编辑区域或任务状态已变化，请刷新后重试" }, { status: 409 });
+            const confirmed = result.confirmation;
+            if (!confirmed.replayed) after(() => runGenerationTaskRecoveryBatch({ origin, cookie, limit: 1, taskIds: [confirmed.run.id] }));
+            return NextResponse.json({ code: 0, data: { run: await publicAgentRunForRequest(confirmed.run, request) }, msg: "OK" });
         } catch (error) {
             return NextResponse.json({ code: 409, data: null, msg: error instanceof Error ? error.message : "编辑区域无法确认" }, { status: 409 });
         }
@@ -79,45 +104,57 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (action === "cancel" && ["completed", "failed", "cancelled"].includes(run.status)) return NextResponse.json({ code: 409, data: null, msg: "当前任务无法取消" }, { status: 409 });
     if (action === "cancel") return cancelAgentRun(request, run);
     if (action !== "resume") abortAgentRun(run.id);
-    const mutate = async () => ({
-        updated:
-            action === "retry"
-                ? await updateAgentRunById(
-                      run.id,
-                      {
-                          status: "planning",
-                          executionId: undefined,
-                          tasks: [],
-                          foundation: undefined,
-                          projectHandoff: undefined,
-                          projectHandoffEmitted: undefined,
-                          review: undefined,
-                          reviewed: false,
-                          assetIds: [],
-                          failure: undefined,
-                          failureStage: undefined,
-                          candidateFailures: undefined,
-                      },
-                      { type: "run.retry.requested" },
-                      ["failed"],
-                  )
-                : selectedTasks
-                  ? await updateAgentRunById(run.id, { status: "running", executionId: undefined, tasks: selectedTasks }, { type: "run.resumed" }, ["paused"], undefined, run.tasks)
-                  : await setAgentRunStatus(run, status!),
-    });
-    const result = action === "resume" || action === "retry" ? await withGenerationConcurrencyLimit(run.userId, "agent", 10 * 60 * 1000, limit, mutate, run.id) : await mutate();
-    if (result === null) return NextResponse.json({ code: 429, data: null, msg: `当前最多同时运行 ${limit} 个 Agent 任务` }, { status: 429 });
-    const { updated } = result;
-    if (!updated) return NextResponse.json({ code: 409, data: null, msg: "Agent 状态已变化，请刷新后重试" }, { status: 409 });
-    const origin = resolveInternalOrigin(new URL(request.url).origin);
-    const cookie = request.headers.get("cookie") || "";
-    if (action === "resume" || action === "retry") {
-        await scheduleGenerationTask("agent", updated.id, { executionPhase: "created", nextPollAt: Date.now(), lastUpstreamStatus: action });
-        after(() => runGenerationTaskRecoveryBatch({ origin, cookie, limit: 1, taskIds: [updated.id] }));
-    } else {
-        await scheduleGenerationTask("agent", updated.id, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: action });
+    const mutate = async () => {
+        if (action === "resume" && run.ecommerceSnapshot?.processing?.waitingFor) {
+            const resumed = await resumeImageProcessingTaskForRun(run);
+            if (resumed) return { updated: resumed, imageProcessingResumed: true };
+        }
+        return {
+            imageProcessingResumed: false,
+            updated:
+                action === "retry"
+                    ? await updateAgentRunById(
+                          run.id,
+                          {
+                              status: "planning",
+                              planningRequestId: `${run.id}:planning:${randomUUID()}`,
+                              executionId: undefined,
+                              tasks: [],
+                              foundation: undefined,
+                              projectHandoff: undefined,
+                              projectHandoffEmitted: undefined,
+                              review: undefined,
+                              reviewed: false,
+                              assetIds: [],
+                              failure: undefined,
+                              failureStage: undefined,
+                              candidateFailures: undefined,
+                          },
+                          { type: "run.retry.requested" },
+                          ["failed"],
+                      )
+                    : await setAgentRunStatus(run, status!),
+        };
+    };
+    try {
+        const result = action === "resume" || action === "retry" ? await withGenerationConcurrencyLimit(run.userId, "agent", 10 * 60 * 1000, limit, mutate, run.id) : await mutate();
+        if (result === null) return NextResponse.json({ code: 429, data: null, msg: `当前最多同时运行 ${limit} 个 Agent 任务` }, { status: 429 });
+        const { updated } = result;
+        if (!updated) return NextResponse.json({ code: 409, data: null, msg: "Agent 状态已变化，请刷新后重试" }, { status: 409 });
+        if (result.imageProcessingResumed) return NextResponse.json({ code: 0, data: { run: await publicAgentRunForRequest(updated, request) }, msg: "OK" });
+        const origin = resolveInternalOrigin(new URL(request.url).origin);
+        const cookie = request.headers.get("cookie") || "";
+        if (action === "resume" || action === "retry") {
+            await scheduleGenerationTask("agent", updated.id, { executionPhase: "created", nextPollAt: Date.now(), lastUpstreamStatus: action });
+            after(() => runGenerationTaskRecoveryBatch({ origin, cookie, limit: 1, taskIds: [updated.id] }));
+        } else {
+            await scheduleGenerationTask("agent", updated.id, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: action });
+        }
+        return NextResponse.json({ code: 0, data: { run: await publicAgentRunForRequest(updated, request) }, msg: "OK" });
+    } catch (error) {
+        if (error instanceof ImageProcessingInputError) return NextResponse.json({ code: error.status, data: null, msg: error.message }, { status: error.status });
+        throw error;
     }
-    return NextResponse.json({ code: 0, data: { run: await publicAgentRunForRequest(updated, request) }, msg: "OK" });
 }
 
 async function cancelAgentRun(request: Request, run: AgentRun) {
@@ -136,6 +173,11 @@ async function cancelAgentRun(request: Request, run: AgentRun) {
     if (!stopping) return NextResponse.json({ code: 409, data: null, msg: "Agent 状态已变化，请刷新后重试" }, { status: 409 });
     abortAgentRun(run.id);
     await scheduleGenerationTask("agent", stopping.id, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "cancel_requested" });
+
+    const nativeChildren = (await listStoredGenerationTaskRecordsByRunIds([stopping.id], [stopping.userId])).filter(
+        (child) => child.type === "image_processing" && (child.payload.operation === "prepare_reference" || child.payload.operation === "build_protection" || child.payload.operation === "process_result"),
+    );
+    for (const child of nativeChildren) await cancelImageProcessingTaskForRun({ userId: stopping.userId, runId: stopping.id, jobId: child.id });
 
     const results = await Promise.all(children.map((child) => cancelChildTask(child, origin, cookie)));
     const pending = results.filter((result) => !result.confirmed);

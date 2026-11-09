@@ -5,9 +5,15 @@ description: VOZEB PRO 商业部署前的健康检查、调度、备份、监控
 
 # 生产上线基线
 
+结果处理的准入暂停已取得File与独立单连接PostgreSQL分项证据：原件和原任务保留，同配置检查不改变事实或计费，调整配置且可执行后恢复同一本地子任务；未校准输入仍拒绝执行。普通多图交付与既有V8失败恢复回归通过。该项补齐持久暂停与显式恢复，当前生产就绪结论及剩余桌面、故障、产物与容量验收仍以本页清单为准。
+
 应用代码可以提供稳定能力，但商业上线还依赖部署环境、支付商账号、监控平台和运营主体。宝塔、Docker、云容器和托管 PostgreSQL 使用同一检查标准。
 
 ## 当前验收证据边界
+
+S8所定原照片及生成后整图增强已通过用户验收：等比输入副本与同步蒙版保留原件和全分辨率保护数据；原床架完成1536×1024 PNG原生交付，M轮以最终完整成图执行真实GPU增强并交付3520×2347 JPEG，原图／增强版切换及刷新恢复通过。验收结论与限制见[S8结果](../../../superpowers/plans/2026-10-27-image-processing-worker-s8-results.md)。该照片验收不扩大未校准像素域或其他GPU／安装资格，历史失败与Unknown保持。
+
+图像 Worker S7已完成主线同步、固定源码独立审阅、干净镜像构建和测试环境同镜像发布；实际容器内存、CPU、图像预算、schema、新Worker心跳、原任务保留与桌面入口已读回，发布及恢复材料另行保存。S6限定负载与长稳按原分轮证据复用；资源仍由部署方配置，超过已测像素域的增强输入保持未校准暂停。S8所定真实模型、原照片、整图GPU增强与用户画质确认已完成；商业／生产就绪项继续按本页逐项验收。
 
 M5 开发及同产物开发测试发布已完成，待用户验收：固定业务源码已中文服务器本地提交 304f313，独立新 SSH 核 25 文件工作／提交摘要一致；该源码的隔离干净构建、完整 typecheck／build 和独立无网络 Sharp PNG 编解码通过。开发 Web／generation Worker 已发布同一镜像，来源、就绪／心跳、维护入口及桌面回读通过；后续文稿闭环提交不作为该产物的构建来源。原 SR-M5-01～12 保留各自步骤／成功定义；公开 F13 v9 初始化加完整业务 2/2 已通过，F13 源码及最终实际证据独审已通过，Spec／Quality PASS、C/I/M=0/0/0，用户验收仍待实际使用确认。开发自测通过不等于用户确认、生产／商业就绪或 M6～M8 已交付，业务就绪结论保持。
 
@@ -114,6 +120,30 @@ curl -fsS -X POST \
 短剧成本概览已改为按用户、项目、任务类型和状态在 PostgreSQL 聚合，并增加项目定向索引；本地执行计划命中 `generation_tasks_user_project_idx`，Canvas、素材和会话分页也具备定向索引路径。该证据只覆盖当前小数据集，仍需在生产等价任务规模下记录 P50/P95/P99、连接池/锁等待和成本账本核对结果。
 
 ## 异步生成与计费闭环
+
+大图Worker开发分支已有结果处理的局部计费验证：确定拒绝按原流水结算，零积分撤销用量；File以持久拒绝回执补齐跨文件结算，PostgreSQL以同事务提交父子状态、退款、用量和失败记录。受控资源失败不会退款，改变有效资源配置后可继续同一结果子任务并拒绝旧执行身份。该证据尚未部署，不代替完整Worker、真实OOM恢复、浏览器、多实例或真实供应商的计费与稳定性验收。
+
+普通非保护Run的4K请求的结果已补CPU Worker、原任务采用与幂等重放检查；本地和对象存储结果另有分项资格，覆盖关闭新写入后的原对象读取及交付。PostgreSQL对象链使用独立测试库和单连接池，原共享库设置完整不变，独立库object设置仅updated_at变化，其余11个非审计字段及runtime缓存恢复。以上未部署，也不代表真实云、多实例容量、其余商品保护/分层/Canvas Run、完整Web像素退出或真实GPU验收。
+
+场景链路新增限定证据：历史inline局部场景Run已在File、PostgreSQL分别验证1024×1024源图和外部确认256×256选区的永久蒙版/final保存、原账单与日志及Agent采用。此前native路径的File轮次已覆盖真实prepare、选区receipt、原生蒙版和新领取后的首份提交；两份ImageTask实际创建，仅copy 1形成一次attempt及原流水消费2积分。源内容旧门与native桥的蒙版字节、其他job来源、流内逻辑/租约变化拒绝均已有分项检查，拒绝前无provider调用或新增扣费，财务及原记录保持。
+
+native场景的File恢复/明确终态重试已补限定验证：蒙版复核并恢复原字节后，用户在同一ImageTask完成首提交；实际查询明确失败后按原流水退款，仅再提交一次并使用新attempt/新消费流水，第二次明确失败终结退款，后继领取为零。原Run逻辑attempt/copy、native证据及第二副本保持。原两门RED 2失败/7名称过滤跳过（9项）与后继GREEN 8通过/1跳过（9项）分轮保留，相邻单元另轮59/59、格式/ESLint/完整Web类型检查通过；不与原6通过等历史轮次累加，源码尚未部署。
+
+当前native局部场景Run的双copy结果已分别通过File与独立单连接PostgreSQL完整正例：真实prepare、认证选区receipt、原生build、新父领取与两份实际POST，随后由各原ImageTask取得native、CPU Worker完成保护合成并消费原结果；原build蒙版永久保留，final、原attempt/账单/日志、Agent资产采用、兄弟copy隔离与完整重放均已核对。enqueue/input/upload/complete/consume五个边界的故障按File与PostgreSQL各自轮次验证；PostgreSQL另有真实原蒙版登记行锁等待及锁后单登记漂移拒绝，完整快照守恒。该锁门不等于租约过期门，也不代替File锁竞争验收。
+
+native Agent技术QA先取得有效业务RED：Web观测为raw 4、stats 2、toBuffer 4，resize/toFile为0；完成记录桥接后，File与独立单连接PostgreSQL分别通过原native及受影响inline两项回归，其中native观察窗口的raw/stats/resize/toBuffer/toFile均为0。inline仅作受影响回归，没有独立spy资格；既有QA套件111/111为另一轮。新增当前final同长度损坏与真实uniform_scale映射两案，File、PostgreSQL各自独立两项通过：前者按实际文件摘要阻断并暂停，后者由512×512原生图经CPU Worker得到1024×1024结果并被Agent采用，两案各自五项Web像素调用为0，原媒体、保护像素、账本与重放后继保持。该资格限定这些native观察窗口，不证明pixel_grid_scale、其他Web像素入口或整条/create通过。
+
+native PostgreSQL生命周期分项：用户蒙版复核恢复项在原两项轮次中通过；明确终态重试项当轮已到首轮失败与退款，但第二提交被PostgreSQL空结果载荷判断阻断，构成有效业务RED。修正该单一空载荷判断后，原PostgreSQL重试项独立通过，实际第二attempt/新消费流水、原流水退款、第二次明确失败终结、无第三create与终态重放均到达；受影响File重试项另轮通过。原前置失败与业务RED保留，恢复项、重试后继和File回归不合并为同轮全过。
+
+参考恢复与连续性按独立轮次记录，原720秒组合超时保留，不能据拆分通过推断超时根因或单轮全套通过。启用用户图片配额另轮取得独立单连接PostgreSQL四项通过（4通过/23名称过滤，27项）：消费2积分与真实零积分分别覆盖成功消费/重放和两次明确失败/退款/终态重放。有限dailyImages=1时，成功沿原native、三输入CPU结果Worker和原消费保持用量1且不重复扣费；失败按不同生产attempt键与原流水退款，用量1→0→1→0，零积分也保存真实消费/退款记录，终态后领取0、recover 409且无第三次创建。原兄弟copy、源图/蒙版及prepare/build保持，测试计划/分配清理与设置语义恢复已核对。该轮不包含日积分桶、付费订单、系统全局代理或多人容量验收。
+
+W7原生场景4K基线冻结先取得有效File业务RED：真实prepare、认证Action、build、claim B与两份实际POST/pending及守恒均通过，原build未冻结baseline、两delivery缺失，在qualified基线断言失败；诊断窗五项为0，后续delivery严格相等及最终五零断言当轮未到。补齐producer→POST桥后，File 1通过/18名称过滤（19项）、独立单连接PostgreSQL 1通过/26名称过滤（27项）分别通过：原build请求freezeEnhancementBaseline并返回qualified local_edit，两份原ImageTask的delivery严格等于该Worker基线和原源图/蒙版契约；覆盖claim B、源/蒙版复核、POST及pending GET的广域Web观察raw/stats/resize/toBuffer/toFile均为0，原字节/阶段/登记和无provider/无扣费守恒保持。既有delivery套件27/27、受影响低清native与inline在File和PostgreSQL各两项回归分别另轮通过，不合并统计，也不授予4K结果资格。此资格仅到实际POST冻结；流式故障、4K结果selector/Worker/消费/Agent与最终发布尚未验证，增强默认false、GPU未运行。
+
+native创建响应不确定另轮取得独立单连接PostgreSQL限定资格（1通过/27名称过滤，28项，仅2积分且启用dailyImages=1）：受控provider完整接收原源图/蒙版multipart后真实消费一次，客户端实际取得计费headers并开始真实JSON解析，屏障随后中断响应body，自然产生原typed Uncertain。原ImageTask保持running/needs_review、原attempt和消费/图片用量保留，不退款或自动再创建；后继batch领取0、真实认证TCP GET 200/recover 409，以及携原请求key的实际认证create Route重放200并返回原ID均到达，每步完整原始任务/媒体/财务快照守恒。charged解析wrapper未到达；create-key重放不是原HTTP body的wire重放，受控provider不代表系统全局代理或真实供应商整链。该项不授予File、零积分、日积分桶、订单或容量资格。
+
+增强发布隔离的File/local_edit真实代表链及PostgreSQL资产等锁拒绝/回滚仍各保原有限资格。当前Standalone严格构建、交付目录常驻Worker/短子进程的7997×5334参考图链、HTTP/SSE与Chromium刷新已补证；业务用例和三项必要初始化通过，原外层退出码1因资源组消失时观测失败而保留，清理另有原回执与只读核对。最新Standalone和最终镜像同一小图保护输出一致，Sharp/libvips、普通用户、runtime/运行脚本及默认静态资源分发通过；首次旧URL断言RED保留历史，不将各轮拼成一次总通过。
+
+S3/S4技术开发、S5运行资源配置与所定分轮工程验证已完成，分项范围见[推进SOP](../../../superpowers/plans/2026-10-27-image-processing-worker-sop.md)。S6另轮已补单L Worker的1/5/10/20用户39项、20用户约62分钟加10分钟空闲400项，以及Chromium等待/恢复/取消/大风格图代表链。实测Web零失败、无OOM、空闲Worker约79MiB；资源可配置，64MP只授风格prepare资格。受控上游及有限故障证据不代表生产或商业就绪；S7后继测试发布已完成，S8所定原照片生成及整图增强已获用户确认，见本页前述记录；其他GPU资格、容量校准和生产就绪仍按各自范围核定。
 
 图片、视频、音频和 Agent 任务需要在真实渠道下验证排队、超时、取消、重试、断线恢复、重复提交和卡死任务接管。每个任务都应能与原消费流水、失败退款、用户余额、生成记录和媒体登记逐项核对；重启和多实例竞争不能造成重复扣费、重复资产或“任务失败但积分未退”。
 

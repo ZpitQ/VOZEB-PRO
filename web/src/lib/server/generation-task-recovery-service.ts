@@ -6,6 +6,8 @@ import { getVideoTask, type VideoTask } from "@/lib/server/video-task-store";
 import { createAudioTaskUpstreamStep, markAudioTaskFailed, persistAudioTaskResult, queryAudioTaskUpstreamStep } from "@/lib/server/audio-task-runtime";
 import { getAudioTask, updateAudioTask, type AudioTask } from "@/lib/server/audio-task-store";
 import { createImageTaskUpstreamStep, markImageTaskFailed, persistImageTaskResult, prepareImageTaskAutomaticRetry, queryCancelledImageTaskUpstreamStep, queryImageTaskUpstreamStep } from "@/lib/server/image-task-runtime";
+import { consumeCompletedImageTaskResultProcessing, ensureImageTaskResultProcessing } from "@/lib/server/image-task-result-processing";
+import { usesImageTaskResultProcessing } from "@/lib/server/image-task-result-contract";
 import { getImageTask, updateImageTask, type ImageTask } from "@/lib/server/image-task-store";
 import { getTextTask, updateTextTask } from "@/lib/server/text-task-store";
 import { queryCancelledTextTaskUpstreamStep, runTextTaskStep } from "@/lib/server/text-task-runtime";
@@ -29,9 +31,8 @@ export async function runGenerationTaskRecoveryBatch(input: { origin: string; pu
     const leases = await claimDueGenerationTasks({ workerId, limit: input.limit, taskIds: input.taskIds, leaseMs: 90_000 });
     if (!leases.length) return { claimed: 0, pending: 0, resultReady: 0, completed: 0, failed: 0, needsReview: 0, deferred: 0 };
 
-    const taskIds = leases.map((lease) => lease.id);
     const heartbeat = setInterval(() => {
-        void renewGenerationTaskLeases(workerId, taskIds, 90_000).catch((error) => console.error("Generation worker lease heartbeat failed", { workerId, error }));
+        void renewGenerationTaskLeases(workerId, leases, 90_000).catch((error) => console.error("Generation worker lease heartbeat failed", { workerId, error }));
     }, 25_000);
     try {
         const persistence = leases.filter(needsPersistence);
@@ -62,7 +63,13 @@ async function processGenerationTaskLease(lease: GenerationTaskLease, workerId: 
 async function processCancelledLease(lease: GenerationTaskLease, workerId: string, origin: string): Promise<RecoveryResult> {
     const target = await cancelledTaskTarget(lease);
     if (!target) {
-        await releaseGenerationTaskLease(lease.type, lease.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "cancelled_task_missing" }, { cancellation: true });
+        await releaseGenerationTaskLease(
+            lease.type,
+            lease.id,
+            workerId,
+            { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "cancelled_task_missing" },
+            { cancellation: true, ...(lease.type === "image" ? { executionId: lease.executionId } : {}) },
+        );
         return "completed";
     }
     const now = Date.now();
@@ -89,7 +96,7 @@ async function processCancelledLease(lease: GenerationTaskLease, workerId: strin
                 lastUpstreamStatus: cancellation === "accepted" ? "cancel_accepted_polling" : cancellation === "unsupported" ? "cancel_unsupported_polling" : "cancel_deferred_polling",
                 resultPayload: { ...lease.resultPayload, cancellationRequestedAt: requestedAt },
             },
-            { cancellation: true },
+            { cancellation: true, ...(lease.type === "image" ? { executionId: lease.executionId } : {}) },
         );
         return cancellation === "deferred" ? "deferred" : "pending";
     }
@@ -114,7 +121,7 @@ async function processCancelledLease(lease: GenerationTaskLease, workerId: strin
                 lastUpstreamStatus: `cancel_polling:${status.status}`,
                 resultPayload: { ...lease.resultPayload, cancellationRequestedAt: requestedAt },
             },
-            { cancellation: true },
+            { cancellation: true, ...(lease.type === "image" ? { executionId: lease.executionId } : {}) },
         );
         return "pending";
     } catch (error) {
@@ -130,7 +137,7 @@ async function processCancelledLease(lease: GenerationTaskLease, workerId: strin
                 lastUpstreamStatus: `cancel_query_error:${count}`,
                 resultPayload: { ...lease.resultPayload, cancellationRequestedAt: requestedAt },
             },
-            { cancellation: true },
+            { cancellation: true, ...(lease.type === "image" ? { executionId: lease.executionId } : {}) },
         );
         console.warn("Cancelled generation task reconciliation deferred", { taskId: lease.id, type: lease.type, error: safeError(error) });
         return "deferred";
@@ -191,7 +198,13 @@ async function queryCancelledUpstream(target: GenerationCancellationTarget, orig
 
 async function finishCancelledLease(target: GenerationCancellationTarget, lease: GenerationTaskLease, workerId: string, status: string) {
     if (status !== "cancel_unconfirmed" && status !== "cancelled_task_missing") await refundCancelledTask(target);
-    await releaseGenerationTaskLease(lease.type, lease.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastPollAt: Date.now(), lastUpstreamStatus: status }, { cancellation: true });
+    await releaseGenerationTaskLease(
+        lease.type,
+        lease.id,
+        workerId,
+        { executionPhase: "completed", nextPollAt: undefined, lastPollAt: Date.now(), lastUpstreamStatus: status },
+        { cancellation: true, ...(lease.type === "image" ? { executionId: lease.executionId } : {}) },
+    );
     await redactCancelledTaskSecret(target).catch((error) => console.warn("Cancelled generation task secret cleanup failed", { taskId: target.taskId, type: target.type, error: safeError(error) }));
 }
 
@@ -244,21 +257,35 @@ function cancellationSubmissionPhase(lease: GenerationTaskLease) {
 async function processAgentLease(lease: GenerationTaskLease, workerId: string, origin: string, cookie: string): Promise<RecoveryResult> {
     const run = await getAgentRun(lease.id);
     if (run?.status === "completed" && !run.reviewed && (lease.executionPhase === "review_pending" || lease.executionPhase === "reviewing")) {
-        const result = await processAgentRunReview(run, origin, cookie || maintenanceWorkerContext(run.userId));
+        const result = await processAgentRunReview(run, origin, cookie || maintenanceWorkerContext(run.userId), lease);
+        if (result.status === "waiting") return "deferred";
+        if (result.status === "ownership_lost") return "deferred";
         const latest = await getAgentRun(run.id);
         if (latest?.status === "completed" && !latest.reviewed) {
-            await releaseGenerationTaskLease("agent", run.id, workerId, { executionPhase: "review_pending", nextPollAt: generationTaskNextPollAt({ submittedAt: lease.submittedAt || run.createdAt }), lastUpstreamStatus: "review_pending" });
+            await releaseGenerationTaskLease(
+                "agent",
+                run.id,
+                workerId,
+                { executionPhase: "review_pending", nextPollAt: generationTaskNextPollAt({ submittedAt: lease.submittedAt || run.createdAt }), lastUpstreamStatus: "review_pending" },
+                { executionId: lease.executionId },
+            );
             return "completed";
         }
-        await releaseGenerationTaskLease("agent", run.id, workerId, {
-            executionPhase: result.status === "unavailable" ? "review_unavailable" : "completed",
-            nextPollAt: undefined,
-            lastUpstreamStatus: result.status === "unavailable" ? "review_unavailable" : "review_completed",
-        });
+        await releaseGenerationTaskLease(
+            "agent",
+            run.id,
+            workerId,
+            {
+                executionPhase: result.status === "unavailable" ? "review_unavailable" : "completed",
+                nextPollAt: undefined,
+                lastUpstreamStatus: result.status === "unavailable" ? "review_unavailable" : "review_completed",
+            },
+            { executionId: lease.executionId },
+        );
         return "completed";
     }
     if (!run || run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "paused") {
-        await releaseGenerationTaskLease("agent", lease.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: run?.status || "missing" });
+        await releaseGenerationTaskLease("agent", lease.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: run?.status || "missing" }, { executionId: lease.executionId });
         return run?.status === "completed" ? "completed" : "failed";
     }
     try {
@@ -425,9 +452,10 @@ async function processTextLease(lease: GenerationTaskLease, workerId: string, or
 async function processImageLease(lease: GenerationTaskLease, workerId: string, origin: string, publicOrigin: string, cookie: string, userRequested: boolean): Promise<RecoveryResult> {
     let task = await getImageTask(lease.id);
     if (!task || task.status === "success" || task.status === "cancelled") {
-        await releaseGenerationTaskLease("image", lease.id, workerId, { executionPhase: "completed", nextPollAt: undefined });
+        await releaseGenerationTaskLease("image", lease.id, workerId, { executionPhase: "completed", nextPollAt: undefined }, { executionId: lease.executionId });
         return "completed";
     }
+    if (usesImageTaskResultProcessing(task) && (!lease.executionId || task.executionId !== lease.executionId)) return "deferred";
     if (!task.upstream?.id && lease.upstreamTaskId) {
         const providerBase = task.config.baseUrl.startsWith("/") ? new URL(task.config.baseUrl, origin).toString() : task.config.baseUrl;
         const restored = await updateImageTask(task.id, {
@@ -439,12 +467,18 @@ async function processImageLease(lease: GenerationTaskLease, workerId: string, o
             },
         });
         if (!restored?.upstream?.id) {
-            await releaseGenerationTaskLease("image", lease.id, workerId, {
-                executionPhase: "needs_review",
-                nextPollAt: undefined,
-                lastUpstreamStatus: "upstream_identity_restore_failed",
-                resultPayload: reviewPayload(lease, "图片任务的上游身份无法恢复，请重新检查任务状态"),
-            });
+            await releaseGenerationTaskLease(
+                "image",
+                lease.id,
+                workerId,
+                {
+                    executionPhase: "needs_review",
+                    nextPollAt: undefined,
+                    lastUpstreamStatus: "upstream_identity_restore_failed",
+                    resultPayload: reviewPayload(lease, "图片任务的上游身份无法恢复，请重新检查任务状态"),
+                },
+                { executionId: lease.executionId },
+            );
             return "needs_review";
         }
         task = restored;
@@ -452,24 +486,36 @@ async function processImageLease(lease: GenerationTaskLease, workerId: string, o
     if (lease.executionPhase === "submitting" && !lease.upstreamTaskId && task.status === "running") {
         if (task.upstream?.id) {
             const submittedAt = lease.submittedAt || Date.now();
-            await releaseGenerationTaskLease("image", lease.id, workerId, {
-                executionPhase: "submitted",
-                upstreamTaskId: task.upstream.id,
-                channelId: task.config.channelId,
-                provider: task.config.advancedConfig?.protocol || task.config.apiFormat,
-                queryPath: task.upstream.explicitPollUrl || task.config.advancedConfig?.queryPath,
-                submittedAt,
-                nextPollAt: submittedAt,
-                lastUpstreamStatus: "recovered_submitted",
-            });
+            await releaseGenerationTaskLease(
+                "image",
+                lease.id,
+                workerId,
+                {
+                    executionPhase: "submitted",
+                    upstreamTaskId: task.upstream.id,
+                    channelId: task.config.channelId,
+                    provider: task.config.advancedConfig?.protocol || task.config.apiFormat,
+                    queryPath: task.upstream.explicitPollUrl || task.config.advancedConfig?.queryPath,
+                    submittedAt,
+                    nextPollAt: submittedAt,
+                    lastUpstreamStatus: "recovered_submitted",
+                },
+                { executionId: lease.executionId },
+            );
             return "pending";
         }
-        await releaseGenerationTaskLease("image", lease.id, workerId, {
-            executionPhase: "needs_review",
-            nextPollAt: undefined,
-            lastUpstreamStatus: "submission_outcome_unknown",
-            resultPayload: reviewPayload(lease, "图片任务在提交阶段中断，未取得上游任务 ID"),
-        });
+        await releaseGenerationTaskLease(
+            "image",
+            lease.id,
+            workerId,
+            {
+                executionPhase: "needs_review",
+                nextPollAt: undefined,
+                lastUpstreamStatus: "submission_outcome_unknown",
+                resultPayload: reviewPayload(lease, "图片任务在提交阶段中断，未取得上游任务 ID"),
+            },
+            { executionId: lease.executionId },
+        );
         return "needs_review";
     }
     if (needsPersistence(lease)) return persistImageLease(task, lease, workerId, origin, cookie, userRequested);
@@ -492,64 +538,82 @@ async function processImageLease(lease: GenerationTaskLease, workerId: string, o
                             lastPollAt: now,
                             lastUpstreamStatus: "automatic_retry_after_upstream_failure",
                         },
-                        { resetUpstreamIdentity: true },
+                        { resetUpstreamIdentity: true, executionId: lease.executionId },
                     );
                     return "pending";
                 }
             }
             await markImageTaskFailed(task, step.error);
-            await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastPollAt: now, lastUpstreamStatus: step.status });
+            await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastPollAt: now, lastUpstreamStatus: step.status }, { executionId: lease.executionId });
             return "failed";
         }
         if (step.state === "needs_review") {
             const latest = (await getImageTask(task.id)) || task;
-            await releaseGenerationTaskLease("image", task.id, workerId, {
-                executionPhase: "needs_review",
-                upstreamTaskId: latest.upstream?.id || lease.upstreamTaskId,
-                channelId: latest.config.channelId,
-                provider: latest.config.advancedConfig?.protocol || latest.config.apiFormat,
-                queryPath: latest.config.advancedConfig?.queryPath,
-                nextPollAt: undefined,
-                lastPollAt: now,
-                lastUpstreamStatus: `${step.status}:${step.reason}`.slice(0, 500),
-                resultPayload: reviewPayload(lease, step.reason),
-            });
+            await releaseGenerationTaskLease(
+                "image",
+                task.id,
+                workerId,
+                {
+                    executionPhase: "needs_review",
+                    upstreamTaskId: latest.upstream?.id || lease.upstreamTaskId,
+                    channelId: latest.config.channelId,
+                    provider: latest.config.advancedConfig?.protocol || latest.config.apiFormat,
+                    queryPath: latest.config.advancedConfig?.queryPath,
+                    nextPollAt: undefined,
+                    lastPollAt: now,
+                    lastUpstreamStatus: `${step.status}:${step.reason}`.slice(0, 500),
+                    resultPayload: reviewPayload(lease, step.reason),
+                },
+                { executionId: lease.executionId },
+            );
             return "needs_review";
         }
         if (step.state === "completed") {
-            await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "persisted" });
+            await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "persisted" }, { executionId: lease.executionId });
             return "completed";
         }
         if (step.state === "result_ready") {
-            await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "result_ready", nextPollAt: now, lastPollAt: now, lastUpstreamStatus: step.status, resultPayload: { url: step.resultUrl } });
+            await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "result_ready", nextPollAt: now, lastPollAt: now, lastUpstreamStatus: step.status, resultPayload: { url: step.resultUrl } }, { executionId: lease.executionId });
             return "result_ready";
         }
         const latest = (await getImageTask(task.id)) || task;
         if (automaticQueryWindowExpired(lease, latest.config, "image", now, userRequested)) {
-            await releaseGenerationTaskLease("image", task.id, workerId, {
-                executionPhase: "needs_review",
+            await releaseGenerationTaskLease(
+                "image",
+                task.id,
+                workerId,
+                {
+                    executionPhase: "needs_review",
+                    upstreamTaskId: step.upstream.id,
+                    channelId: latest.config.channelId,
+                    provider: latest.config.advancedConfig?.protocol || latest.config.apiFormat,
+                    queryPath: latest.upstream?.explicitPollUrl || latest.config.advancedConfig?.queryPath,
+                    nextPollAt: undefined,
+                    lastPollAt: now,
+                    lastUpstreamStatus: `query_window_elapsed:${step.status}`,
+                    resultPayload: reviewPayload(lease, queryWindowReviewReason("图片")),
+                },
+                { executionId: lease.executionId },
+            );
+            return "needs_review";
+        }
+        await releaseGenerationTaskLease(
+            "image",
+            task.id,
+            workerId,
+            {
+                executionPhase: latest.upstream?.id ? "polling" : "submitted",
                 upstreamTaskId: step.upstream.id,
                 channelId: latest.config.channelId,
                 provider: latest.config.advancedConfig?.protocol || latest.config.apiFormat,
-                queryPath: latest.upstream?.explicitPollUrl || latest.config.advancedConfig?.queryPath,
-                nextPollAt: undefined,
-                lastPollAt: now,
-                lastUpstreamStatus: `query_window_elapsed:${step.status}`,
-                resultPayload: reviewPayload(lease, queryWindowReviewReason("图片")),
-            });
-            return "needs_review";
-        }
-        await releaseGenerationTaskLease("image", task.id, workerId, {
-            executionPhase: latest.upstream?.id ? "polling" : "submitted",
-            upstreamTaskId: step.upstream.id,
-            channelId: latest.config.channelId,
-            provider: latest.config.advancedConfig?.protocol || latest.config.apiFormat,
-            queryPath: latest.config.advancedConfig?.queryPath,
-            submittedAt: lease.submittedAt || now,
-            nextPollAt: generationTaskNextPollAt({ submittedAt: lease.submittedAt || now, now }),
-            lastPollAt: latest.upstream?.id ? now : undefined,
-            lastUpstreamStatus: step.status,
-        });
+                queryPath: latest.config.advancedConfig?.queryPath,
+                submittedAt: lease.submittedAt || now,
+                nextPollAt: generationTaskNextPollAt({ submittedAt: lease.submittedAt || now, now }),
+                lastPollAt: latest.upstream?.id ? now : undefined,
+                lastUpstreamStatus: step.status,
+            },
+            { executionId: lease.executionId },
+        );
         return "pending";
     } catch (error) {
         const latest = await getImageTask(task.id);
@@ -558,71 +622,105 @@ async function processImageLease(lease: GenerationTaskLease, workerId: string, o
         const submitted = Boolean(upstreamTaskId);
         const now = Date.now();
         if (submitted && automaticQueryWindowExpired(lease, latest?.config || task.config, "image", now, userRequested)) {
-            await releaseGenerationTaskLease("image", task.id, workerId, {
-                executionPhase: "needs_review",
+            await releaseGenerationTaskLease(
+                "image",
+                task.id,
+                workerId,
+                {
+                    executionPhase: "needs_review",
+                    upstreamTaskId,
+                    channelId: latest?.config.channelId,
+                    provider: latest ? latest.config.advancedConfig?.protocol || latest.config.apiFormat : undefined,
+                    queryPath: latest?.upstream?.explicitPollUrl || latest?.config.advancedConfig?.queryPath || lease.queryPath,
+                    nextPollAt: undefined,
+                    lastPollAt: now,
+                    lastUpstreamStatus: "query_window_elapsed:error",
+                    resultPayload: reviewPayload(lease, queryWindowReviewReason("图片")),
+                },
+                { executionId: lease.executionId },
+            );
+            return "needs_review";
+        }
+        await releaseGenerationTaskLease(
+            "image",
+            task.id,
+            workerId,
+            {
+                executionPhase: submitted ? "polling" : "needs_review",
                 upstreamTaskId,
                 channelId: latest?.config.channelId,
                 provider: latest ? latest.config.advancedConfig?.protocol || latest.config.apiFormat : undefined,
-                queryPath: latest?.upstream?.explicitPollUrl || latest?.config.advancedConfig?.queryPath || lease.queryPath,
-                nextPollAt: undefined,
-                lastPollAt: now,
-                lastUpstreamStatus: "query_window_elapsed:error",
-                resultPayload: reviewPayload(lease, queryWindowReviewReason("图片")),
-            });
-            return "needs_review";
-        }
-        await releaseGenerationTaskLease("image", task.id, workerId, {
-            executionPhase: submitted ? "polling" : "needs_review",
-            upstreamTaskId,
-            channelId: latest?.config.channelId,
-            provider: latest ? latest.config.advancedConfig?.protocol || latest.config.apiFormat : undefined,
-            queryPath: latest?.upstream?.explicitPollUrl || latest?.config.advancedConfig?.queryPath,
-            nextPollAt: submitted ? generationTaskNextPollAt({ consecutiveErrors: count }) : undefined,
-            lastPollAt: Date.now(),
-            lastUpstreamStatus: submitted ? `query_error:${count}` : "submission_outcome_unknown",
-            ...(!submitted ? { resultPayload: reviewPayload(lease, safeReviewReason(error, "图片任务创建结果未知")) } : {}),
-        });
+                queryPath: latest?.upstream?.explicitPollUrl || latest?.config.advancedConfig?.queryPath,
+                nextPollAt: submitted ? generationTaskNextPollAt({ consecutiveErrors: count }) : undefined,
+                lastPollAt: Date.now(),
+                lastUpstreamStatus: submitted ? `query_error:${count}` : "submission_outcome_unknown",
+                ...(!submitted ? { resultPayload: reviewPayload(lease, safeReviewReason(error, "图片任务创建结果未知")) } : {}),
+            },
+            { executionId: lease.executionId },
+        );
         console.warn("Image task step deferred", { taskId: task.id, error: safeError(error) });
         return submitted ? "deferred" : "needs_review";
     }
 }
 
 async function persistImageLease(task: ImageTask, lease: GenerationTaskLease, workerId: string, origin: string, cookie: string, userRequested: boolean): Promise<RecoveryResult> {
+    if (usesImageTaskResultProcessing(task) && (!lease.executionId || task.executionId !== lease.executionId)) return "deferred";
+    if (task.nativeResults) {
+        if (!lease.executionId) return "deferred";
+        const outcome = await ensureImageTaskResultProcessing({ taskId: lease.id, workerId, executionId: lease.executionId });
+        if (outcome.state === "waiting") return "pending";
+        if (outcome.state === "waiting_for_run" || outcome.state === "ownership_lost") return "deferred";
+        const consumed = await consumeCompletedImageTaskResultProcessing({ taskId: lease.id, workerId, executionId: lease.executionId });
+        return consumed.state === "completed" ? "completed" : "deferred";
+    }
     const resultUrl = typeof lease.resultPayload?.url === "string" ? lease.resultPayload.url.trim() : "";
     if (!resultUrl) {
         await markImageTaskFailed(task, "图片任务已完成但没有返回图片地址");
-        await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "result_url_missing" });
+        await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "result_url_missing" }, { executionId: lease.executionId });
         return "failed";
     }
     await scheduleGenerationTask("image", task.id, { executionPhase: "persisting", nextPollAt: lease.nextPollAt });
     try {
         const completed = await persistImageTaskResult(task, origin, resultUrl, cookie, cookie ? "" : task.userId);
         if (completed?.status === "error") {
-            await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "transparent_output_invalid" });
+            await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "transparent_output_invalid" }, { executionId: lease.executionId });
             return "failed";
         }
+        if (completed?.nativeResults && completed.status === "running") return "pending";
         if (!completed || completed.status !== "success") throw new Error("图片结果保存后未进入成功状态");
-        await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "persisted" });
+        await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "persisted" }, { executionId: lease.executionId });
         return "completed";
     } catch (error) {
         const count = errorCount(lease.lastUpstreamStatus) + 1;
         const now = Date.now();
         const persistenceStartedAt = persistenceRecoveryStartedAt(lease, now);
         if (persistenceWindowExpired(lease, task.config, "image", now, userRequested)) {
-            await releaseGenerationTaskLease("image", task.id, workerId, {
-                executionPhase: "needs_review",
-                nextPollAt: undefined,
-                lastUpstreamStatus: "persist_window_elapsed",
-                resultPayload: reviewPayload({ ...lease, resultPayload: { ...lease.resultPayload, persistenceStartedAt } }, persistenceWindowReviewReason("图片")),
-            });
+            await releaseGenerationTaskLease(
+                "image",
+                task.id,
+                workerId,
+                {
+                    executionPhase: "needs_review",
+                    nextPollAt: undefined,
+                    lastUpstreamStatus: "persist_window_elapsed",
+                    resultPayload: reviewPayload({ ...lease, resultPayload: { ...lease.resultPayload, persistenceStartedAt } }, persistenceWindowReviewReason("图片")),
+                },
+                { executionId: lease.executionId },
+            );
             return "needs_review";
         }
-        await releaseGenerationTaskLease("image", task.id, workerId, {
-            executionPhase: "persisting",
-            nextPollAt: generationTaskNextPollAt({ consecutiveErrors: count }),
-            lastUpstreamStatus: `persist_error:${count}`,
-            resultPayload: { ...lease.resultPayload, persistenceStartedAt },
-        });
+        await releaseGenerationTaskLease(
+            "image",
+            task.id,
+            workerId,
+            {
+                executionPhase: "persisting",
+                nextPollAt: generationTaskNextPollAt({ consecutiveErrors: count }),
+                lastUpstreamStatus: `persist_error:${count}`,
+                resultPayload: { ...lease.resultPayload, persistenceStartedAt },
+            },
+            { executionId: lease.executionId },
+        );
         console.warn("Image result persistence deferred", { taskId: task.id, error: safeError(error) });
         return "deferred";
     }

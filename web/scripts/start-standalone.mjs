@@ -21,7 +21,7 @@ const runtime = generationRuntimeEnvironment({
     },
 });
 process.exitCode = await superviseGenerationRuntime({
-    app: { command: process.execPath, args: ["server.js"], cwd: standaloneRoot },
+    app: { command: process.execPath, args: [`--max-old-space-size=${runtime.environment.VOZEB_PRO_WEB_HEAP_MB ?? 384}`, "--import", "./scripts/web-resource-preload.mjs", "server.js"], cwd: standaloneRoot },
     workerScript: path.join(webRoot, "scripts", "generation-worker.mjs"),
     environment: runtime.environment,
 });

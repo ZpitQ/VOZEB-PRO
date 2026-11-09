@@ -290,13 +290,13 @@ CREATE TABLE IF NOT EXISTS generation_tasks (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     expires_at timestamptz NOT NULL,
-    CONSTRAINT generation_tasks_type CHECK (task_type IN ('text', 'image', 'video', 'audio', 'agent', 'render')),
+    CONSTRAINT generation_tasks_type CHECK (task_type IN ('text', 'image', 'video', 'audio', 'agent', 'render', 'image_processing')),
     CONSTRAINT generation_tasks_status CHECK (status IN ('pending', 'running', 'success', 'error', 'paused', 'cancelled'))
 );
 
 CREATE INDEX IF NOT EXISTS generation_tasks_user_status_idx ON generation_tasks (user_id, task_type, status, updated_at DESC);
 ALTER TABLE generation_tasks DROP CONSTRAINT IF EXISTS generation_tasks_type;
-ALTER TABLE generation_tasks ADD CONSTRAINT generation_tasks_type CHECK (task_type IN ('text', 'image', 'video', 'audio', 'agent', 'render'));
+ALTER TABLE generation_tasks ADD CONSTRAINT generation_tasks_type CHECK (task_type IN ('text', 'image', 'video', 'audio', 'agent', 'render', 'image_processing'));
 ALTER TABLE generation_tasks DROP CONSTRAINT IF EXISTS generation_tasks_status;
 ALTER TABLE generation_tasks ADD CONSTRAINT generation_tasks_status CHECK (status IN ('pending', 'running', 'success', 'error', 'paused', 'cancelled'));
 CREATE INDEX IF NOT EXISTS generation_tasks_expires_idx ON generation_tasks (expires_at);
@@ -473,8 +473,11 @@ CREATE TABLE IF NOT EXISTS local_media_assets (
     expires_at timestamptz,
     CONSTRAINT local_media_assets_scope CHECK (scope IN ('generation', 'reference')),
     CONSTRAINT local_media_assets_class CHECK (storage_class IN ('temporary', 'permanent')),
-    CONSTRAINT local_media_assets_type CHECK (type IN ('image', 'video', 'audio'))
+    CONSTRAINT local_media_assets_type CHECK (type IN ('image', 'video', 'audio', 'attachment'))
 );
+
+ALTER TABLE local_media_assets DROP CONSTRAINT IF EXISTS local_media_assets_type;
+ALTER TABLE local_media_assets ADD CONSTRAINT local_media_assets_type CHECK (type IN ('image', 'video', 'audio', 'attachment'));
 
 CREATE INDEX IF NOT EXISTS local_media_assets_owner_created_idx ON local_media_assets (owner_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS local_media_assets_source_idx ON local_media_assets (source, created_at DESC);

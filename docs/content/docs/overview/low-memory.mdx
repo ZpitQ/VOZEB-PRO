@@ -5,20 +5,18 @@ description: 使用发布镜像和外部 PostgreSQL 运行 VOZEB PRO
 
 # 低内存服务器部署
 
-低内存机器不要现场执行 `next build` 或 `docker build`。`docker-compose.lowmem.yml` 只运行 VOZEB PRO 应用，PostgreSQL 使用外部托管服务或另一台服务器。
+低内存机器不要现场执行 `next build` 或 `docker build`。`docker-compose.lowmem.yml` 运行 Web 和独立生成 Worker，PostgreSQL 使用外部托管服务或另一台服务器。
 
-## 最低资源边界
+## 资源边界
 
-建议整台服务器至少提供：
+先核算 Web、每个 Worker、系统和其他服务的总预算，再选择整机资源。完整图像 Worker 须显式配置总内存与图像预算；本页不提供未经验证的最低整机容量或并发人数。运行环境仍需：
 
-- 1 vCPU。
-- 1GB 物理内存和至少 1GB swap。
 - 10GB SSD 可用空间。
 - 64 位 Linux、Docker Engine 与 Compose v2。
 - 外部 PostgreSQL 16 和外部 S3/OSS，避免数据库与长期媒体继续占用这台低内存服务器。
 - HTTPS 域名，以及能够访问模型、数据库、对象存储和 SMTP 的出站网络。
 
-应用容器本身限制为 512MB，但宿主机还需要给 Linux、Docker、Nginx/宝塔和文件缓存保留内存，因此不建议购买只有 512MB 物理内存的服务器。该模式适合安装体验、个人低频使用和少量并发，不适合在本机执行 Docker 构建、长视频转码或短剧整集合成。
+Web 默认总限额为 `512m`；独立 Worker 的完整总量另行配置，包含监督进程、全部图像 child 和原生分配。宿主机还须给 Linux、Docker、Nginx/宝塔和文件缓存留出余量；Web 的限额不是整个部署的内存预算。
 
 ## 配置
 
@@ -33,8 +31,15 @@ NEXT_PUBLIC_SITE_URL=https://vozeb-pro.example.com
 DATABASE_URL=postgres://user:password@database-host:5432/vozeb_pro
 VOZEB_PRO_DATABASE_SSL=1
 VOZEB_PRO_DATABASE_POOL_MAX=5
-VOZEB_PRO_ENCRYPTION_KEY=replace-with-a-long-random-secret
+VOZEB_PRO_ENCRYPTION_KEY=填写 openssl rand -hex 32 的输出
+VOZEB_PRO_INSTALL_TOKEN=至少32位的一次性安装令牌
+VOZEB_PRO_MAINTENANCE_TOKEN=至少32位的独立维护令牌
+VOZEB_PRO_WORKER_TOKEN=至少32位且不同于维护令牌的Worker令牌
 ```
+
+还须显式填写 `VOZEB_PRO_GENERATION_WORKER_MEMORY_MB`、`VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB`、`VOZEB_PRO_GENERATION_WORKER_CPUS` 和 `VOZEB_PRO_WORKER_STOP_GRACE_PERIOD`；所有 `_MB` 均为 MiB。完整变量表、覆盖顺序及本轮 S/L 实测范围见 [Docker 部署](./docker) 的“图像 Worker 资源与准入”。
+
+`.env.example` 的 Web 总限额和监督堆留空时，lowmem 保留各自的 `512m` 和 `64 MiB` 默认；child 堆仍独立默认 `384 MiB`，每副本默认一个图像槽。
 
 ## 启动
 
@@ -43,13 +48,17 @@ docker compose -f docker-compose.lowmem.yml pull
 docker compose -f docker-compose.lowmem.yml up -d
 ```
 
-该配置限制应用容器：
+该配置的 Web 默认值为：
 
-- 512MB 内存。
-- 768MB 内存与 swap 总上限。
-- Node.js 堆内存 384MB。
-- 线程池大小 2。
+- `512m` 总内存。
+- `768m` 内存与 swap 总上限。
+- `384 MiB` Web 堆。
+- 线程池大小 `2`。
 
-建议保留 512MB 到 1GB swap。PostgreSQL 和模型服务可以放在外部，但应用服务器仍需挂载 `VOZEB_PRO_DATA_DIR` 以保存图片、视频和音频。
+Worker 监督堆默认 `64 MiB`，总量和图像预算来自显式配置；其内存与内存加 swap 限额相等，没有额外 swap 预算。监督堆 `64 MiB` 不是完整 Worker 只需这么多内存。Web/监督/child 三层堆必须分别核对，不能互相代替。
 
-如果已启用 S3/OSS，新媒体不会保留本地持久副本，但 FFmpeg、视频下载和格式规范化仍可能使用临时磁盘。需要稳定使用 `/create` 的图片、视频多结果生成时建议升级到 2 vCPU / 2GB；需要短剧合成时建议至少 4 vCPU / 8GB。
+Web 保留既有 swap 语义，宿主机 swap 不能扩大 Worker 图像预算。PostgreSQL 和模型服务可以放在外部；媒体经 Worker Token 鉴权的 Web HTTP 接口读写，`VOZEB_PRO_DATA_DIR` 由 Web 挂载，Worker不复制其业务数据卷或数据库凭据。
+
+如果已启用 S3/OSS，新媒体不会保留本地持久副本，但 FFmpeg、视频下载和格式规范化仍可能使用临时磁盘。
+
+可承载任务在槽位忙、暂缺预算或 Worker 离线时保持持久 `pending`；超过单副本总预算则以 `exceeds_total_budget` 原因暂停。超预算的该处理阶段不领取、不启动子进程；前置 prepare 可能已实际解码。选择 S/L 代表档位不代表低内存入口已取得实际资格：其余 Compose 实际入口的 C01 仍在验收，C04 实际生成来源仍未知，S5 未完成；S6 多用户与长稳未验，不承诺人数。

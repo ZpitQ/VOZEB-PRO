@@ -97,7 +97,7 @@ async function persistCanvasBatch(task: ImageTask, normalized: PromiseSettledRes
                 });
                 if (!asset?.serverUrl) throw new Error("原生图片保存失败");
                 written = asset.serverUrl;
-                const native = hasSupportedEnhancementDelivery(task) && requests4k(task) ? { ...(await inspectStoredImage(asset.serverUrl, origin, authContext)), provenance: "provider_native" as const } : undefined;
+                const native = requests4k(task) ? { ...(await inspectStoredImage(asset.serverUrl, origin, authContext)), provenance: "provider_native" as const } : undefined;
                 const storedSize = native ? { width: native.width, height: native.height } : { width: asset.width!, height: asset.height! };
                 const skip = taskEnhancementExclusion(task);
                 evidence.storageStatus = "stored";
@@ -105,7 +105,7 @@ async function persistCanvasBatch(task: ImageTask, normalized: PromiseSettledRes
                 if (storedSize.width && storedSize.height) evidence.storedSize = storedSize;
                 return {
                     resultId: evidence.resultId,
-                    ...(native ? { nativeSource: native, enhancementId: `enhancement:${evidence.resultId}` } : {}),
+                    ...(native ? { nativeSource: native, enhancementSource: { ...native, provenance: "generation_final" as const }, enhancementId: `enhancement:${evidence.resultId}` } : {}),
                     ...(skip ? { enhancementSkip: skip } : {}),
                     dataUrl: asset.serverUrl,
                     remoteUrl: asset.remoteUrl,
@@ -208,7 +208,7 @@ async function persistProductEnhancementResults(task: ImageTask, results: Promis
             Object.assign(evidence, { storageStatus: "stored", storedUrl: composite.serverUrl, storedSize: { width: compositeInfo.width, height: compositeInfo.height } });
             stored.push({
                 resultId,
-                ...(requests4k(task) ? { nativeSource: { ...nativeInfo, provenance: "provider_native" }, enhancementId: `enhancement:${resultId}` } : {}),
+                ...(requests4k(task) ? { nativeSource: { ...nativeInfo, provenance: "provider_native" }, enhancementSource: { ...compositeInfo, provenance: "generation_final" }, enhancementId: `enhancement:${resultId}` } : {}),
                 ...(skip ? { enhancementSkip: skip } : {}),
                 dataUrl: composite.serverUrl!,
                 serverUrl: composite.serverUrl,
@@ -273,12 +273,6 @@ async function persistSceneProtectionResults(task: ImageTask, results: ImageTask
     const source = Buffer.from((await imageReferenceToDataUrl(reference, "scene.png", origin, authContext)).split(",")[1], "base64");
     // Validate source, mask and native aspect before any save; retain native bytes separately from the protected delivery.
     const composites = await Promise.all(results.map((item) => compositeSceneEdit(source, Buffer.from(item.dataUrl.split(",")[1], "base64"), protection)));
-    const contract = task.enhancementDelivery;
-    let localDelivery = requests4k(task) && contract?.scope === "local_edit" && hasSupportedEnhancementDelivery(task) && source.length === contract.baseline.byteLength && imageDigest(source) === contract.baseline.sha256;
-    if (localDelivery && contract?.scope === "local_edit") {
-        const normalized = await sharp(source, { failOn: "warning" }).rotate().toColourspace("srgb").ensureAlpha().png().toBuffer({ resolveWithObject: true });
-        localDelivery = normalized.info.width === contract.baseline.width && normalized.info.height === contract.baseline.height && imageDigest(normalized.data) === contract.baseline.normalizedSha256;
-    }
     const context = { ownerUserId: task.userId, source: task.source, conversationId: task.conversationId, taskId: task.id };
     const stored: StoredImageTaskMediaResult[] = [];
     const written: string[] = [];
@@ -293,13 +287,15 @@ async function persistSceneProtectionResults(task: ImageTask, results: ImageTask
         for (let index = 0; index < results.length; index++) {
             const native = await save(results[index].dataUrl, `scene-edit-native-${index + 1}.png`);
             const composite = await save("data:image/png;base64," + composites[index].bytes.toString("base64"), `scene-edit-composite-${index + 1}.png`);
-            const nativeInfo = localDelivery ? await inspectStoredImage(native.serverUrl!, origin, authContext) : undefined;
-            const compositeInfo = localDelivery ? await inspectStoredImage(composite.serverUrl!, origin, authContext) : undefined;
-            const candidate = nativeInfo && compositeInfo && nativeInfo.sha256 === composites[index].evidence.nativeDigest && compositeInfo.sha256 === composites[index].evidence.compositeDigest && compositeInfo.format === "png" && !compositeInfo.hasAlpha;
+            const nativeInfo = requests4k(task) ? await inspectStoredImage(native.serverUrl!, origin, authContext) : undefined;
+            const compositeInfo = requests4k(task) ? await inspectStoredImage(composite.serverUrl!, origin, authContext) : undefined;
+            const candidate = nativeInfo && compositeInfo && nativeInfo.sha256 === composites[index].evidence.nativeDigest && compositeInfo.sha256 === composites[index].evidence.compositeDigest && compositeInfo.format === "png";
             const canvas = task.ecommerceExecution?.canvas;
             stored.push({
                 resultId: `${task.id}:${index + 1}`,
-                ...(candidate ? { nativeSource: { ...nativeInfo!, provenance: "provider_native" as const }, enhancementId: `enhancement:${task.id}:${index + 1}` } : { enhancementSkip: taskEnhancementExclusion(task) }),
+                ...(candidate
+                    ? { nativeSource: { ...nativeInfo!, provenance: "provider_native" as const }, enhancementSource: { ...compositeInfo!, provenance: "generation_final" as const }, enhancementId: `enhancement:${task.id}:${index + 1}` }
+                    : { enhancementSkip: taskEnhancementExclusion(task) }),
                 dataUrl: composite.serverUrl!,
                 serverUrl: composite.serverUrl,
                 width: composite.width,
@@ -332,7 +328,7 @@ async function persistPreparedResults(task: ImageTask, results: ImageTaskMediaRe
     const canvas = task.ecommerceExecution?.canvas;
     const nativeSizes = canvas ? await Promise.all(results.map((item) => decodeEcommerceCanvasSize(Buffer.from(item.dataUrl.split(",")[1], "base64")))) : [];
     const preserveNative4k = requests4k(task) && !canvas && !requireAll;
-    const requested4k = preserveNative4k && !hasUnsupportedEnhancementProtection(task);
+    const requested4k = preserveNative4k;
     const preserveNativeSize = preserveNative4k || (task.config.advancedConfig?.protocol === "custom" && isCustomGeminiImageModel(task.config.model) && !parseImageDimensions(task.config.size || ""));
     const targetSize = canvas || task.config.outputMode === "layers" || preserveNativeSize ? undefined : resolveResultSize(task.config.quality, task.config.size || "auto");
     const settled = await Promise.allSettled(
@@ -365,7 +361,13 @@ async function persistPreparedResults(task: ImageTask, results: ImageTaskMediaRe
             height: asset.height,
             bytes: asset.bytes,
             mimeType: asset.mimeType,
-            ...(native ? { enhancementId: `enhancement:${resultId}`, nativeSource: { ...native, url: asset.serverUrl || asset.url, width: asset.width!, height: asset.height! } } : { enhancementSkip: taskEnhancementExclusion(task) }),
+            ...(native
+                ? {
+                      enhancementId: `enhancement:${resultId}`,
+                      nativeSource: { ...native, url: asset.serverUrl || asset.url, width: asset.width!, height: asset.height! },
+                      enhancementSource: { ...native, url: asset.serverUrl || asset.url, width: asset.width!, height: asset.height!, provenance: "generation_final" as const },
+                  }
+                : { enhancementSkip: taskEnhancementExclusion(task) }),
             ...(canvas
                 ? {
                       canvasEvidence: {
@@ -416,7 +418,7 @@ function taskEnhancementExclusion(task: ImageTask) {
     return imageEnhancementExclusion({
         enabled: task.enhancementPolicy?.enabled ?? false,
         requested4k: requests4k(task),
-        protectedContract: hasUnsupportedEnhancementProtection(task),
+        protectedContract: false,
         layered: task.config.outputMode === "layers",
     });
 }
@@ -430,20 +432,6 @@ function hasSupportedEnhancementDelivery(task: ImageTask) {
     return (
         delivery.scope === "product_background" ||
         (delivery.scope === "full_image" && !task.productProtection && !task.mask && !task.ecommerceExecution?.mask && (!protection || (Array.isArray(protection.protectedObjectIds) && !protection.protectedObjectIds.length)))
-    );
-}
-
-function hasUnsupportedEnhancementProtection(task: ImageTask) {
-    const protection = task.ecommerceExecution?.protection;
-    return (
-        Boolean(
-            task.ecommerceExecution?.canvas ||
-            task.sceneProtection ||
-            task.productProtection ||
-            task.mask ||
-            task.ecommerceExecution?.mask ||
-            (protection && (protection.scope !== "global" || protection.preserveOutsideMask || protection.protectedObjectIds?.length)),
-        ) && !hasSupportedEnhancementDelivery(task)
     );
 }
 

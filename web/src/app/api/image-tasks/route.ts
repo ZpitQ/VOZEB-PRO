@@ -1,4 +1,5 @@
 import { requestPublicOrigin } from "./image-task-reference-urls";
+import { isDeepStrictEqual } from "node:util";
 import { customGeminiImageTaskPath } from "./image-task-gemini-config";
 import { after, NextResponse } from "next/server";
 
@@ -30,6 +31,7 @@ import { assertCapabilityConstraints } from "@/lib/server/capability-constraints
 import { checkGenerationRateLimit, rateLimitHeaders } from "@/lib/server/security";
 import { EcommerceReferenceDispatchConflict } from "@/lib/server/ecommerce-reference-dispatch";
 import { freezeEcommerceEnhancementDelivery } from "@/lib/server/image-enhancement-delivery";
+import { ImageProcessingInputError, readCompletedEcommerceSceneProtection, readImageProcessingMediaFacts } from "@/lib/server/image-processing-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -170,8 +172,9 @@ export async function POST(request: Request) {
     const settings = await getAuthSettings();
     const createTask = async () => {
         const ecommerceExecution = resolvedBody.ecommerceExecution;
+        const sceneRun = resolvedBody.sceneProtection && resolvedBody.context?.runId ? await getAgentRun(resolvedBody.context.runId) : null;
         if (resolvedBody.sceneProtection) {
-            const run = resolvedBody.context?.runId ? await getAgentRun(resolvedBody.context.runId) : null;
+            const run = sceneRun;
             const snapshotTask = run?.tasks.find((task) => task.id === resolvedBody.context?.parentTaskId);
             const prefix = `${run?.clientRequestId}:${snapshotTask?.id}:${snapshotTask?.attempts}:`;
             const copy = Number(requestId?.startsWith(prefix) ? requestId.slice(prefix.length) : "");
@@ -272,6 +275,31 @@ export async function POST(request: Request) {
                 : await freezeEcommerceEnhancementDelivery(
                       { kind, config: prepared.config, references, mask: prepared.mask, productProtection: prepared.productProtection, sceneProtection: prepared.sceneProtection, ecommerceExecution },
                       async (reference) => Buffer.from((await imageReferenceToDataUrl(reference, reference.name || "source.png", resolveInternalOrigin(new URL(request.url).origin), request.headers.get("cookie") || "")).split(",")[1] || "", "base64"),
+                      sceneRun
+                          ? async () => {
+                                const native = await readCompletedEcommerceSceneProtection(sceneRun);
+                                const reference = references.find((item) => item.id === native.source.assetId);
+                                if (
+                                    kind !== "edit" ||
+                                    prepared.productProtection ||
+                                    references.length !== 1 ||
+                                    !reference ||
+                                    (reference.serverUrl || reference.dataUrl || reference.url || reference.remoteUrl) !== native.state.sourceUrl ||
+                                    !isDeepStrictEqual(prepared.sceneProtection, native.sceneProtection) ||
+                                    !isDeepStrictEqual(prepared.mask, native.sceneProtection.mask) ||
+                                    !isDeepStrictEqual(ecommerceExecution, native.execution)
+                                )
+                                    throw new ImageProcessingInputError("场景增强基线与当前任务的原图、蒙版或执行快照不符", 409);
+                                await Promise.all([readImageProcessingMediaFacts(native.sourceRegistration, native.source), readImageProcessingMediaFacts(native.maskRegistration, native.mask)]);
+                                const latestRun = await getAgentRun(sceneRun.id);
+                                if (!latestRun) throw new ImageProcessingInputError("场景增强基线的父任务已失效", 409);
+                                const current = await readCompletedEcommerceSceneProtection(latestRun);
+                                const { state: originalState, ...originalFacts } = native;
+                                const { state: currentState, ...currentFacts } = current;
+                                if (!isDeepStrictEqual(originalFacts, currentFacts) || !isDeepStrictEqual(originalState.receipt, currentState.receipt)) throw new ImageProcessingInputError("场景增强基线在原件读取期间已变化", 409);
+                                return current.enhancementBaseline;
+                            }
+                          : undefined,
                   ),
         });
         if ("executionPhase" in task && task.executionPhase)
@@ -301,6 +329,7 @@ export async function POST(request: Request) {
         response = layerGrant ? await createTask() : await withGenerationConcurrencyLimit(currentUser.id, "image", 10 * 60 * 1000, settings.generationConcurrency.image, createTask, undefined, concurrencyRequestId);
     } catch (error) {
         if (error instanceof EcommerceReferenceDispatchConflict) return NextResponse.json({ error: error.message }, { status: 409 });
+        if (error instanceof ImageProcessingInputError) return NextResponse.json({ error: error.message }, { status: error.status });
         throw error;
     }
     if (response) return response;

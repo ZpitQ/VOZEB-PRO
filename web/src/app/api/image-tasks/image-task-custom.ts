@@ -1,3 +1,4 @@
+import { imageRequestAspectRatio, resolveRequestSize } from "@/lib/image-generation-size";
 import type { ImageTask } from "@/lib/server/image-task-store";
 import { GenerationSubmissionSafeFailure, GenerationSubmissionUncertainError } from "@/lib/server/generation-submission-error";
 import { buildProviderRequest, isProviderBusinessError, readProviderError, readProviderString, readProviderValue } from "@/lib/server/provider-task-config";
@@ -21,8 +22,6 @@ import {
     readFetchError,
     readImageTaskId,
     parseImageSubmissionJson,
-    imageRequestAspectRatio,
-    resolveRequestSize,
     taskFetch,
     taskHeaders,
     taskUrl,

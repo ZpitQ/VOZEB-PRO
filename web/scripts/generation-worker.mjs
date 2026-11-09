@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 
 import { resolveGenerationWorkerOrigin } from "./generation-runtime.mjs";
 import { nextGenerationWorkerPollPolicy } from "./generation-worker-policy.mjs";
+import { runImageProcessing } from "./image-processing-supervisor.mjs";
+import { runImageProcessingLane } from "../.image-processing-runtime/workers/image-processing-lane.mjs";
 
 const token = process.env.VOZEB_PRO_WORKER_TOKEN?.trim() || "";
 const origin = resolveGenerationWorkerOrigin();
@@ -10,6 +12,7 @@ const workerId = (process.env.VOZEB_PRO_GENERATION_WORKER_ID?.trim() || `generat
 const idleDelayMs = boundedNumber(process.env.VOZEB_PRO_GENERATION_WORKER_INTERVAL_MS, 2_000, 500, 30_000);
 const lanes = boundedNumber(process.env.VOZEB_PRO_GENERATION_WORKER_LANES, 2, 1, 8);
 const heartbeatIntervalMs = boundedNumber(process.env.VOZEB_PRO_GENERATION_WORKER_HEARTBEAT_MS, 15_000, 5_000, 60_000);
+const imageClaimStop = new AbortController();
 let stopping = false;
 let heartbeatPending = false;
 
@@ -21,7 +24,11 @@ process.once("SIGINT", stop);
 console.log(`Generation worker started: ${workerId}`);
 void sendHeartbeat();
 const heartbeatTimer = setInterval(() => void sendHeartbeat(), heartbeatIntervalMs);
-await Promise.all([...Array.from({ length: lanes }, (_, index) => runLane(index + 1)), runRefundLane()]);
+await Promise.all([
+    ...Array.from({ length: lanes }, (_, index) => runLane(index + 1)),
+    runRefundLane(),
+    runImageProcessingLane({ origin, token, workerId: `${workerId}:image-processing`, stop: imageClaimStop.signal, idleDelayMs, supervise: runImageProcessing }),
+]);
 clearInterval(heartbeatTimer);
 console.log("Generation worker stopped");
 
@@ -115,4 +122,5 @@ function delay(ms) {
 
 function stop() {
     stopping = true;
+    imageClaimStop.abort();
 }

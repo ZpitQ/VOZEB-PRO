@@ -1,6 +1,7 @@
-import sharp from "sharp";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRun } from "./agent-run-store";
+import type { CreativeAsset } from "@/lib/creative-runtime-contract";
+import { hasOnlyCompletedEcommerceReferencePrepares, type ImageProcessingManifest } from "./image-processing-service";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CreativeReferenceReviewPanel } from "@/app/(user)/create/components/creative-reference-review-panel";
@@ -11,7 +12,7 @@ vi.mock("./internal-origin", () => ({ fetchInternalApi: mocks.fetch, resolveInte
 import { publicAgentRunForRequest, publicAgentRunSnapshotForRequest } from "./agent-run-public-selection";
 import { resolveEcommerceReferenceDecision } from "./ecommerce-reference-purpose";
 import type { EcommerceVisualAnalysisV4 } from "./ecommerce-visual-analysis";
-import { confirmedReferenceDecision } from "./ecommerce-reference-recovery";
+import { confirmedReferenceDecision, createEcommerceReferenceCheckpoint, referenceAssetVersion, referenceSourcesLoaded } from "./ecommerce-reference-recovery";
 import type { StoredGenerationTaskRecord } from "./generation-task-types";
 
 const taskRecords = vi.hoisted(() => ({ list: vi.fn() }));
@@ -194,8 +195,54 @@ describe("original run status recovery action", () => {
         },
     );
 });
+// Stored-record fixtures exercise the real receipt validator; the separate File harness runs native preparation.
+const sceneOriginal = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAYAAAAECAIAAAAiZtkUAAAAEElEQVR4nGNgYPiPgcgUAgB1ARfpnAW9rgAAAABJRU5ErkJggg==", "base64");
+const sceneSha256 = "a3a28a2044c3503f39322a12c5d29739433a653c6cd60073232a6693bb381be8";
+const sceneInputDigest = "1".repeat(64);
+const sceneAsset: CreativeAsset = { ...asset, type: "image", status: "ready", ordinal: 0, title: "Scene", createdAt: 1, updatedAt: 1 };
+const sceneSourceVersion = referenceAssetVersion(sceneAsset);
+const scenePrepareManifest: ImageProcessingManifest = {
+    jobId: "scene-prepare-private",
+    executionId: "scene-execution-private",
+    sourceIdentities: [{ assetId: "scene", assetVersion: sceneSourceVersion, sha256: sceneSha256, bytes: 73, width: 6, height: 4, mimeType: "image/png" }],
+    artifacts: [{ kind: "analysis", storageKey: "scene-analysis-private.png", sha256: sceneSha256, mimeType: "image/png", bytes: 73, width: 6, height: 4 }],
+    geometry: { sourceSize: { width: 6, height: 4 } },
+};
+const scenePrepareRecord: StoredGenerationTaskRecord = {
+    id: "scene-prepare-private",
+    type: "image_processing",
+    userId: "user",
+    runId: "run",
+    conversationId: "conversation",
+    parentTaskId: "run",
+    status: "success",
+    executionPhase: "completed",
+    createdAt: 1,
+    updatedAt: 2,
+    expiresAt: Number.MAX_SAFE_INTEGER,
+    payload: {
+        version: "image-processing.v1",
+        operation: "prepare_reference",
+        options: {},
+        algorithmVersion: "reference-input-policy.v1",
+        inputDigest: sceneInputDigest,
+        executionId: "scene-execution-private",
+        inputs: [{ assetId: "scene", assetVersion: sceneSourceVersion, expectedSha256: sceneSha256 }],
+        sources: [{ inputIndex: 0, scope: "reference", storageKey: "scene.png", storageProvider: "local" }],
+        resource: { facts: { encodedInputs: [{ inputIndex: 0, assetId: "scene", assetVersion: sceneSourceVersion, sha256: sceneSha256, bytes: 73 }], decodedInputs: [] } },
+    },
+    resultPayload: {
+        executionId: "scene-execution-private",
+        workerId: "scene-worker-private",
+        manifest: structuredClone(scenePrepareManifest),
+        // Keep the fixture digest literal rather than reproducing the validator's digest calculation.
+        manifestDigest: "986a7bbd647ccf39247e7b97627108851c79099951ea445500551b4e326fa9c7",
+        parentRescheduled: true,
+    },
+};
+
 function waitingRun(version = "ecommerce-edit.v4"): AgentRun {
-    return {
+    const run = {
         id: "run",
         userId: "user",
         conversationId: "conversation",
@@ -210,6 +257,7 @@ function waitingRun(version = "ecommerce-edit.v4"): AgentRun {
                 planVersion: version,
                 ...(version === "ecommerce-edit.v5" ? { photography: { private: "photography-private" } } : {}),
                 operation: "scene_edit",
+                strategy: "integrated_scene",
                 protection: { scope: "local", preserveOutsideMask: true },
                 source: { currentSceneBaselineId: "scene" },
                 canvas: { mode: "exact", size: { width: 6, height: 4 } },
@@ -217,33 +265,42 @@ function waitingRun(version = "ecommerce-edit.v4"): AgentRun {
             },
         },
     } as unknown as AgentRun;
+    run.ecommerceSnapshot!.referenceCheckpoint = referenceSourcesLoaded(
+        createEcommerceReferenceCheckpoint(
+            run,
+            { userRequest: "Change the scene", conversationId: "conversation", surface: "chat", assetCandidates: [{ id: "scene", type: "image", title: "Scene" }], conversationContext: { summary: "", recentMessages: [] } },
+            [sceneAsset],
+        ),
+        [{ assetId: "scene", contentSha256: sceneSha256, sourceSize: { width: 6, height: 4 } }],
+    );
+    run.ecommerceSnapshot!.processing = {
+        version: "image-processing-checkpoint.v1",
+        prepareReferences: [{ jobId: "scene-prepare-private", inputDigest: sceneInputDigest, assetId: "scene", assetVersion: sceneSourceVersion, manifest: structuredClone(scenePrepareManifest) }],
+    };
+    return run;
 }
 describe("owned public scene selection action", () => {
-    beforeEach(async () => {
+    let storedPreparation: StoredGenerationTaskRecord;
+    beforeEach(() => {
         vi.clearAllMocks();
         mocks.assets.mockResolvedValue([asset]);
-        const bytes = await sharp({ create: { width: 6, height: 4, channels: 3, background: "blue" } })
-            .png()
-            .toBuffer();
-        mocks.fetch.mockResolvedValue(new Response(bytes, { headers: { "content-type": "image/png" } }));
+        storedPreparation = structuredClone(scenePrepareRecord);
+        expect(sceneSourceVersion, "Fixture source version includes the normalized '/' for absent remoteUrl").toBe("2933c036122e0cce3ba64f21ddd326a5e705633c4416c9a65970525197ed0f36");
+        expect(hasOnlyCompletedEcommerceReferencePrepares(waitingRun(), [storedPreparation]), "Scene fixture must first pass the unchanged production completed-prepare validator").toBe(true);
+        taskRecords.list.mockResolvedValue([storedPreparation]);
+        mocks.fetch.mockImplementation(async () => new Response(sceneOriginal, { headers: { "content-type": "image/png" } }));
     });
-    it.each(["ecommerce-edit.v3", "ecommerce-edit.v4", "ecommerce-edit.v5"])("offers only real decoded owned media for a legal %s pause", async (version) => {
+    it.each(["ecommerce-edit.v3", "ecommerce-edit.v4", "ecommerce-edit.v5"])("offers native prepared dimensions and a readable owned original for a legal %s pause", async (version) => {
         const run = waitingRun(version);
         const before = structuredClone(run);
+        const storedBefore = structuredClone(storedPreparation);
         const expected = { action: "confirm_scene_selection", baselineAssetId: "scene", url: "/api/reference-assets/scene.png", width: 6, height: 4 };
         expect(await publicAgentRunForRequest(run, request)).toMatchObject({ ecommerceSceneSelection: expected });
-        mocks.fetch.mockResolvedValue(
-            new Response(
-                await sharp({ create: { width: 6, height: 4, channels: 3, background: "blue" } })
-                    .png()
-                    .toBuffer(),
-                { headers: { "content-type": "image/png" } },
-            ),
-        );
         expect(await publicAgentRunSnapshotForRequest(run, request)).toMatchObject({ id: "run", ecommerceSceneSelection: expected });
         expect(mocks.assets).toHaveBeenCalledWith(["scene"], "user");
         expect(run).toEqual(before);
-        expect(JSON.stringify(await publicAgentRunForRequest(run, request))).not.toMatch(/compiledPrompt|manualRegion|private-marker|photography-private/);
+        expect(storedPreparation).toEqual(storedBefore);
+        expect(JSON.stringify(await publicAgentRunForRequest(run, request))).not.toMatch(/compiledPrompt|manualRegion|private-marker|photography-private|scene-prepare-private|scene-execution-private|scene-analysis-private|manifestDigest/);
     });
     it("projects only a stable media pathname and drops unrelated private URL parameters", async () => {
         mocks.assets.mockResolvedValue([{ ...asset, serverUrl: "/api/reference-assets/scene.png?format=webp&width=2&private=private-marker#private" }]);
@@ -277,6 +334,18 @@ describe("owned public scene selection action", () => {
         if (state === "remote") mocks.assets.mockResolvedValue([{ ...asset, serverUrl: undefined, remoteUrl: "https://private.example/asset" }]);
         expect((await publicAgentRunForRequest(run, request)).ecommerceSceneSelection).toBeUndefined();
         expect(JSON.stringify(await publicAgentRunForRequest(run, request))).not.toContain("private-fetch-error");
+    });
+    it("hides selection when the current original path differs from its prepared checkpoint", async () => {
+        mocks.assets.mockResolvedValue([{ ...asset, serverUrl: "/api/reference-assets/replaced.png" }]);
+        const run = waitingRun();
+        expect((await publicAgentRunForRequest(run, request)).ecommerceSceneSelection).toBeUndefined();
+        expect((await publicAgentRunSnapshotForRequest(run, request)).ecommerceSceneSelection).toBeUndefined();
+    });
+    it("hides selection when the original stream differs from the completed native receipt", async () => {
+        mocks.fetch.mockImplementation(async () => new Response(sceneOriginal.subarray(0, -1), { headers: { "content-type": "image/png" } }));
+        const run = waitingRun();
+        expect((await publicAgentRunForRequest(run, request)).ecommerceSceneSelection).toBeUndefined();
+        expect((await publicAgentRunSnapshotForRequest(run, request)).ecommerceSceneSelection).toBeUndefined();
     });
 });
 

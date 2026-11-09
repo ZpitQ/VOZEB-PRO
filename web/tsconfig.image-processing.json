@@ -1,0 +1,17 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "lib": ["ES2022"],
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "rewriteRelativeImportExtensions": true,
+        "strict": true,
+        "skipLibCheck": true,
+        "esModuleInterop": true,
+        "verbatimModuleSyntax": true,
+        "rootDir": "src",
+        "outDir": ".image-processing-runtime",
+        "types": ["node"]
+    },
+    "include": ["src/lib/image-processing/**/*.ts", "src/lib/image-size.ts", "src/workers/image-processing-child.mts", "src/workers/image-processing-lane.mts"]
+}

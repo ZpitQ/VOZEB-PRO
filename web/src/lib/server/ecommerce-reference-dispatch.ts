@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import type { EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
 import type { AgentRun } from "./agent-run-store";
 import type { GenerationTaskContext } from "./generation-task-types";
 
@@ -16,7 +18,7 @@ export class EcommerceReferenceDispatchConflict extends Error {
 }
 
 // Called only while holding the same persisted parent lock used by recovery.
-export function assertEcommerceReferenceDispatch(parent: AgentRun | undefined, userId: string, context: GenerationTaskContext, fence?: EcommerceReferenceDispatchFence) {
+export function assertEcommerceReferenceDispatch(parent: AgentRun | undefined, userId: string, context: GenerationTaskContext, fence?: EcommerceReferenceDispatchFence, execution?: EcommerceCompiledImageRequest) {
     const checkpoint = parent?.ecommerceSnapshot?.referenceCheckpoint;
     if (!checkpoint && !fence) return;
     const task = parent?.tasks.find((item) => item.id === context.parentTaskId);
@@ -41,7 +43,8 @@ export function assertEcommerceReferenceDispatch(parent: AgentRun | undefined, u
         !Number.isSafeInteger(fence.copy) ||
         fence.copy < 1 ||
         fence.copy > task.count ||
-        context.clientRequestId !== `${parent.clientRequestId}:${task.id}:${task.attempts}:${fence.copy}`
+        context.clientRequestId !== `${parent.clientRequestId}:${task.id}:${task.attempts}:${fence.copy}` ||
+        (task.ecommerceExecution?.generationInput !== undefined && !isDeepStrictEqual(task.ecommerceExecution, execution))
     )
         throw new EcommerceReferenceDispatchConflict();
 }

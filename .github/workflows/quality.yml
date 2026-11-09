@@ -7,6 +7,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  # Keep non-PR runs distinct so queued main/tag runs are not replaced.
+  group: quality-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -42,7 +47,11 @@ jobs:
         run: pnpm run format:check
 
   web-unit:
-    name: web / unit
+    name: web / unit-${{ matrix.group }}
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [core, recovery, result-copy]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -63,7 +72,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Unit tests
-        run: pnpm test
+        if: ${{ matrix.group == 'core' }}
+        run: pnpm test --exclude src/lib/server/ecommerce-reference-recovery.file.test.ts --exclude src/lib/server/image-task-result-run-copy.file.test.ts
+      - name: Reference recovery tests
+        if: ${{ matrix.group == 'recovery' }}
+        run: pnpm test src/lib/server/ecommerce-reference-recovery.file.test.ts --maxWorkers=1
+      - name: Result copy tests
+        if: ${{ matrix.group == 'result-copy' }}
+        run: pnpm test src/lib/server/image-task-result-run-copy.file.test.ts --maxWorkers=1
 
   web-chromium:
     name: web / chromium-${{ matrix.shard }}
@@ -111,13 +127,64 @@ jobs:
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
       - name: Browser E2E
-        run: pnpm run e2e --project=chromium --shard="${{ matrix.shard }}/2"
+        if: ${{ matrix.shard == 1 }}
+        run: pnpm run e2e --project=chromium '(?:^|/)ecommerce-product-generation[.]spec[.]ts$'
         env:
           VOZEB_PRO_E2E_DATABASE_URL: postgres://vozeb:vozeb-e2e-password@127.0.0.1:5432/vozeb_pro_e2e
+      - name: Remaining browser E2E
+        if: ${{ matrix.shard == 2 }}
+        run: pnpm run e2e --project=chromium --grep-invert 'ecommerce-product-generation[.]spec[.]ts'
+        env:
+          VOZEB_PRO_E2E_DATABASE_URL: postgres://vozeb:vozeb-e2e-password@127.0.0.1:5432/vozeb_pro_e2e
+      - name: Upload browser artifacts
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-playwright-report-chromium-${{ matrix.shard }}
+          path: |
+            web/playwright-report
+            web/.e2e-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
+  web-postgres:
+    name: web / postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.6-alpine
+        env:
+          POSTGRES_DB: vozeb_pro_e2e
+          POSTGRES_USER: vozeb
+          POSTGRES_PASSWORD: vozeb-e2e-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vozeb -d vozeb_pro_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 11.9.0
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
       - name: PostgreSQL integration tests
-        if: ${{ matrix.shard == 1 }}
         run: >-
-          pnpm exec vitest run --no-file-parallelism
+          pnpm test --no-file-parallelism --config vitest.postgres.config.ts
           src/lib/server/database/auth-entity-concurrency.postgres.test.ts
           src/lib/server/admin-backup-store.postgres.test.ts
           src/lib/server/points-wallet-idempotency.postgres.test.ts
@@ -132,21 +199,11 @@ jobs:
           RUN_WORK_COMMUNITY_POSTGRES_INTEGRATION: "1"
           VOZEB_PRO_RUN_ECOMMERCE_POSTGRES_INTEGRATION: "1"
           VOZEB_PRO_ECOMMERCE_ISOLATED_DATABASE: "1"
-      - name: Upload browser artifacts
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: web-playwright-report-chromium-${{ matrix.shard }}
-          path: |
-            web/playwright-report
-            web/.e2e-artifacts
-          if-no-files-found: ignore
-          retention-days: 7
 
   web:
     name: web
     if: always()
-    needs: [web-checks, web-unit, web-chromium]
+    needs: [web-checks, web-unit, web-chromium, web-postgres]
     runs-on: ubuntu-latest
     steps:
       - name: Verify web quality matrix
@@ -154,10 +211,12 @@ jobs:
           CHECKS_RESULT: ${{ needs.web-checks.result }}
           UNIT_RESULT: ${{ needs.web-unit.result }}
           CHROMIUM_RESULT: ${{ needs.web-chromium.result }}
+          POSTGRES_RESULT: ${{ needs.web-postgres.result }}
         run: |
           test "$CHECKS_RESULT" = "success"
           test "$UNIT_RESULT" = "success"
           test "$CHROMIUM_RESULT" = "success"
+          test "$POSTGRES_RESULT" = "success"
 
   docs:
     runs-on: ubuntu-latest

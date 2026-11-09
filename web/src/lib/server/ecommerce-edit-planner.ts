@@ -88,7 +88,7 @@ export function unsupportedEcommerceProductEditMessage(userRequest: string, prod
     const predicateBoundary = "(?:保持|保留|维持|继承|并(?:且)?|但(?:是)?|而(?:且)?|然后|\\b(?:keep|preserve|maintain|inherit)\\b)";
     const transition = `(?:(?:从|由)(?:(?!${predicateBoundary})[^，,。.;；!！?？\\n])*?)?`;
     const actionAfterProperty = new RegExp(`^((?:\\s*${collective})?\\s*(?:${prohibition}\\s*${modifiers})?\\s*(?:${collective}\\s*)?(?:进行|做任何|做)?\\s*${transition})${action.source}`, "i");
-    const negation = new RegExp(`${prohibition}\\s*${modifiers}$`, "i");
+    const negation = new RegExp(`${prohibition}\\s*${modifiers}(?:${action.source}\\s*(?:或|和|及|、|or\\b|and\\b)\\s*)*$`, "i");
     const propertyNegation = new RegExp(`${prohibition}\\s*${modifiers}${imageReference}$`, "i");
     const hasProhibition = new RegExp(prohibition, "i");
     for (const clause of userRequest.split(/[，,。.;；!！?？\n]/)) {
@@ -127,7 +127,7 @@ export async function planEcommerceEdit(input: EcommerceEditPlanningRequest, vis
                 cookie: input.cookie,
                 candidate,
                 messages,
-                tool: input.referenceDecision ? executableEditPlanningTool(input.sources) : ecommerceEditPlanningTool,
+                tool: input.referenceDecision ? executableEditPlanningTool(input.sources, executionReferenceUses(input.sources, input.referenceDecision), visualAnalysis) : ecommerceEditPlanningTool,
                 headers: systemAiBillingHeaders(candidate.logicalModelId, idempotencyKey, candidate.upstreamModel),
                 preferNativeTools: true,
                 validateArguments: (argumentsText) => validPlanArguments(argumentsText, input, visualAnalysis, candidate.logicalModelId),
@@ -165,7 +165,7 @@ export function resolveLocalEditTarget(plan: EcommerceEditPlan, analysis: Ecomme
             target: { id: "manual-region", kind: "environment", label: "manual region", region: copyRegion(plan.delta.manualRegion), source: "manual" },
         };
     }
-    const baseline = analysis.references.find((reference) => reference.assetId === plan.source.currentSceneBaselineId && referenceRole(reference) === "scene");
+    const baseline = analysis.references.find((reference) => reference.assetId === plan.source.currentSceneBaselineId);
     if (!baseline) return { state: "needs_review", reason: "missing_target", clarificationQuestion: "无法确认当前场景中的可编辑区域，请重新选择一张清晰的历史结果。" };
     const requestedIds = new Set([...plan.delta.targetObjects, ...plan.delta.targetRegions]);
     const matches = baseline.editableTargets.filter((target) => requestedIds.has(target.id));
@@ -189,8 +189,7 @@ export function normalizePlannedEdit(value: unknown, input: EcommerceEditPlannin
         const source = plannerRecord(compatible.source);
         if (source.productAnchorId !== input.sources.productAnchorId || source.currentSceneBaselineId !== input.sources.currentSceneBaselineId || !sameStrings(plannerStrings(source.sceneReferenceIds), input.sources.sceneReferenceIds))
             throw planBoundaryError("source", "编辑计划不得更换已解析的商品或场景来源");
-        const sourceOrder = [...new Set([input.sources.currentSceneBaselineId, input.sources.productAnchorId, ...input.sources.sceneReferenceIds].filter((id): id is string => Boolean(id)))];
-        const expected = referenceUsesFromEcommerceDecision({ decision: input.referenceDecision, sourceOrder });
+        const expected = executionReferenceUses(input.sources, input.referenceDecision);
         if (compatible.referenceUses !== undefined) {
             const supplied = compatible.referenceUses;
             if (!Array.isArray(supplied) || supplied.length !== expected.length || new Set(supplied.map((use) => plannerRecord(use).assetId)).size !== expected.length) throw planBoundaryError("referenceUses", "参考用途必须覆盖准确的执行来源");
@@ -224,7 +223,7 @@ export function normalizePlannedEdit(value: unknown, input: EcommerceEditPlannin
     if (isRecord(compatible) && ["scene_edit", "local_edit"].includes(String(compatible.operation))) {
         const requestedChange = sceneEditChangeInstructions(input.planningInput.userRequest).join("\n");
         const lightingChange =
-            /(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make|relight)[^，,。.;；\n]*(?:光线|光照|灯光|阳光|日光|照明|主光|补光|白平衡|lighting)|(?:光线|光照|灯光|阳光|日光|照明|主光|补光|白平衡|lighting)[^，,。.;；\n]*(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make|relight)|(?:光线|光照|灯光|照明|主光|补光)[^，,。.;；\n]*(?:再|更|调|变(?:得)?)[^，,。.;；\n]*(?:亮|暗)/i.test(
+            /(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make|relight)[^，,。.;；\n]*(?:光线|光照|灯光|阳光|日光|自然光|照明|主光|补光|白平衡|lighting)|(?:光线|光照|灯光|阳光|日光|自然光|照明|主光|补光|白平衡|lighting)[^，,。.;；\n]*(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make|relight)|(?:光线|光照|灯光|自然光|照明|主光|补光)[^，,。.;；\n]*(?:再|更|调|提|变(?:得)?)[^，,。.;；\n]*(?:亮|暗)/i.test(
                 requestedChange,
             );
         const global = (lightingChange || (compatible.operation === "scene_edit" && sceneCompositionChange(requestedChange))) && !/(?:只|仅|only|local).*(?:区域|局部|选区|area|region)/i.test(requestedChange);
@@ -249,12 +248,30 @@ export function normalizePlannedEdit(value: unknown, input: EcommerceEditPlannin
     if (input.referenceDecision?.state === "resolved") {
         canonicalPlan.planVersion = ECOMMERCE_EDIT_PLAN_V6_VERSION;
         if (!input.referenceDecision.currentSceneBaselineId) canonicalPlan.baseline.sceneFacts = null;
+        if (canonicalPlan.operation === "local_edit") {
+            const targetIds = new Set(localEditTargetIds(input.sources, visualAnalysis));
+            for (const field of ["targetObjects", "targetRegions"] as const) {
+                if (canonicalPlan.delta[field].some((id) => !targetIds.has(id))) throw planBoundaryError(`delta.${field}`, "局部编辑目标必须使用当前基线 editableTargets 中的精确 ID，区域描述应放在 requestedChanges 中");
+            }
+        }
     } else {
         canonicalPlan.planVersion = ECOMMERCE_EDIT_PLAN_VERSION;
     }
     const canvas = resolveEcommerceCanvasConstraint({ ...input.canvasInput, operation: canonicalPlan.operation });
     delete canonicalPlan.canvas;
     if (canvas) canonicalPlan.canvas = canvas;
+    delete canonicalPlan.preserve.sourceFraming;
+    const product = visualAnalysis.analysisVersion === "ecommerce-visual-analysis.v4" ? visualAnalysis.references.find((reference) => reference.assetId === canonicalPlan.source.productAnchorId) : undefined;
+    if (
+        canonicalPlan.operation === "product_to_scene" &&
+        canonicalPlan.strategy === "strict_product" &&
+        product?.contentType === "product_detail" &&
+        product.confidence === "high" &&
+        product.productFacts &&
+        product.visualEvidence.isolatedSubject &&
+        (product.visualEvidence.whiteBackground || product.visualEvidence.transparentBackground)
+    )
+        canonicalPlan.preserve.sourceFraming = "visible_extent";
     boundPhotographyTargets(canonicalPlan, visualAnalysis, input.planningInput.userRequest);
     validatePlanBoundary(canonicalPlan, input, visualAnalysis, planningLogicalModelId);
     return canonicalPlan;
@@ -276,9 +293,9 @@ function sceneCompositionChange(instructions: string) {
 }
 
 function sceneEditChangeInstructions(userRequest: string): string[] {
-    const changeAction = /(?:改(?:变|为|成)?|换成|调整|变成|切换|生成|拍摄|generate|render|change|adjust|make|relight|(?:让|使|再|更|调|变(?:得)?)[^，,。.;；\n]*(?:亮|暗))/i;
+    const changeAction = /(?:改(?:变|为|成)?|换成|调整|变成|切换|生成|拍摄|generate|render|change|adjust|make|relight|(?:让|使|再|更|调|提|变(?:得)?)[^，,。.;；\n]*(?:亮|暗))/i;
     const preservation = /(?:保持|保留|维持|keep|preserve|maintain)/i;
-    const prohibition = /(?:不要|不得|禁止|严禁|不|别|do not|don't|never).*(?:改(?:变|为|成)?|换成|调整|变成|切换|生成|拍摄|generate|render|change|adjust|make|relight|(?:让|使|再|更|调|变(?:得)?)[^，,。.;；\n]*(?:亮|暗))/i;
+    const prohibition = /(?:不要|不得|禁止|严禁|不|别|do not|don't|never).*(?:改(?:变|为|成)?|换成|调整|变成|切换|生成|拍摄|generate|render|change|adjust|make|relight|(?:让|使|再|更|调|提|变(?:得)?)[^，,。.;；\n]*(?:亮|暗))/i;
     return userRequest
         .split(/[，,。.;；\n]/)
         .flatMap((clause) => {
@@ -564,8 +581,9 @@ function validatePlanBoundary(plan: EcommerceEditPlan, input: EcommerceEditPlann
 
 function editPlanningMessages(input: EcommerceEditPlanningRequest, analysis: EcommercePlannerVisualAnalysis, planningLogicalModelId: string) {
     const systemPrompt =
-        "你是电商图片编辑规划模型。把用户一句话转换为基线加增量的 EcommerceEditPlan。商品主参考、场景参考和连续编辑来源由服务端确定，不得交换。当 sources.productAnchorId 为空且 currentSceneBaselineId 有效时，必须使用 scene_edit、strategy=integrated_scene、baseline.productFacts=null、preserve.productCore=[]；不得输出 local_edit 或 strict_product。local_edit 的 targetObjects 必须只填写视觉分析 editableTargets 中的精确 ID；没有唯一候选时不得猜测坐标或目标。新增到商品旁边或周围的道具属于场景增量，不得写入 product_core 或商品本体。默认 strict_product；此策略下 preserve.productCore 必须是字符串数组，并逐项包含且只能依赖以下六个商品保护项：outline、brand_text、color、material、scale、view。即使某项看似未变化，也必须保留该项。photography 为可选摄影目标，必须依据 photographyFacts 逐项规划；事实不可确认时省略，不填空壳。材质目标只保持受保护商品的纹理方向/尺度、粗糙度/光泽；场景参考只借鉴空间、光线和风格。用户只加摆件时保留现有主光/补光/白平衡/构图，接触阴影与光影融合仅作用于允许区域；不得新增台灯照明、改变柜体颜色或重画木纹。白底商品到场景允许规划环境主光方向与面积、补光、白平衡、接触阴影、商品明度层次、留白与纵深。已有场景全局优化必须有本轮明确意图及对应 scope。禁止统一暖黄滤镜、油亮高光、过锐化和夸张豪华装饰。摄影目标不能改变商品身份或受保护材质。";
+        "你是电商图片编辑规划模型。把用户一句话转换为基线加增量的 EcommerceEditPlan。商品主参考、场景参考和连续编辑来源由服务端确定，不得交换。当 sources.productAnchorId 为空且 currentSceneBaselineId 有效时，必须使用 scene_edit、strategy=integrated_scene、baseline.productFacts=null、preserve.productCore=[]；不得输出 local_edit 或 strict_product。local_edit 的 targetObjects 和 targetRegions 都只能填写当前基线 editableTargets 中的精确 ID，targetRegions 可以为空，区域文字描述写入 requestedChanges；没有唯一候选时不得猜测坐标或目标。新增到商品旁边或周围的道具属于场景增量，不得写入 product_core 或商品本体。默认 strict_product；此策略下 preserve.productCore 必须是字符串数组，并逐项包含且只能依赖以下六个商品保护项：outline、brand_text、color、material、scale、view。即使某项看似未变化，也必须保留该项。photography 为可选摄影目标，必须依据 photographyFacts 逐项规划；事实不可确认时省略，不填空壳。材质目标只保持受保护商品的纹理方向/尺度、粗糙度/光泽；场景参考只借鉴空间、光线和风格。用户只加摆件时保留现有主光/补光/白平衡/构图，接触阴影与光影融合仅作用于允许区域；不得新增台灯照明、改变柜体颜色或重画木纹。白底商品到场景允许规划环境主光方向与面积、补光、白平衡、接触阴影、商品明度层次、留白与纵深。已有场景全局优化必须有本轮明确意图及对应 scope。禁止统一暖黄滤镜、油亮高光、过锐化和夸张豪华装饰。摄影目标不能改变商品身份或受保护材质。";
     const capability = input.referenceDecision ? executableEditCapability(input.sources) : null;
+    const targetIds = input.referenceDecision ? localEditTargetIds(input.sources, analysis) : undefined;
     const executablePrompt = capability
         ? `${systemPrompt} 当前已解析来源仅支持 operation=${capability.operation}、strategy=${capability.strategy}。操作名称只表示可执行的保护路径，不授权额外变更；用户未要求新场景时不得新增房间或陈设，delta 只保留本轮请求和获准线索，baseline.sceneFacts 只来自实际场景基线，没有场景基线时必须为 null。不能执行的要求必须保留并报告限制，不得改写为其他需求。`
         : systemPrompt;
@@ -576,26 +594,31 @@ function editPlanningMessages(input: EcommerceEditPlanningRequest, analysis: Eco
                 input.referenceDecision?.state === "resolved"
                     ? executablePrompt.replace(
                           "场景参考只借鉴空间、光线和风格。",
-                          "referenceDecision 是参考授权的唯一依据。商品事实只来自 productAnchorId，场景基线只来自 currentSceneBaselineId；目标与锚点的其他事实用于保持原有内容和定位编辑区域。辅助参考只能提供绑定用途下 appliedCues 明确选中的已选线索；未绑定用途、未选线索和辅助商品或场景属性不得进入 delta、photography 或基线。用户本轮明确描述的环境目标仍可规划，但不得从参考图推导额外变更。",
+                          "referenceDecision 是参考授权的唯一依据。商品事实只来自 productAnchorId，场景基线只来自 currentSceneBaselineId；目标与锚点的其他事实用于保持原有内容和定位编辑区域。referenceUses 必须使用 requiredReferenceUses 中列出的准确图片、alias 和 purposes，并从对应 usedCueIds 中选择且覆盖每个参考用途；visualAnalysis 中其他图片仅提供上下文，不得加入执行参考。辅助参考只能提供绑定用途下 appliedCues 明确选中的已选线索；未绑定用途、未选线索和辅助商品或场景属性不得进入 delta、photography 或基线。用户本轮明确描述的环境目标仍可规划，但不得从参考图推导额外变更。",
                       )
                     : executablePrompt,
         },
         {
             role: "user" as const,
-            content: JSON.stringify({
-                userRequest: input.planningInput.userRequest,
-                conversationContext: input.planningInput.conversationContext,
-                sources: input.sources,
-                visualAnalysis: plannerVisualAnalysis(analysis, input.referenceDecision),
-                ...(input.referenceDecision ? { referenceDecision: input.referenceDecision } : {}),
-                requiredModelRoles: {
-                    visionAnalysis: analysis.modelRole.logicalModelId,
-                    editPlanning: planningLogicalModelId,
-                    generation: input.generationModelRole,
-                    qualityCheck: input.qualityCheckModelRole,
+            // JSONB does not preserve object key order; recovered billable input must serialize identically.
+            content: JSON.stringify(
+                {
+                    userRequest: input.planningInput.userRequest,
+                    conversationContext: input.planningInput.conversationContext,
+                    sources: input.sources,
+                    visualAnalysis: plannerVisualAnalysis(analysis, input.referenceDecision),
+                    ...(targetIds ? { allowedLocalEditTargetIds: targetIds } : {}),
+                    ...(input.referenceDecision ? { referenceDecision: input.referenceDecision, requiredReferenceUses: executionReferenceUses(input.sources, input.referenceDecision) } : {}),
+                    requiredModelRoles: {
+                        visionAnalysis: analysis.modelRole.logicalModelId,
+                        editPlanning: planningLogicalModelId,
+                        generation: input.generationModelRole,
+                        qualityCheck: input.qualityCheckModelRole,
+                    },
+                    continuity: { parentResultId: input.sources.parentResultId, branchId: input.branchId },
                 },
-                continuity: { parentResultId: input.sources.parentResultId, branchId: input.branchId },
-            }),
+                (_key, value: unknown) => (value !== null && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))) : value),
+            ),
         },
     ];
 }
@@ -605,8 +628,20 @@ function executableEditCapability(sources: EcommerceSources): Pick<EcommerceEdit
     return { operation: sources.currentSceneBaselineId ? "local_edit" : "product_to_scene", strategy: "strict_product" };
 }
 
-function executableEditPlanningTool(sources: EcommerceSources) {
+function executionReferenceUses(sources: EcommerceSources, decision: EcommerceReferenceDecision) {
+    const sourceOrder = [...new Set([sources.currentSceneBaselineId, sources.productAnchorId, ...sources.sceneReferenceIds].filter((id): id is string => Boolean(id)))];
+    return referenceUsesFromEcommerceDecision({ decision, sourceOrder });
+}
+
+function localEditTargetIds(sources: EcommerceSources, analysis: EcommercePlannerVisualAnalysis) {
+    if (executableEditCapability(sources).operation !== "local_edit") return;
+    return analysis.references.filter((reference) => reference.assetId === sources.currentSceneBaselineId).flatMap((reference) => reference.editableTargets.map((target) => target.id));
+}
+
+function executableEditPlanningTool(sources: EcommerceSources, referenceUses: ReturnType<typeof executionReferenceUses>, analysis: EcommercePlannerVisualAnalysis) {
     const capability = executableEditCapability(sources);
+    const targetIds = localEditTargetIds(sources, analysis);
+    const targets = targetIds?.length ? { ...stringArray, items: { type: "string", enum: targetIds } } : { ...stringArray, maxItems: 0 };
     return {
         ...ecommerceEditPlanningV6Tool,
         parameters: {
@@ -615,6 +650,26 @@ function executableEditPlanningTool(sources: EcommerceSources) {
                 ...ecommerceEditPlanningV6Tool.parameters.properties,
                 operation: { type: "string", enum: [capability.operation] },
                 strategy: { type: "string", enum: [capability.strategy] },
+                ...(targetIds
+                    ? {
+                          delta: {
+                              ...ecommerceEditPlanningV6Tool.parameters.properties.delta,
+                              properties: { ...ecommerceEditPlanningV6Tool.parameters.properties.delta.properties, targetObjects: targets, targetRegions: targets },
+                          },
+                      }
+                    : {}),
+                referenceUses: {
+                    ...ecommerceEditPlanningV6Tool.parameters.properties.referenceUses,
+                    minItems: referenceUses.length,
+                    maxItems: referenceUses.length,
+                    items: {
+                        ...ecommerceEditPlanningV6Tool.parameters.properties.referenceUses.items,
+                        properties: {
+                            ...ecommerceEditPlanningV6Tool.parameters.properties.referenceUses.items.properties,
+                            assetId: { type: "string", enum: referenceUses.map((use) => use.assetId) },
+                        },
+                    },
+                },
             },
         },
     };

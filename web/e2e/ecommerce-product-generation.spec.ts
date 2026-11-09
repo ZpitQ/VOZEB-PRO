@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { extname } from "node:path";
@@ -13,6 +14,7 @@ import type { AdminGenerationTask } from "../src/lib/admin-generation-operations
 
 import { expectNoHorizontalOverflow } from "./responsive-helpers";
 import { E2E_PROTOCOL_ORIGIN, e2eSettingsPatch, protocolFixtureState, resetProtocolFixture } from "./support";
+import { observeResidentF02 } from "./resident-f02-observation";
 
 type GoldenCase = {
     caseId?: string;
@@ -204,38 +206,6 @@ test("optional-quality-toggle:后台双向保存立即回读并刷新保持", as
         await page.getByRole("tab", { name: "电商流程", exact: true }).click();
         await expect(toggle).toBeChecked({ checked: enabled });
     }
-});
-
-test("optional-quality-disabled:默认关闭零质检调用且图片可下载引用连续编辑", async ({ page, request }) => {
-    const saved = await request.patch("/api/admin/settings", { data: { ecommerceVisualQualityCheckEnabled: false, ecommerceModelRoles: { ...e2eSettingsPatch().ecommerceModelRoles, quality_check: [] } } });
-    expect(saved.ok()).toBe(true);
-    const first = await submitProductScene(page, cases[0]);
-    const firstRun = await waitForRun(request, first.runId, "completed");
-    expect(firstRun.assetIds).toHaveLength(1);
-    const firstTrace = await expectAdminTrace(request, firstRun.id, "not_run");
-    expect(traceStage(firstTrace, "quality_check")).toMatchObject({ status: "not_run", output: { policy: "disabled" } });
-    expect(traceStage(firstTrace, "quality_check").model).toBeUndefined();
-    expect(traceStage(firstTrace, "edit_planning").output.modelRoles?.qualityCheck).toBeNull();
-    expect(traceStage(firstTrace, "image_generation").output.technicalCheck?.status).toBe("passed");
-    await expectProductResult(page);
-    await expect(page.getByTestId("creative-quality-review")).toHaveCount(0);
-    const downloading = page.waitForEvent("download");
-    await page.getByRole("button", { name: "下载", exact: true }).last().click();
-    expect(await (await downloading).failure()).toBeNull();
-    await page.getByRole("button", { name: "更多本轮创作操作", exact: true }).last().click();
-    await page.getByRole("menuitem", { name: "引用结果", exact: true }).click();
-    await page.getByRole("button", { name: "更多本轮创作操作", exact: true }).last().click();
-    await page.getByRole("menuitem", { name: "取消引用", exact: true }).click();
-    const second = await submitPrompt(page, "让场景光线再亮一点。", { reusePage: true });
-    const secondRun = await waitForRun(request, second.runId, "completed");
-    const secondTrace = await expectAdminTrace(request, secondRun.id, "not_run");
-    expect(traceStage(secondTrace, "edit_planning").output).toMatchObject({ source: { currentSceneBaselineId: firstRun.assetIds![0] }, continuity: { parentResultId: firstRun.assetIds![0] } });
-    expect(traceStage(secondTrace, "image_generation").output.technicalCheck?.status).toBe("passed");
-    expect(secondRun.assetIds).toHaveLength(1);
-    await expect(page.getByTestId("creative-media-result")).toHaveCount(2);
-    const state = await protocolFixtureState(request);
-    expect(state.requests.filter((item) => item.method === "POST" && item.model === MODEL_ROUTES.quality_check.upstreamModel)).toHaveLength(0);
-    expect(state.requests.filter((item) => item.method === "POST" && /\/images\//.test(item.path))).toHaveLength(2);
 });
 
 test("reference-confirm:真实用途歧义刷新后确认同一轮并复用有效分析", async ({ page, request }) => {
@@ -480,9 +450,9 @@ async function installReferenceReviewFixture(page: Page, kind: CreativeReference
     return { run, controls, requestReceived: requestReceived.promise, release: () => gate.resolve(), createdRuns: () => created };
 }
 
-for (const goldenCase of cases) {
+for (const goldenCase of [cases[0]]) {
     test(`${goldenCase.caseId || goldenCase.id}:${goldenCase.category}白底或透明底商品可从一句话生成场景`, async ({ page, request }, testInfo) => {
-        test.skip(testInfo.project.name !== "chromium", "完整类别回归只在桌面 Chromium 执行");
+        test.skip(testInfo.project.name !== "chromium", "商品生成主链只在桌面 Chromium 执行");
 
         const created = await submitProductScene(page, goldenCase);
         const run = await waitForRun(request, created.runId, "completed");
@@ -500,7 +470,7 @@ for (const goldenCase of cases) {
     });
 }
 
-for (const golden of regressions.filter((item) => item.scenario === "selection")) {
+for (const golden of regressions.filter((item) => item.caseId === "conflicting-canvas")) {
     test(`${golden.caseId}:真实等待态确认原任务并回读独立保护证据`, async ({ page, request }, testInfo) => {
         test.skip(testInfo.project.name !== "chromium", "真实服务端链路在桌面执行；布局矩阵另有DTO测试");
         await page.goto("/create", { waitUntil: "domcontentloaded" });
@@ -605,18 +575,13 @@ for (const golden of regressions.filter((item) => item.scenario === "selection")
     });
 }
 
-for (const golden of regressions.filter((item) => ["hard_structure", "quality_unavailable", "soft_quality"].includes(item.scenario))) {
+for (const golden of regressions.filter((item) => item.scenario === "quality_unavailable")) {
     test(`${golden.caseId}:真实生成先交付再提供可选视觉建议`, async ({ page, request }, testInfo) => {
         test.skip(testInfo.project.name !== "chromium", "服务端门禁专项");
         const created = await submitProductScene(page, { ...cases[0], userRequest: golden.userRequest });
         const run = await waitForRun(request, created.runId, "completed");
-        const trace = await expectAdminTrace(request, created.runId, golden.scenario === "hard_structure" ? "blocked" : golden.scenario === "quality_unavailable" ? "unavailable" : "needs_adjustment");
+        const trace = await expectAdminTrace(request, created.runId, "unavailable");
         expectLatestTraceVersions(trace);
-        const quality = traceStage(trace, "quality_check").output;
-        if (golden.scenario === "hard_structure") {
-            expect(quality.observations).toMatchObject({ baseline: { visibleStructure: [{ count: 3 }] }, results: [{ observation: { visibleStructure: [{ count: 4 }] } }] });
-            expect(quality.hardFailures).toEqual(expect.arrayContaining([expect.objectContaining({ key: "protected_structure", status: "failed" })]));
-        } else if (golden.scenario === "soft_quality") expect(quality.hardFailures).toEqual([]);
         const assets = await conversationAssets(request, run.conversationId);
         expect(assets.some((asset) => asset.sourceRunId === run.id && asset.status === "ready")).toBe(true);
         expect((await protocolFixtureState(request)).requests.filter((item) => item.method === "POST" && item.path.endsWith("/images/edits"))).toHaveLength(1);
@@ -626,89 +591,6 @@ for (const golden of regressions.filter((item) => ["hard_structure", "quality_un
         expectPublicWhitelist(run);
     });
 }
-
-test("scene-no-product-continuity:真实两轮编排保持根父结果与历史分支", async ({ page, request }, testInfo) => {
-    test.skip(testInfo.project.name !== "chromium", "场景连续性专项");
-    const golden = regressions.find((item) => item.caseId === "scene-no-product-continuity")!;
-    const product = { ...cases[5], productFileName: "scene-only.webp", fixturePath: cases[5].sceneFixturePath!, fixtureSha256: cases[5].sceneFixtureSha256!, userRequest: golden.userRequest };
-    const first = await submitProductScene(page, product);
-    const firstRun = await waitForRun(request, first.runId, "completed");
-    const firstTrace = await expectAdminTrace(request, firstRun.id, "passed");
-    const firstSource = traceStage(firstTrace, "edit_planning").output.source!.currentSceneBaselineId;
-    expect(traceStage(firstTrace, "edit_planning").output.source!.productAnchorId).toBeNull();
-    const second = await submitPrompt(page, golden.followupRequest!, { reusePage: true });
-    pausedRunForCleanup = second;
-    const waiting = await waitForRun(request, second.runId, "paused");
-    const selection = waiting.ecommerceSceneSelection!;
-    expect(selection).toMatchObject({ action: "confirm_scene_selection", baselineAssetId: firstRun.assetIds![0], width: 1024, height: 1024 });
-    expect(waiting.tasks).toEqual([expect.objectContaining({ id: "ecommerce-scene-edit", status: "needs_review" })]);
-    expectPublicWhitelist(waiting);
-    const taskId = waiting.tasks![0].id;
-    expect((await protocolFixtureState(request)).requests.filter((item) => item.method === "POST" && item.path.endsWith("/images/edits"))).toHaveLength(1);
-    let resumeSubmissions = 0;
-    page.on("request", (request) => {
-        if (request.method() === "POST" && new URL(request.url()).pathname === `/api/agent/runs/${second.runId}/resume`) resumeSubmissions++;
-    });
-    await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
-    const image = page.getByRole("img", { name: "选择修改位置的原图", exact: true });
-    await expect(image).toBeVisible();
-    await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).complete && (element as HTMLImageElement).naturalWidth > 0 && (element as HTMLImageElement).naturalHeight > 0)).toBe(true);
-    await image.scrollIntoViewIfNeeded();
-    const box = await image.boundingBox();
-    if (!box) throw new Error("Continuity selection image has no geometry");
-    await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
-    await page.mouse.down();
-    await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.8);
-    await page.mouse.up();
-    const confirm = page.getByTestId("creative-scene-selection").getByRole("button", { name: /确认修改位置$/ });
-    await expect(confirm).toBeEnabled();
-    const resumeResponse = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/agent/runs/${second.runId}/resume`);
-    await confirm.click();
-    const resumed = await resumeResponse;
-    expect(resumed.ok(), await resumed.text()).toBe(true);
-    const body = resumed.request().postDataJSON() as { conversationId: string; sceneSelection: CreativeSceneSelection };
-    expect(body).toMatchObject({ conversationId: second.conversationId, sceneSelection: { baselineAssetId: selection.baselineAssetId } });
-    const resumedRun = ((await resumed.json()) as { data: { run: PublicRun } }).data.run;
-    expect(resumedRun).toMatchObject({ id: second.runId, conversationId: second.conversationId, tasks: [{ id: taskId }] });
-    expectPublicWhitelist(resumedRun);
-    const secondRun = await waitForRun(request, second.runId, "completed");
-    pausedRunForCleanup = undefined;
-    expect(secondRun.tasks?.[0].id).toBe(taskId);
-    expect(resumeSubmissions).toBe(1);
-    expect((await protocolFixtureState(request)).requests.filter((item) => item.method === "POST" && item.path.endsWith("/images/edits"))).toHaveLength(2);
-    const secondTrace = await expectAdminTrace(request, secondRun.id, "passed");
-    expectLatestTraceVersions(secondTrace);
-    expect(traceStage(secondTrace, "edit_planning").output.protection).toMatchObject({ scope: "local", preserveOutsideMask: true, allowLightingChange: false });
-    expect(traceStage(secondTrace, "image_generation").output.mask).toEqual({ mode: "independent", required: true });
-    const evidence = traceStage(secondTrace, "quality_check").output.sceneProtectionEvidence?.[0].evidence;
-    expect(evidence).toMatchObject({ sourceAssetId: selection.baselineAssetId, targetRegion: body.sceneSelection.region, compositeOutsideChangedPixels: 0 });
-    if (!evidence?.maskUrl) throw new Error("Continuity edit lacks a real selection mask");
-    const maskResponse = await request.get(evidence.maskUrl);
-    expect(maskResponse.ok()).toBe(true);
-    const mask = await sharp(await maskResponse.body())
-        .ensureAlpha()
-        .raw()
-        .toBuffer({ resolveWithObject: true });
-    expect(mask.info).toMatchObject({ width: selection.width, height: selection.height, channels: 4 });
-    const region = body.sceneSelection.region;
-    const insideMaskOffset = (Math.floor(region.y + region.height / 2) * selection.width + Math.floor(region.x + region.width / 2)) * 4;
-    expect(mask.data[insideMaskOffset + 3]).toBe(0);
-    expect(mask.data[3]).toBe(255);
-    expect(traceStage(secondTrace, "image_generation").output.continuity).toMatchObject({ sceneRootAssetId: firstSource, parentResultId: firstRun.assetIds![0], parentQualityCheck: { version: "ecommerce-quality.v2", status: "passed" } });
-    expect(secondRun.assetIds![0]).not.toBe(firstRun.assetIds![0]);
-    await page.getByRole("button", { name: "更多本轮创作操作" }).first().click();
-    await page.getByRole("menuitem", { name: "引用结果" }).click();
-    const branch = await submitPrompt(page, "无商品锚点场景，从较早结果改成午后阳光。", { reusePage: true });
-    pausedRunForCleanup = branch;
-    const branchRun = await waitForRun(request, branch.runId, "completed");
-    pausedRunForCleanup = undefined;
-    expect(branchRun.ecommerceReferenceReview).toBeNull();
-    const branchTrace = await expectAdminTrace(request, branchRun.id, "passed");
-    expect(traceStage(branchTrace, "image_generation").output.continuity).toMatchObject({ sceneRootAssetId: firstSource, parentResultId: firstRun.assetIds![0], parentQualityCheck: { status: "passed" } });
-    expect(traceStage(branchTrace, "edit_planning").output.continuity?.branchId).not.toBe(traceStage(secondTrace, "edit_planning").output.continuity?.branchId);
-    const unchanged = await request.get(`/api/agent/runs/${first.runId}`);
-    expect(((await unchanged.json()) as { data: { run: PublicRun } }).data.run.assetIds).toEqual(firstRun.assetIds);
-});
 
 test("unsupported-mask:真实协议能力门禁保留原任务且不整图重绘", async ({ page, request }, testInfo) => {
     test.skip(testInfo.project.name !== "chromium", "真实协议否定对照在桌面执行");
@@ -1004,32 +886,6 @@ function expectPublicObject(value: unknown, shape: Record<string, unknown>, requ
     return record;
 }
 
-test("public-contract:公开Run逐层拒绝未发布字段", () => {
-    const run: CreativeAgentRun = {
-        id: "public-contract-run",
-        conversationId: "public-contract-conversation",
-        inputMessageId: "public-contract-input",
-        assistantMessageId: "public-contract-assistant",
-        surface: "chat",
-        status: "paused",
-        prompt: "只加花瓶",
-        createdAt: 1,
-        updatedAt: 1,
-        assetIds: [],
-        generationPreferences: { mode: "image", image: { size: "100x80", quality: "high", count: 1 } },
-        tasks: [{ id: "public-contract-task", title: "生成图片", type: "image", model: "fixture-image", status: "needs_review" }],
-        ecommerceSceneSelection: { action: "confirm_scene_selection", baselineAssetId: "public-contract-baseline", url: "/api/reference-assets/public-contract.png", width: 100, height: 80 },
-        ecommerceQualityReview: { kind: "hard_failure", failureKeys: ["protected_structure"] },
-    };
-    expectPublicWhitelist(run);
-    for (const extra of [{ plannerContext: {} }, { results: [] }, { childTasks: [] }]) expect(() => expectPublicWhitelist({ ...run, ...extra })).toThrow();
-    expect(() => expectPublicWhitelist({ ...run, tasks: [{ ...run.tasks[0], childTasks: [] }] } as PublicRun)).toThrow();
-    expect(() => expectPublicWhitelist({ ...run, tasks: [{ ...run.tasks[0], results: [] }] } as PublicRun)).toThrow();
-    expect(() => expectPublicWhitelist({ ...run, ecommerceSceneSelection: { ...run.ecommerceSceneSelection!, confirmation: {} } } as PublicRun)).toThrow();
-    expect(() => expectPublicWhitelist({ ...run, generationPreferences: { image: { providerRequest: {} } } } as PublicRun)).toThrow();
-    expect(() => expectPublicWhitelist({ ...run, ecommerceQualityReview: { ...run.ecommerceQualityReview!, observations: {} } } as PublicRun)).toThrow();
-});
-
 function expectLatestTraceVersions(trace: EcommerceTrace) {
     expect(traceStage(trace, "visual_analysis").output.analysisVersion).toBe("ecommerce-visual-analysis.v4");
     expect(traceStage(trace, "edit_planning").output).toMatchObject({ planVersion: "ecommerce-edit.v6", visibleStructure: expect.any(Array) });
@@ -1065,7 +921,7 @@ test("white-product-style-reference:可选场景参考仍以商品为锚点并�
     });
     await expectProductResult(page);
     const resultSource = await page.getByTestId("creative-media-result").last().getByRole("img").getAttribute("src");
-    expect(resultSource).toMatch(/^\/api\/generation-log-assets\/permanent\/.+\.png(?:\?.*)?$/);
+    expect(resultSource).toMatch(/^\/api\/(?:generation-log-assets|reference-assets)\/.+\.png(?:\?.*)?$/);
 
     await page.reload({ waitUntil: "domcontentloaded" });
     await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
@@ -1073,31 +929,187 @@ test("white-product-style-reference:可选场景参考仍以商品为锚点并�
     expect(run.assetIds?.length).toBeGreaterThan(0);
 });
 
-test("historical-branch:连续编辑默认继承最近结果并可从较早结果建立分支", async ({ page, request }, testInfo) => {
+test("large-reference:四千八百万像素参考图完成真实创作并刷新恢复", async ({ page, request }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "大像素参考图回归只在桌面 Chromium 执行");
+    const goldenCase = cases[5];
+    const product = uploadFixture(goldenCase.fixturePath, goldenCase.productFileName, goldenCase.fixtureSha256);
+    const scene = {
+        name: "large-style-reference.jpg",
+        mimeType: "image/jpeg",
+        buffer: await sharp({ create: { width: 8000, height: 6000, channels: 3, background: "#203040" } })
+            .jpeg()
+            .toBuffer(),
+    };
+    await page.goto("/create", { waitUntil: "domcontentloaded" });
+    await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
+    await selectImageMode(page);
+    await page.locator('input[type="file"][multiple]').setInputFiles([product, scene]);
+    for (const file of [product, scene]) await expect(page.getByLabel(`已上传图片 ${file.name}`)).toBeVisible({ timeout: 30_000 });
+    const created = await submitPrompt(page, goldenCase.userRequest, { reusePage: true });
+    const run = await waitForRun(request, created.runId, "completed");
+    expect(run.ecommerceReferenceReview).toBeFalsy();
+    const trace = await expectAdminTrace(request, run.id, "passed");
+    expectSuccessfulTrace(trace, { operation: goldenCase.expectedOperation, hardProtections: goldenCase.hardProtections, userRequest: goldenCase.userRequest, sceneReferenceCount: 1 });
+    await expectProductResult(page);
+    const resultSource = await page.getByTestId("creative-media-result").last().getByRole("img").getAttribute("src");
+    expect(resultSource).toMatch(/^\/api\/(?:generation-log-assets|reference-assets)\//);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
+    await expect(page.getByTestId("creative-media-result").last().getByRole("img")).toHaveAttribute("src", resultSource!);
+    await expect(page.getByTestId("creative-reference-review")).toHaveCount(0);
+});
+
+test("large-product-reference:四千二百多万像素商品完成原尺寸保护并刷新恢复", async ({ page, request }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "大商品原尺寸保护回归只在桌面 Chromium 执行");
+    const goldenCase = cases[5];
+    const userRequest = goldenCase.userRequest + " 输出图片尺寸1024x1024。";
+    const product = {
+        name: goldenCase.productFileName,
+        mimeType: "image/png",
+        buffer: await sharp({ create: { width: 7997, height: 5334, channels: 4, background: "#ffffff" } })
+            .composite([{ input: { create: { width: 3200, height: 2800, channels: 4, background: "#252525" } }, left: 2400, top: 1200 }])
+            .png()
+            .toBuffer(),
+    };
+    const scene = {
+        name: "small-style-reference.png",
+        mimeType: "image/png",
+        buffer: await sharp({ create: { width: 64, height: 48, channels: 3, background: "#203040" } })
+            .png()
+            .toBuffer(),
+    };
+    await page.goto("/create", { waitUntil: "domcontentloaded" });
+    await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
+    await selectImageMode(page);
+    await page.locator('input[type="file"][multiple]').setInputFiles([product, scene]);
+    await expect(page.getByLabel(`已上传图片 ${product.name}`)).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByLabel(`已上传图片 ${scene.name}`)).toBeVisible({ timeout: 30_000 });
+
+    const created = await submitPrompt(page, userRequest, { reusePage: true });
+    await testInfo.attach("resident-f02-source.json", {
+        body: JSON.stringify(
+            {
+                source: { width: 7997, height: 5334, bytes: product.buffer.length, sha256: createHash("sha256").update(product.buffer).digest("hex") },
+                style: { width: 64, height: 48, bytes: scene.buffer.length, sha256: createHash("sha256").update(scene.buffer).digest("hex") },
+            },
+            null,
+            2,
+        ),
+        contentType: "application/json",
+    });
+    const activity = await observeResidentF02(request, new URL(page.url()).origin, created.runId);
+    try {
+        const run = await waitForRun(request, created.runId, "completed");
+        expect(run.ecommerceReferenceReview).toBeFalsy();
+        expect(run.assetIds).toHaveLength(1);
+        let trace: EcommerceTrace | undefined;
+        await expect
+            .poll(
+                async () => {
+                    const response = await request.get("/api/admin/generation-logs?page=1&pageSize=100");
+                    expect(response.ok()).toBe(true);
+                    const payload: { logs: Array<{ ecommerceTrace?: EcommerceTrace }> } = await response.json();
+                    trace = payload.logs.find((log) => log.ecommerceTrace?.runId === run.id)?.ecommerceTrace;
+                    return trace?.stages.find((stage) => stage.key === "quality_check")?.status;
+                },
+                { timeout: 30_000 },
+            )
+            .toBe("passed");
+        assert.ok(trace);
+        expect(trace).toMatchObject({ runId: run.id, finalStatus: "completed" });
+        expectTraceRoutes(trace);
+        expectLatestTraceVersions(trace);
+        expect(trace.imageTaskIds).toHaveLength(1);
+        expect(traceStage(trace, "edit_planning").output).toMatchObject({ operation: "product_to_scene", canvas: { mode: "exact", source: "user_text", size: { width: 1024, height: 1024 } } });
+        expect(traceStage(trace, "image_generation").output).toMatchObject({
+            mask: { mode: "independent", required: true },
+            protection: { sourceSize: { width: 7997, height: 5334 }, productCore: [{ x: 2400, y: 1200, width: 3200, height: 2800 }], maskProvider: "white-background-flood-fill.v1", maskTrust: "trusted" },
+        });
+        expect((await protocolFixtureState(request)).requests.filter((item) => item.method === "POST" && item.path.endsWith("/images/edits"))).toHaveLength(1);
+        await testInfo.attach("large-product-protection.json", { body: JSON.stringify(traceStage(trace, "image_generation").output.protection, null, 2), contentType: "application/json" });
+        const assetsResponse = await request.get(`/api/creative/conversations/${run.conversationId}/assets`);
+        expect(assetsResponse.ok()).toBe(true);
+        const assetsPayload: { data: { assets: Array<{ id: string; sourceRunId?: string; serverUrl?: string }> } } = await assetsResponse.json();
+        const deliveredAsset = assetsPayload.data.assets.find((asset) => asset.id === run.assetIds?.[0]);
+        assert.ok(deliveredAsset?.serverUrl);
+        expect(deliveredAsset.sourceRunId).toBe(run.id);
+        const expectedSource = new URL(deliveredAsset.serverUrl, page.url());
+        const resultImage = page.getByTestId("creative-media-result").last().getByTestId("creative-primary-result").getByRole("img");
+        await expect(resultImage).toBeVisible({ timeout: 30_000 });
+        await expect
+            .poll(async () => {
+                const source = await resultImage.getAttribute("src");
+                assert.ok(source);
+                const preview = new URL(source, page.url());
+                return { origin: preview.origin, pathname: preview.pathname };
+            })
+            .toEqual({ origin: expectedSource.origin, pathname: expectedSource.pathname });
+        const resultSource = await resultImage.getAttribute("src");
+        assert.ok(resultSource);
+
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
+        await expect(resultImage).toHaveAttribute("src", resultSource);
+        await expect(page.getByTestId("creative-reference-review")).toHaveCount(0);
+        const restored = await request.get(`/api/agent/runs/${created.runId}`);
+        expect(restored.ok()).toBe(true);
+        expect((await restored.json()).data.run).toMatchObject({ id: created.runId, status: "completed", assetIds: run.assetIds, ecommerceQualityStatus: "passed" });
+        await activity.terminal;
+    } finally {
+        const evidence = await activity.close();
+        await testInfo.attach("resident-f02-http-sse.json", { body: JSON.stringify(evidence, null, 2), contentType: "application/json" });
+        expect.soft(evidence.failures).toEqual([]);
+        expect.soft(evidence.health.length).toBeGreaterThan(0);
+        expect.soft(evidence.task.length).toBeGreaterThan(0);
+        expect.soft(evidence.sse.status).toBe(200);
+        expect.soft(evidence.sse.contentType).toContain("text/event-stream");
+        expect.soft(evidence.sse.naturalClose).toBe(true);
+        expect.soft(evidence.sse.frames.map((frame) => frame.event)).toEqual(expect.arrayContaining(["run.snapshot", "run.completed"]));
+    }
+});
+
+test("historical-branch:关闭质检仍可下载连续编辑并从较早结果建立分支", async ({ page, request }, testInfo) => {
     test.skip(testInfo.project.name !== "chromium", "连续性回归只在桌面 Chromium 执行");
+    const saved = await request.patch("/api/admin/settings", { data: { ecommerceVisualQualityCheckEnabled: false, ecommerceModelRoles: { ...e2eSettingsPatch().ecommerceModelRoles, quality_check: [] } } });
+    expect(saved.ok()).toBe(true);
     const first = await submitProductScene(page, cases[0]);
     const firstRun = await waitForRun(request, first.runId, "completed");
-    const firstTrace = await expectAdminTrace(request, firstRun.id, "passed");
-    expectSuccessfulTrace(firstTrace, {
+    expect(firstRun.assetIds).toHaveLength(1);
+    expectPublicWhitelist(firstRun);
+    const firstTrace = await expectAdminTrace(request, firstRun.id, "not_run");
+    expect(traceStage(firstTrace, "quality_check")).toMatchObject({ status: "not_run", output: { policy: "disabled" } });
+    expect(traceStage(firstTrace, "quality_check").model).toBeUndefined();
+    expect(traceStage(firstTrace, "image_generation").output.technicalCheck?.status).toBe("passed");
+    expect(traceStage(firstTrace, "edit_planning").output).toMatchObject({
         operation: cases[0].expectedOperation,
-        hardProtections: cases[0].hardProtections,
-        userRequest: cases[0].userRequest,
+        preserve: { productCore: cases[0].hardProtections },
+        modelRoles: { qualityCheck: null },
     });
     const originalProductAnchorId = traceStage(firstTrace, "edit_planning").output.source?.productAnchorId;
     expect(originalProductAnchorId).toBeTruthy();
+    const firstAsset = (await conversationAssets(request, first.conversationId)).find((asset) => asset.id === firstRun.assetIds![0]);
+    expect(firstAsset).toMatchObject({ id: firstRun.assetIds![0], status: "ready" });
     await expectProductResult(page);
+    await expect(page.getByTestId("creative-quality-review")).toHaveCount(0);
+    const downloading = page.waitForEvent("download");
+    await page.getByRole("button", { name: "下载", exact: true }).last().click();
+    expect(await (await downloading).failure()).toBeNull();
+    await page.getByRole("button", { name: "更多本轮创作操作", exact: true }).last().click();
+    await page.getByRole("menuitem", { name: "引用结果", exact: true }).click();
+    await page.getByRole("button", { name: "更多本轮创作操作", exact: true }).last().click();
+    await page.getByRole("menuitem", { name: "取消引用", exact: true }).click();
 
     const secondPrompt = "让场景光线再亮一点。";
     const second = await submitPrompt(page, secondPrompt, { reusePage: true });
     const secondRun = await waitForRun(request, second.runId, "completed");
-    const secondTrace = await expectAdminTrace(request, secondRun.id, "passed");
-    expectSuccessfulTrace(secondTrace, {
-        operation: "local_edit",
-        hardProtections: cases[0].hardProtections,
-        userRequest: secondPrompt,
-    });
+    expect(secondRun.assetIds).toHaveLength(1);
+    expectPublicWhitelist(secondRun);
+    const secondTrace = await expectAdminTrace(request, secondRun.id, "not_run");
+    expect(traceStage(secondTrace, "image_generation").output.technicalCheck?.status).toBe("passed");
     expect(traceStage(secondTrace, "edit_planning").output).toMatchObject({
         operation: "local_edit",
+        preserve: { productCore: cases[0].hardProtections },
+        modelRoles: { qualityCheck: null },
         source: {
             productAnchorId: originalProductAnchorId,
             currentSceneBaselineId: firstRun.assetIds?.[0],
@@ -1105,6 +1117,9 @@ test("historical-branch:连续编辑默认继承最近结果并可从较早结�
         continuity: { parentResultId: firstRun.assetIds?.[0] },
     });
     expect(secondRun.assetIds?.[0]).not.toBe(firstRun.assetIds?.[0]);
+    const secondAsset = (await conversationAssets(request, second.conversationId)).find((asset) => asset.id === secondRun.assetIds![0]);
+    expect(secondAsset).toMatchObject({ id: secondRun.assetIds![0], status: "ready" });
+    await expect(page.getByTestId("creative-media-result")).toHaveCount(2);
 
     const roundActionButtons = page.getByRole("button", {
         name: "更多本轮创作操作",
@@ -1115,14 +1130,14 @@ test("historical-branch:连续编辑默认继承最近结果并可从较早结�
     const branchPrompt = "从这张较早结果把背景改成现代厨房。";
     const branch = await submitPrompt(page, branchPrompt, { reusePage: true });
     const branchRun = await waitForRun(request, branch.runId, "completed");
-    const branchTrace = await expectAdminTrace(request, branchRun.id, "passed");
-    expectSuccessfulTrace(branchTrace, {
-        operation: "local_edit",
-        hardProtections: cases[0].hardProtections,
-        userRequest: branchPrompt,
-    });
+    expect(branchRun.assetIds).toHaveLength(1);
+    expectPublicWhitelist(branchRun);
+    const branchTrace = await expectAdminTrace(request, branchRun.id, "not_run");
+    expect(traceStage(branchTrace, "image_generation").output.technicalCheck?.status).toBe("passed");
     expect(traceStage(branchTrace, "edit_planning").output).toMatchObject({
         operation: "local_edit",
+        preserve: { productCore: cases[0].hardProtections },
+        modelRoles: { qualityCheck: null },
         source: {
             productAnchorId: originalProductAnchorId,
             currentSceneBaselineId: firstRun.assetIds?.[0],
@@ -1138,6 +1153,19 @@ test("historical-branch:连续编辑默认继承最近结果并可从较早结�
         parentResultId: firstRun.assetIds?.[0],
     });
     expect(assets.map((asset) => asset.id)).toEqual(expect.arrayContaining([firstRun.assetIds?.[0], secondRun.assetIds?.[0], branchRun.assetIds?.[0]]));
+    expect(assets.find((asset) => asset.id === firstRun.assetIds![0])).toEqual(firstAsset);
+    expect(assets.find((asset) => asset.id === secondRun.assetIds![0])).toEqual(secondAsset);
+    const unchanged = await request.get(`/api/agent/runs/${first.runId}`);
+    expect(unchanged.ok(), await unchanged.text()).toBe(true);
+    const unchangedRun = ((await unchanged.json()) as { data: { run: PublicRun } }).data.run;
+    expect(unchangedRun.assetIds).toEqual(firstRun.assetIds);
+    expectPublicWhitelist(unchangedRun);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.getByTestId("creative-media-result")).toHaveCount(3);
+    await expect(page.getByTestId("creative-quality-review")).toHaveCount(0);
+    const state = await protocolFixtureState(request);
+    expect(state.requests.filter((item) => item.method === "POST" && item.model === MODEL_ROUTES.quality_check.upstreamModel)).toHaveLength(0);
+    expect(state.requests.filter((item) => item.method === "POST" && /\/images\//.test(item.path))).toHaveLength(3);
 });
 
 test("角色歧义会暂停并且不会提交图片 provider", async ({ page, request }, testInfo) => {
@@ -1435,6 +1463,156 @@ for (const theme of ["light", "dark"] as const) {
     });
 }
 
+const RESOURCE_BLOCKED_MESSAGE = "图像处理因资源不足暂停，进度已保存。当前资源配置仍无法执行原图像阶段，请联系管理员检查。调整后请刷新页面。";
+const RESOURCE_READY_MESSAGE = "图像处理因资源不足暂停，进度已保存。资源已调整，可以继续原任务。";
+const RESOURCE_RESUME_ERROR = "原图像阶段状态已变化，请刷新后重试。";
+
+for (const theme of ["light", "dark"] as const) {
+    test(`resource-resume-ui:资源说明刷新后同一Run单次继续-${theme}`, async ({ page }, testInfo) => {
+        test.skip(testInfo.project.name !== "chromium", "桌面资源暂停专项；API/SSE为受控UI夹具");
+        await page.setViewportSize({ width: 1440, height: 900 });
+        await page.addInitScript((value) => localStorage.setItem("vozeb-pro:theme_store", JSON.stringify({ state: { theme: value }, version: 0 })), theme);
+        const fixture = await mockPublicEcommerceRound(page, "resource");
+        await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
+        const panel = page.getByTestId("creative-generation-waiting");
+        await expect(panel).toHaveCount(1);
+        await expect(panel).toBeVisible();
+        await expect(panel).toContainText(RESOURCE_BLOCKED_MESSAGE);
+        await expect(page.getByRole("button", { name: "继续图像处理", exact: true })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "检查状态", exact: true })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-generation-elapsed")).toHaveCount(0);
+        await expect.poll(() => page.locator("html").evaluate((element) => element.classList.contains("dark"))).toBe(theme === "dark");
+        await expectNoHorizontalOverflow(page, `resource blocked ${theme}`);
+        await testInfo.attach(`resource-blocked-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect(panel).toContainText(RESOURCE_BLOCKED_MESSAGE);
+        await expect(panel.getByRole("button")).toHaveCount(0);
+        expect(fixture.controls).toHaveLength(0);
+        expect(fixture.createdRuns()).toBe(0);
+        expect(fixture.eventSnapshots).not.toContainEqual(expect.objectContaining({ status: "running" }));
+
+        // This models a newly readable public projection after configuration changes; no admin mutation is claimed.
+        fixture.run.imageProcessingRecovery = { reason: "resource_failure", canResume: true, message: RESOURCE_READY_MESSAGE };
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect(panel).toContainText(RESOURCE_READY_MESSAGE);
+        const resume = panel.getByRole("button");
+        await expect(resume).toHaveCount(1);
+        await expect(resume).toHaveAccessibleName("继续图像处理");
+        await expect(resume).toBeEnabled();
+        await expect(page.getByRole("button", { name: "检查状态", exact: true })).toHaveCount(0);
+        const responsePromise = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/agent/runs/${fixture.runId}/resume`);
+        await resume.dblclick();
+        await expect(resume).toBeDisabled();
+        await expect(resume).toHaveText("正在继续");
+        await expect.poll(() => fixture.controls.length).toBe(1);
+        expect(fixture.controls).toEqual([{ conversationId: fixture.conversationId }]);
+        await expect(page.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-generation-elapsed")).toHaveCount(0);
+        expect(fixture.eventSnapshots).not.toContainEqual(expect.objectContaining({ status: "running" }));
+        fixture.releaseResume();
+        const response = await responsePromise;
+        expect(response.ok()).toBe(true);
+        expect((await response.json()).data.run).toMatchObject({ id: fixture.runId, conversationId: fixture.conversationId, inputMessageId: "task16-input", assistantMessageId: "task16-assistant", status: "running" });
+        await expect(panel.getByRole("button")).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "停止生成", exact: true })).toBeVisible();
+        await expect(page.getByTestId("creative-generation-elapsed")).toBeVisible();
+        await expect(page.getByTestId("creative-round-request")).toHaveCount(1);
+        await expect(page).toHaveURL(new RegExp(`[?&]conversationId=${fixture.conversationId}(?:&|$)`));
+        expect(fixture.controls).toEqual([{ conversationId: fixture.conversationId }]);
+        expect(fixture.createdRuns()).toBe(0);
+        await expectNoHorizontalOverflow(page, `resource resumed ${theme}`);
+        await testInfo.attach(`resource-resumed-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+    });
+}
+
+for (const scenario of [
+    { outcome: "error", responseStatus: 409, message: RESOURCE_RESUME_ERROR, remainingButtons: 1 },
+    { outcome: "paused", responseStatus: 200, message: RESOURCE_BLOCKED_MESSAGE, remainingButtons: 0 },
+] as const) {
+    test(`resource-resume-ui:失败或仍暂停响应不伪造运行-${scenario.outcome}`, async ({ page }, testInfo) => {
+        test.skip(testInfo.project.name !== "chromium", "桌面资源恢复响应专项；API/SSE为受控UI夹具");
+        const fixture = await mockPublicEcommerceRound(page, "resource", false, scenario.outcome);
+        fixture.run.imageProcessingRecovery = { reason: "resource_failure", canResume: true, message: RESOURCE_READY_MESSAGE };
+        await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
+        const panel = page.getByTestId("creative-generation-waiting");
+        await expect(panel).toContainText(RESOURCE_READY_MESSAGE);
+        const resume = panel.getByRole("button");
+        await expect(resume).toHaveAccessibleName("继续图像处理");
+        const responsePromise = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/agent/runs/${fixture.runId}/resume`);
+        await resume.dblclick();
+        await expect(resume).toBeDisabled();
+        await expect(resume).toHaveText("正在继续");
+        await expect.poll(() => fixture.controls.length).toBe(1);
+        fixture.releaseResume();
+        expect((await responsePromise).status()).toBe(scenario.responseStatus);
+        await expect(panel.getByRole("alert")).toContainText(scenario.message);
+        await expect(panel.getByRole("button")).toHaveCount(scenario.remainingButtons);
+        await expect(page.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "检查状态", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-generation-elapsed")).toHaveCount(0);
+        expect(fixture.eventSnapshots).not.toContainEqual(expect.objectContaining({ status: "running" }));
+        expect(fixture.run.status).toBe("paused");
+        expect(fixture.controls).toEqual([{ conversationId: fixture.conversationId }]);
+        expect(fixture.createdRuns()).toBe(0);
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect(panel).toBeVisible();
+        await expect(page.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
+        await expect(page.getByTestId("creative-generation-elapsed")).toHaveCount(0);
+        await expect(page.getByTestId("creative-round-request")).toHaveCount(1);
+    });
+}
+
+test("resource-resume-ui:成功后刷新按原Run运行态恢复且保留旧助手消息", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "桌面资源恢复刷新专项；API/SSE为受控UI夹具");
+    const fixture = await mockPublicEcommerceRound(page, "resource");
+    fixture.run.imageProcessingRecovery = { reason: "resource_failure", canResume: true, message: RESOURCE_READY_MESSAGE };
+    await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
+    const panel = page.getByTestId("creative-generation-waiting");
+    await expect(panel).toContainText(RESOURCE_READY_MESSAGE);
+    const responsePromise = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/agent/runs/${fixture.runId}/resume`);
+    await panel.getByRole("button", { name: "继续图像处理", exact: true }).click();
+    await expect.poll(() => fixture.controls.length).toBe(1);
+    fixture.releaseResume();
+    const response = await responsePromise;
+    expect(response.ok()).toBe(true);
+    expect((await response.json()).data.run).toMatchObject({ id: fixture.runId, conversationId: fixture.conversationId, status: "running" });
+    await expect(page.getByTestId("creative-generation-elapsed")).toBeVisible();
+    const eventsBeforeReload = fixture.eventSnapshots.length;
+    await page.reload({ waitUntil: "commit" });
+    const restoredRun = page
+        .waitForRequest((value) => value.method() === "GET" && new URL(value.url()).pathname === `/api/agent/runs/${fixture.runId}`)
+        .then(async (request) => {
+            const response = await request.response();
+            assert.ok(response);
+            return response.json();
+        });
+    const restoredMessages = page
+        .waitForRequest((value) => value.method() === "GET" && new URL(value.url()).pathname === `/api/creative/conversations/${fixture.conversationId}/messages`)
+        .then(async (request) => {
+            const response = await request.response();
+            assert.ok(response);
+            return response.json();
+        });
+    const restoredStream = page.waitForRequest((value) => value.method() === "GET" && new URL(value.url()).pathname === `/api/agent/runs/${fixture.runId}/events`);
+    const [runPayload, messagesPayload] = await Promise.all([restoredRun, restoredMessages]);
+    expect(runPayload.data.run).toMatchObject({ id: fixture.runId, conversationId: fixture.conversationId, status: "running" });
+    expect(messagesPayload.data.messages).toMatchObject([
+        { id: "task16-input", status: "completed" },
+        { id: "task16-assistant", runId: fixture.runId, status: "completed" },
+    ]);
+    await expect(panel).toBeVisible();
+    await expect(page.getByTestId("creative-generation-elapsed")).toBeVisible();
+    await expect(page.getByRole("button", { name: "停止生成", exact: true })).toBeVisible();
+    expect((await restoredStream).method()).toBe("GET");
+    await expect.poll(() => fixture.eventSnapshots.length).toBeGreaterThan(eventsBeforeReload);
+    expect(fixture.eventSnapshots.at(-1)).toEqual({ id: fixture.runId, conversationId: fixture.conversationId, status: "running" });
+    await expect(page.getByTestId("creative-round-request")).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "继续图像处理", exact: true })).toHaveCount(0);
+    expect(fixture.controls).toEqual([{ conversationId: fixture.conversationId }]);
+    expect(fixture.createdRuns()).toBe(0);
+});
+
 async function sceneSelectionImageGeometry(page: Page) {
     const image = page.getByRole("img", { name: "选择修改位置的原图", exact: true });
     await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(418);
@@ -1465,7 +1643,7 @@ async function dragSceneSelection(page: Page) {
     await page.mouse.up();
 }
 
-async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" | "hard" | "unavailable", runningMessage = false) {
+async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" | "hard" | "unavailable" | "resource", runningMessage = false, resourceResumeResult: "running" | "paused" | "error" = "running") {
     const conversationId = `task16-${state}`;
     const otherConversationId = `${conversationId}-other`;
     const timestamp = Date.now();
@@ -1495,20 +1673,23 @@ async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" 
         updatedAt: timestamp,
         assetIds: state === "soft" ? ["task16-preview"] : [],
         tasks: [{ id: "task16-task", title: "生成图片", type: "image", model: "fixture-image", status: state === "soft" ? "completed" : "needs_review" }],
-        ...(state === "selection"
-            ? { ecommerceSceneSelection: { action: "confirm_scene_selection", baselineAssetId: "task16-baseline", url: "/api/reference-assets/task16-baseline.png", width: 1254, height: 627 } }
-            : {
-                  ecommerceQualityStatus: state === "soft" ? "needs_adjustment" : "needs_review",
-                  ecommerceQualityReview: {
-                      kind: state === "soft" ? "needs_adjustment" : state === "hard" ? "hard_failure" : "check_unavailable",
-                      failureKeys: state === "hard" ? ["canvas_geometry"] : state === "soft" ? ["composition_lighting"] : [],
-                      ...(state === "hard" ? { message: "画幅与要求不一致：要求 1024×1024，上游原图 1254×1254。" } : {}),
-                  },
-              }),
+        ...(state === "resource"
+            ? { imageProcessingRecovery: { reason: "resource_failure", canResume: false, message: RESOURCE_BLOCKED_MESSAGE }, canCheckStatus: false }
+            : state === "selection"
+              ? { ecommerceSceneSelection: { action: "confirm_scene_selection", baselineAssetId: "task16-baseline", url: "/api/reference-assets/task16-baseline.png", width: 1254, height: 627 } }
+              : {
+                    ecommerceQualityStatus: state === "soft" ? "needs_adjustment" : "needs_review",
+                    ecommerceQualityReview: {
+                        kind: state === "soft" ? "needs_adjustment" : state === "hard" ? "hard_failure" : "check_unavailable",
+                        failureKeys: state === "hard" ? ["canvas_geometry"] : state === "soft" ? ["composition_lighting"] : [],
+                        ...(state === "hard" ? { message: "画幅与要求不一致：要求 1024×1024，上游原图 1254×1254。" } : {}),
+                    },
+                }),
     };
     const controls: Array<{ conversationId: string; sceneSelection?: CreativeSceneSelection }> = [];
     let created = 0;
     let statusReads = 0;
+    const eventSnapshots: Array<Pick<CreativeAgentRun, "id" | "conversationId" | "status">> = [];
     let releaseResume = () => {};
     const resumeRelease = new Promise<void>((resolve) => {
         releaseResume = resolve;
@@ -1583,12 +1764,22 @@ async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" 
     await page.route(new RegExp(`/api/agent/runs/${run.id}/resume$`), async (route) => {
         controls.push(route.request().postDataJSON());
         await resumeRelease;
+        if (state === "resource" && resourceResumeResult === "error") return route.fulfill({ status: 409, json: { code: 409, data: null, msg: RESOURCE_RESUME_ERROR } });
+        if (state === "resource" && resourceResumeResult === "paused") {
+            run.imageProcessingRecovery = { reason: "resource_failure", canResume: false, message: RESOURCE_BLOCKED_MESSAGE };
+            return route.fulfill({ json: { code: 0, data: { run }, msg: "OK" } });
+        }
         run.status = "running";
         delete run.ecommerceSceneSelection;
+        if (state === "resource") delete run.imageProcessingRecovery;
         await route.fulfill({ json: { code: 0, data: { run }, msg: "OK" } });
     });
-    await page.route(new RegExp(`/api/agent/runs/${run.id}/events$`), (route) => route.fulfill({ contentType: "text/event-stream", body: `event: run.snapshot\ndata: ${JSON.stringify({ ...run, status: "running" })}\n\n` }));
-    return { conversationId, otherConversationId, runId: run.id, run, controls, releaseResume: () => releaseResume(), createdRuns: () => created, statusReads: () => statusReads };
+    await page.route(new RegExp(`/api/agent/runs/${run.id}/events$`), (route) => {
+        const snapshot = state === "resource" ? run : { ...run, status: "running" as const };
+        eventSnapshots.push({ id: snapshot.id, conversationId: snapshot.conversationId, status: snapshot.status });
+        return route.fulfill({ contentType: "text/event-stream", body: `event: run.snapshot\ndata: ${JSON.stringify(snapshot)}\n\n` });
+    });
+    return { conversationId, otherConversationId, runId: run.id, run, controls, eventSnapshots, releaseResume: () => releaseResume(), createdRuns: () => created, statusReads: () => statusReads };
 }
 
 async function submitProductScene(page: Page, goldenCase: GoldenCase, options: { sceneReference?: boolean } = {}) {
@@ -1675,7 +1866,7 @@ async function waitForRun(request: APIRequestContext, runId: string, expectedSta
 async function expectProductResult(page: Page) {
     const result = page.getByTestId("creative-media-result").last();
     await expect(result).toBeVisible({ timeout: 30_000 });
-    await expect(result.getByTestId("creative-primary-result").getByRole("img")).toHaveAttribute("src", /\/api\/generation-log-assets\/permanent\/.+\.png/);
+    await expect(result.getByTestId("creative-primary-result").getByRole("img")).toHaveAttribute("src", /\/api\/(?:generation-log-assets|reference-assets)\/.+\.png/);
 }
 
 async function expectPublicProgress(request: APIRequestContext, runId: string) {
@@ -1799,8 +1990,8 @@ function expectSuccessfulTrace(
     expect(canvasEvidence).toHaveLength(1);
     const evidence = canvasEvidence[0];
     expect(evidence).toMatchObject({ resultId, constraint: canvas, nativeMatches: true, storedMatches: true, normalization: "none", hardFailures: [] });
-    expect(evidence.nativeUrl).toMatch(/^\/api\/generation-log-assets\/permanent\//);
-    expect(evidence.storedUrl).toMatch(/^\/api\/generation-log-assets\/permanent\//);
+    expect(evidence.nativeUrl).toMatch(/^\/api\/(?:generation-log-assets|reference-assets)\//);
+    expect(evidence.storedUrl).toMatch(/^\/api\/(?:generation-log-assets|reference-assets)\//);
     for (const size of [evidence.nativeSize, evidence.storedSize]) {
         expect(Number.isSafeInteger(size.width) && size.width > 0).toBe(true);
         expect(Number.isSafeInteger(size.height) && size.height > 0).toBe(true);

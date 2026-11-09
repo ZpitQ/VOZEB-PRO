@@ -49,11 +49,14 @@ COPY CHANGELOG.md /app/CHANGELOG.md
 COPY --from=web-build /app/web/public /app/web/public
 COPY --from=web-build /app/web/.next/standalone /app/web
 COPY --from=web-build /app/web/.next/static /app/web/.next/static
+COPY --from=web-build /app/web/.image-processing-runtime /app/web/.image-processing-runtime
 COPY --from=web-build /app/sharp-runtime/node_modules/.pnpm /app/web/node_modules/.pnpm
 COPY web/scripts/reset-admin-password.mjs /app/web/scripts/reset-admin-password.mjs
 COPY web/scripts/generation-runtime.mjs /app/web/scripts/generation-runtime.mjs
+COPY web/scripts/web-resource-preload.mjs /app/web/scripts/web-resource-preload.mjs
 COPY web/scripts/generation-worker-policy.mjs /app/web/scripts/generation-worker-policy.mjs
 COPY web/scripts/generation-worker.mjs /app/web/scripts/generation-worker.mjs
+COPY web/scripts/image-processing-supervisor.mjs /app/web/scripts/image-processing-supervisor.mjs
 COPY web/scripts/disaster-recovery-core.mjs /app/web/scripts/disaster-recovery-core.mjs
 COPY web/scripts/disaster-object-storage.mjs /app/web/scripts/disaster-object-storage.mjs
 COPY web/scripts/disaster-backup.mjs /app/web/scripts/disaster-backup.mjs
@@ -64,4 +67,4 @@ RUN mkdir -p /app/web/.data && chown -R node:node /app/web
 
 EXPOSE 3000
 USER node
-CMD ["sh", "-c", "cd /app/web && PORT=3000 node server.js"]
+CMD ["sh", "-c", "cd /app/web && PORT=3000 node --import ./scripts/web-resource-preload.mjs server.js"]

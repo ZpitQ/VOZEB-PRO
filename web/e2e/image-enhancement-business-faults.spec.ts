@@ -1157,7 +1157,7 @@ async function createNativeCase(page: Page, request: APIRequestContext, info: Te
     const baselineMedia = await mediaSnapshot(root, initial.imageTaskId);
     expect(baselineMedia.some((item) => item.sha256 === sha256(fixture.native))).toBe(true);
     expect((await request.get(initial.native.url)).ok()).toBe(true);
-    expect(initial.native.url).toMatch(/^\/api\/generation-log-assets\/permanent\//);
+    expect(initial.native.url).toMatch(/^\/api\/(?:generation-log-assets|reference-assets)\//);
     const original = await request.get(initial.native.url);
     expect(await decoded(await original.body())).toMatchObject({ width: 1254, height: 1254, sha256: sha256(fixture.native) });
     const baselineLog = await generationLog(request, id);
@@ -1377,7 +1377,7 @@ async function downloadOriginal(page: Page, actions: Locator) {
     const download = await pending;
     expect(await download.failure()).toBeNull();
     const url = new URL(download.url());
-    expect(url.pathname).toMatch(/^\/api\/generation-log-assets\/permanent\//);
+    expect(url.pathname).toMatch(/^\/api\/(?:generation-log-assets|reference-assets)\//);
     expect(url.searchParams.get("download")).toBe("original");
     expect(url.searchParams.has("width")).toBe(false);
     expect(url.searchParams.has("format")).toBe(false);

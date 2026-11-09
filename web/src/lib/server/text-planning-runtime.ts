@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { SystemModelChannel } from "@/lib/auth/store";
 import { recordChannelRuntimeFailure, recordChannelRuntimeSuccess } from "@/lib/server/channel-runtime-health";
 import { fetchInternalApi } from "@/lib/server/internal-origin";
@@ -51,11 +52,28 @@ export type StructuredTextRequest = {
     allowRepair?: boolean;
     validateArguments?: (argumentsText: string) => boolean | TextPlanningValidation;
     onInvalidResponse?: (headers: Headers) => Promise<unknown>;
+    onBeforeRequest?: (request: TextPlanningSubmission) => Promise<void>;
     stream?: boolean;
     streamFallback?: boolean;
     onStreamStart?: () => Promise<void> | void;
     requestBodyBudget?: { maxBytes: number; onMeasured?: (measurement: TextPlanningBodyMeasurement) => void };
 };
+
+export type TextPlanningSubmission = { protocol: TextPlanningProtocol; variant: "json" | "tool" | "repair"; requestDigest: string };
+
+export class StructuredTextSubmissionRejectedError extends Error {
+    constructor(cause: unknown) {
+        super("视觉复核提交前检查已拒绝", { cause });
+        this.name = "StructuredTextSubmissionRejectedError";
+    }
+}
+
+export class StructuredTextSubmissionUnknownError extends Error {
+    constructor(cause: unknown) {
+        super("视觉复核模型提交结果未知", { cause });
+        this.name = "StructuredTextSubmissionUnknownError";
+    }
+}
 
 type ProtocolRequest = {
     protocol: TextPlanningProtocol;
@@ -108,11 +126,18 @@ export async function requestStructuredText(input: StructuredTextRequest): Promi
     try {
         for (const [index, prepared] of requests.entries()) {
             const request = prepared === "repair" ? planningProtocolRequest(input.candidate, planningMessages(input, true, validationIssues), "repair") : prepared;
+            let submitted = false;
             try {
-                const response = await requestTextProtocol(input, request);
+                const response = await requestTextProtocol(input, request, () => {
+                    submitted = true;
+                });
                 if (request.stream) await input.onStreamStart?.();
                 return await readStructuredResponse(input, request, response, startedAt);
             } catch (error) {
+                // A complete proxy 5xx can itself wrap an unknown upstream fetch.
+                if (error instanceof StructuredTextSubmissionRejectedError) throw error;
+                if (input.onBeforeRequest && submitted && (!(error instanceof TextPlanningRequestError) || error.reason === "transport" || (error.reason === "http" && (error.status >= 500 || error.status === 408))))
+                    throw new StructuredTextSubmissionUnknownError(error);
                 if (error instanceof TextPlanningRequestError) validationIssues = error.validationIssues;
                 if (input.stream && input.streamFallback !== false && index === 0 && shouldFallbackFromStream(error)) {
                     const fallback = await requestStructuredText({ ...input, stream: false, streamFallback: false });
@@ -291,7 +316,7 @@ function hasImageContent(content: AiTextMessage["content"]) {
     return Array.isArray(content) && content.some((part) => part.type === "image_url");
 }
 
-async function requestTextProtocol(input: StructuredTextRequest, request: ProtocolRequest) {
+async function requestTextProtocol(input: StructuredTextRequest, request: ProtocolRequest, beforeFetch: () => void) {
     const body = JSON.stringify(request.body);
     if (input.requestBodyBudget) {
         const bodyBytes = Buffer.byteLength(body, "utf8");
@@ -308,6 +333,14 @@ async function requestTextProtocol(input: StructuredTextRequest, request: Protoc
     scopeProtocolIdempotency(headers, request.protocol, request.variant, request.stream);
     const timeoutSignal = AbortSignal.timeout(resolveModelRequestTimeoutMs(input.candidate, "text"));
     const signal = input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal;
+    if (input.onBeforeRequest) {
+        try {
+            await input.onBeforeRequest({ protocol: request.protocol, variant: request.variant, requestDigest: createHash("sha256").update(body).digest("hex") });
+        } catch (error) {
+            throw new StructuredTextSubmissionRejectedError(error);
+        }
+    }
+    beforeFetch();
     try {
         return await fetchInternalApi(`${base}${normalizePath(request.path)}`, { method: "POST", headers, body, cache: "no-store", signal });
     } catch (error) {

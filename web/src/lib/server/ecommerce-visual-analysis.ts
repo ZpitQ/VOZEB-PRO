@@ -21,6 +21,8 @@ import {
     type EcommerceManualRegion,
 } from "./ecommerce-edit-plan";
 import { decodeEcommerceCanvasSize } from "./ecommerce-generation-service";
+import { loadPreparedEcommerceReference, type PreparedEcommerceReference } from "./ecommerce-reference-preparation";
+import { EcommerceReferenceSourceChangedError } from "./ecommerce-reference-recovery";
 import type { EcommercePlanningAssetCandidate, EcommercePlanningInput } from "./ecommerce-generation-snapshot";
 import type { EcommerceRoleCandidate, EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 import { boundEcommerceVisionImage } from "./ecommerce-vision-image";
@@ -99,6 +101,7 @@ export type EcommerceVisualAnalysisRequest = {
     userId: string;
     requestId: string;
     planningInput: EcommercePlanningInput;
+    preparedReferences?: PreparedEcommerceReference[];
     onSourcesLoaded?: (sources: EcommerceVisualSourceIdentity[]) => Promise<void>;
 };
 
@@ -154,8 +157,17 @@ export async function analyzeEcommerceReferences(
     }
     let images: Awaited<ReturnType<typeof normalizePlanningImage>>[];
     try {
-        images = await Promise.all(assets.map((asset) => normalizePlanningImage(asset.url!, input.origin, input.cookie)));
+        const prepared = input.preparedReferences;
+        images = await Promise.all(
+            assets.map((asset) => {
+                if (!prepared) return normalizePlanningImage(asset.url!, input.origin, input.cookie);
+                const reference = prepared.find((item) => item.assetId === asset.id);
+                if (!reference) throw new EcommerceVisualAnalysisError("参考预处理工件不完整", 400);
+                return loadPreparedEcommerceReference(reference, input.origin, input.cookie);
+            }),
+        );
     } catch (error) {
+        if (error instanceof EcommerceReferenceSourceChangedError) throw error;
         throw new EcommerceVisualAnalysisError(error instanceof Error ? error.message : "无法读取视觉分析图片", error instanceof EcommerceVisualAnalysisError ? error.status : 400, { analysisVersion, kind: "input_media", attempts: [] });
     }
     // This callback commits the phase and original source bytes before any model
@@ -546,7 +558,7 @@ function visualAnalysisV4Messages(planningInput: EcommercePlanningInput, assets:
         {
             role: "system" as const,
             content:
-                "你是电商图片视觉分析模型。contentType 仅描述可见内容，不代表用户用途。保留 completeScene 等原始布尔事实与内容置信度；近景、裁切、未知房间均可提供可靠的局部 cues。逐条记录实际可见的风格、光线、构图和材质表现，并独立给出线索 confidence。缺少完整可靠商品或场景事实时相应 Facts=null，禁止编造房间布局或完整摄影事实。productCore/fusionHalo 使用归一化坐标，fusionHalo 必须包围 productCore；editableTargets 只包含安全的背景、环境、道具、光线和阴影。visibleStructure 遮挡或不确定时 certainty=uncertain、count=null，已确认数量才能用非负整数。cues.evidenceRegion 和结构 evidenceRegion 使用原文件尺寸下的像素坐标。purposeSuggestions 只给本次图片的用途建议，单图可有多个用途；建议置信度与内容和线索置信度独立。显式引用与确认优先，最终用途由服务端决定，不得互换图片或补造商品身份。完整摄影事实才可返回 photographyFacts，局部观察放入 cues；material_appearance 不代表允许改商品材质。",
+                "你是电商图片视觉分析模型。contentType 仅描述可见内容，不代表用户用途。保留 completeScene 等原始布尔事实与内容置信度；近景、裁切、未知房间均可提供可靠的局部 cues。逐条记录实际可见的风格、光线、构图和材质表现，并独立给出线索 confidence。productFacts 的 identity、outline、color、material、view 只记录画面中可直接观察的商品事实。清晰的白底或透明底商品局部图可填写当前可见局部的事实，并在 identity、outline、view 中明确局部和裁切范围，不要求推断完整商品或画面外结构；任何必需商品事实无法可靠观察时 productFacts=null。缺少可靠完整场景事实时 sceneFacts=null，禁止编造房间布局或完整摄影事实。productCore/fusionHalo 使用归一化坐标，fusionHalo 必须包围 productCore；editableTargets 只包含安全的背景、环境、道具、光线和阴影。visibleStructure 遮挡或不确定时 certainty=uncertain、count=null，已确认数量才能用非负整数。cues.evidenceRegion 和结构 evidenceRegion 使用原文件尺寸下的像素坐标。purposeSuggestions 只给本次图片的用途建议，单图可有多个用途；建议置信度与内容和线索置信度独立。显式引用与确认优先，最终用途由服务端决定，不得互换图片或补造商品身份。完整摄影事实才可返回 photographyFacts，局部观察放入 cues；material_appearance 不代表允许改商品材质。",
         },
         { role: "user" as const, content },
     ];

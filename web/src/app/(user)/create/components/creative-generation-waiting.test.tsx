@@ -48,6 +48,26 @@ describe("creative generation waiting", () => {
         expect(markup).not.toContain("已等待");
         expect(markup).not.toContain("animate-pulse");
     });
+    it.each([false, true])("explains the native resource pause and offers the original processing resume only when ready (%s)", (canResume) => {
+        const run: CreativeAgentRun & { imageProcessingRecovery: { reason: "resource_failure"; canResume: boolean; message: string } } = {
+            id: "run-original",
+            conversationId: "conversation-original",
+            inputMessageId: "input-original",
+            assistantMessageId: "assistant-original",
+            status: "paused",
+            assetIds: [],
+            tasks: [],
+            canCheckStatus: false,
+            imageProcessingRecovery: { reason: "resource_failure", canResume, message: "图像处理因资源不足暂停，进度已保存。" },
+        };
+        const markup = renderToStaticMarkup(<CreativeGenerationWaiting run={run} message={{ content: "任务已暂停", createdAt: 1 }} {...{ onResumeImageProcessing: async (_runId: string) => undefined }} />);
+        expect(markup).toContain("图像处理因资源不足暂停，进度已保存。");
+        expect(markup.includes("继续图像处理")).toBe(canResume);
+        expect(markup).not.toContain("检查状态");
+        expect(markup).not.toContain("已等待");
+        expect(markup).not.toContain("animate-pulse");
+    });
+
     it("uses the real task phase before elapsed-time comfort copy", () => {
         expect(creativeGenerationWaitingCopy({ mode: "image", runStatus: "planning", progressText: "正在理解需求并选择合适的创作能力", elapsedSeconds: 180 })).toContain("画面的氛围和细节");
         expect(creativeGenerationWaitingCopy({ mode: "text", runStatus: "planning", progressText: "正在理解需求并选择合适的创作能力", elapsedSeconds: 180 })).toContain("想法理顺");

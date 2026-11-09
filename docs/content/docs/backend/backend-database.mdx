@@ -7,6 +7,93 @@ description: VOZEB PRO PostgreSQL 主库表结构与 Repository 边界
 
 VOZEB PRO 商业版默认使用 PostgreSQL 作为主库。数据库初始化 SQL 由 `web/src/lib/server/database/schema.ts` 维护，服务端统一通过 `web/src/lib/server/database/` 下的 Repository 访问主库。
 
+## 原图片任务的私有领取身份
+
+原 `task_type=image` 每次成功领取在现有JSON payload中保存新的 `executionId`；无需新增数据库列。创建context不得写入该私有字段，公开任务响应继续使用显式白名单。续租保留身份，失租后同Worker重新领取也更换身份。
+
+图片续租与释放同时匹配原Worker、原领取身份及锁后仍有效的租约。PostgreSQL复用同一executor先锁当前行，再检查当前时间并写入；文件Provider在现有mutation锁内复核时间。恢复批次心跳、正常完成、结果保存、catch及取消都传实际领取时保存的身份。非image任务沿用既有语义；此处不宣称所有旧上游、结果和计费payload写入均已受相同隔离保护。
+
+## 图像处理内部阶段
+
+[大图Worker固定契约](../../../superpowers/plans/2026-10-27-image-processing-worker-contracts.md)复用 `generation_tasks`，新增内部 `task_type=image_processing`；仅扩展任务类型检查约束，不建立第二张队列表，不进入生图并发预留或独立扣费。旧网络任务领取集合不包含该类型。
+
+当前入队接缝实现 `prepare_reference` 的本地与对象Provider登记原件路径，以及依赖完整prepare证据的 `build_protection`。payload保存固定版本、operation、初始inputDigest、algorithmVersion、无路径的inputs/options与resource；每阶段ID为 `image-process-` 加固定顺序输入元组的SHA-256，client_request_id使用同摘要，attempt_no固定为0。首次补齐真实hash不重算初始摘要。sources只保存输入索引、登记scope、稳定站内storageKey、storageProvider及必要的存储实例身份，不保存签名URL、对象内部Key或临时路径。来源仍由父referenceCheckpoint及既有assetVersion绑定，登记归属和定位在短事务内重验。
+
+父关系已按操作固定：prepare_reference/build_protection保持Agent Run父、waitingFor及原输入/manifest摘要；仅process_result以实际ImageTask当前租约为执行父，Run只是可选业务关联。下述现有父Run检查点及事务资格仍限prepare/build；结果私有输入、封版/恢复与投影按本节后续固定契约实施，不能据此称结果阶段已接入。
+
+Web在事务外把同一原件流入受控临时文件，流式计数和hash，等待EOF及文件关闭后仅调用Sharp.metadata；resource.facts保存与原输入索引、资产版本和实际hash绑定的编码字节量及真实format/depth/channels，未完整解码时decodedInputs为空。resource另保存配置摘要、需求及非敏感预算配置；首次prepare仍按该操作64MP模型估算，元数据宽高不用于降低需求。需求无法承载时父子同时暂停并保存明确资源原因，临时排队不占租约。
+
+入队与父Run等待复用同一PostgreSQL executor并先锁当前父记录；文件Provider先持creative锁，再用一次generation-task mutation提交父/子真值。父processing保存按参考图追加的prepareReferences和当前waitingFor，同时清旧executionId、租约及next_poll_at。沿用既有用户请求唯一索引和恢复索引。已保存prepare引用的重复请求只读核对原job、初始摘要、输入身份及已冻结hash，保留初始输入版本；不重新采集媒体，不改变已切换依赖或取消的父记录。冲突hash返回409；新的入队写入仍要求当前父执行身份。
+
+build_protection仅绑定一张当前v1参考，要求父保存的prepare引用/manifest与实际成功子阶段、原来源元组/hash和当前媒体归属/Provider/存储实例一致。编码字节量与layout从原prepare事实映射到v1，解码尺寸只取完整成功manifest，不重新采集或解码原件，也不改原prepare的job、摘要、v0输入或manifest。保护选项及所有矩形字段按固定顺序参与新阶段摘要，不受JSON对象键序影响。父processing新增可选protection引用，形状为jobId/inputDigest及可选manifest；新阶段与waitingFor在同一父子提交中保存，使用当前独立预算/profile准入，永久不可承载时父子一起暂停。同请求重放只读返回原阶段。
+
+保护阶段的mask上传沿同一流式写入与登记路径，完整EOF后校验PNG签名、正向单帧RGBA布局与冻结完整源尺寸；不在Web完整解码或重编码，不套分析缩图的4MiB/2048或用户参考上传上限。内部file writer以该关闭文件实际收到的字节量作为精确写入边界，不把4N内存预留当作PNG编码上限。result_payload按当前executionId暂存单个mask登记描述，相同内容复用首份描述，冲突与旧执行拒绝。
+
+局部场景确认保存在父Run私有 `ecommerceSnapshot.processing.sceneSelection`（`scene-selection-receipt.v1`）中：原逻辑task ID、当前content-bound源版本/SHA/字节量/原生尺寸、原实际prepare的job/inputDigest/执行身份/manifest摘要/初始版本、用户像素选区与冻结plan语义，以及首次提交的服务器actor/time。receipt不包含mask或可信完成状态；它与paused→running、原任务/完整snapshot/锁内实际prepare CAS、父created/due调度在既有恢复mutation中一起提交。同actor与同选区的合法重放仅返回原记录，不替换首次时间、重排任务或rearm原native阶段；不同选区、身份、取消与终态拒绝。新的父claim才创建scene_selection保护阶段；真实完成后再claim核实际成功阶段和登记mask，confirmation只从服务器receipt合入原任务。receipt/job/digest继续由既有公开Run/SSE白名单排除，不扩展客户端协议。
+
+保护完成复用原父子事务和首次完成收据，核对v1源身份、已登记mask及white/local/scene对应geometry与增强基线。qualified基线绑定源hash/字节量/尺寸及规范化摘要，商品合成证据另绑定anchor、源、mask和像素计数；合法unsupported资格保留原因且不使已合格mask失败。嵌套几何、资格及合成证据按固定字段元组计算manifest摘要，保留既有prepare摘要字节。仅当前父waitingFor、protection引用和来源仍匹配且未取消时合并protection.manifest并唤醒；原prepare、方案和参考检查点保持，已换依赖或取消时仅保存合格子结果。
+
+专用claim服务按相同资源profile、当次空闲槽位与累计可用预算选择每用户最早可执行项；PostgreSQL锁实际任务行并使用SKIP LOCKED，取得锁及写租约时复核当前可领取条件。只对成功领取的任务写running、新executionId、Worker及服务器时间90秒租约；暂时无余量不占租约。同一Worker重新领取也必须更换executionId。heartbeat同时验证Worker、执行身份、有效租约和任务有效期；当前取消所有者可读回cancelRequested并续租，取消状态保持不变。文件Provider在既有generation-task mutation内保持同样的状态行为。
+
+claim、heartbeat与inputs Route复用独立Worker Bearer；原件读取还核对当前executionId、有效租约、输入清单及登记归属，不接受请求覆盖用户或存储位置。按登记Provider读取历史原件，不受当前新写开关切换影响；本地文件与S3 GET均返回原件流，S3客户端在EOF、读取错误或取消后释放。原件读取不进入WebP预览或签名URL跳转。该读取行为已有文件/真实PostgreSQL和实际SDK网络夹具验证；本地原件追加与完整蒙版上传也已通过真实Next HTTP资格。专用outputs动态Route由独立Worker Bearer、当前执行身份、有效租约及归属校验后流式接收，避开proxy的请求体复制与截断；其他API继续沿原代理。此资格不代表实际Worker/Agent整链路或生产Standalone通过。
+
+prepare的analysis上传与complete Route已实现独立Worker认证、当前执行身份及有效租约校验。上传先流式写临时文件并计算hash/字节量，完整EOF后仅检查真实格式与展示尺寸，沿4MiB/2048边界登记同一原字节；随后短事务重验当前身份并在result_payload暂存executionId与artifacts。工件只包含稳定storageKey、hash、MIME、字节量和尺寸。相同执行上传相同字节复用首份描述，冲突不覆盖；失效执行不能关联产物。
+
+prepare完成先锁当前父记录、再锁子记录，复用同一executor核验登记与manifest，原子保存子success和匹配父检查点及重调度。文件Provider在creative→generation锁序下用一次mutation提交父子真值。已换依赖或取消的父记录保持不变，合格子产物可独立保留。多参考逐项合并，收齐各实际成功阶段的完整证据后才标记sources_loaded，不把单份完成当全量完成。
+
+完成后的result_payload保存executionId、manifest、manifestDigest、metrics及内部首次完成收据workerId/parentRescheduled，清除活动owner和租约。重放核对原owner、执行和固定字段manifest摘要，返回首次完成收据，不再次唤醒；冲突返回409。父参考升为含hash的版本后，恢复只有在当前来源元组/hash与原阶段完整manifest一致时复用原job、初始摘要与输入版本，不重新采集或创建prepare。
+
+prepare/build的fail Route沿用独立Worker认证，仅接受closed Outcome中的rejected和resource_failure/v8_heap_oom；crashed、aborted、completed与未确认资源原因返回400且不改任务。首次失败须匹配当前worker、executionId与有效租约；rejected将子置error，确认资源报告将子置paused，均为needs_review并清活动owner、租约、心跳及next_poll_at。PostgreSQL复用同一executor先锁父再锁子，最终UPDATE按数据库完整精度复核租约和有效期；文件Provider沿creative→generation锁序在一次mutation内提交父子真值。
+
+失败result_payload保留已有暂存工件，新增内部workerId、executionId和规范固定字段failure报告；冻结输入、资源事实与配置不改，不伪造manifest或峰值指标。code、message、stderr与退出证据仅保存在内部子任务。只有未取消、未completed/failed/cancelled且当前waitingFor仍匹配jobId/inputDigest的父才暂停为needs_review，保留原检查点、方案和依赖，失败文案使用固定安全中文。相同原worker/执行与相同规范报告的回执重放只读返回最小jobId/status/executionPhase，不重复改父；报告键序不影响比较，冲突为409，成功阶段不可被fail覆盖。
+
+prepare/build另提供内部child-only取消：PostgreSQL在同一executor先锁真实父再锁子，锁后核对用户/Run绑定及已保存的父取消意图；文件Provider沿creative→generation锁序用一次mutation更新指定child，父记录保持不变。锁后pending置cancelled/completed并清活动owner、租约、心跳和next_poll_at；running置cancelled/cancel_requested并只清next_poll_at，原worker_id、payload.executionId、租约、心跳、payload及result_payload保持，过期owner同样保留。原件、暂存工件与冻结资源事实不因取消删除；成功、失败、暂停终态及取消重放不改完整父子行。有效原owner仍按原heartbeat读取取消意图，过期或旧epoch拒绝。两项真实PG竞争门分别覆盖持子锁后的领取跳过，以及等待父锁期间实际领取已提交时的owner保留；原三项独立进程回归同轮通过。实际Run/action尚未接入，测试先保存父取消事实；Worker预算归还和Worker中断后的持久取消恢复仍待实现与验证。
+
+prepare/build取消关闭确认已复用heartbeat：请求含closed或stopCause即进入严格四字段workerId/executionId/closed/stopCause分支，无效结构400且不回落普通续租。仅接收已spawn且实际close的固定报告投影，pid须为正安全整数；not-started仍不支持。首次ACK要求当前cancelled/cancel_requested及原owner/epoch，允许该原取消owner在lease过期后确认，但普通heartbeat仍要求有效租约。PostgreSQL复用同一executor锁当前child并复核有效期，File在一次generation mutation内提交；只将该child置cancelled/completed并清活动worker、lease、heartbeat和next_poll_at，不写父。
+
+私有`result_payload.cancelClose`固定为`{workerId,executionId,closed,stopCause,receipt}`，receipt为`{jobId,executionId,status:'cancelled',executionPhase:'completed'}`，200响应data即该收据。payload.executionId、冻结输入/配置及result_payload其余暂存证据保留，不新增列或队列表。只有当前仍cancelled/completed、原epoch和相同规范报告/stopCause匹配才只读重放首次收据；旧epoch、重开或报告冲突不能凭旧收据覆盖当前行，过期任务404。服务端已有File与真实PostgreSQL单连接池局部资格，具体分轮数量见配套用例。
+
+独立File/prepare真实Next TCP夹具已验证首次ACK提交后完整200收据被代理读完并丢弃、调用方fetch failed及原请求直连重放同一收据；代理仅一次转发，完整父子行与工件描述保持不变。工件预先暂存，不是aborted子进程产物。该控制接口网络资格不代表实际Worker、全部TC-Q04、not-started、预算归还、跨Worker/容器中断恢复或Run/action已完成。
+
+上述prepare上传/完成已有文件与真实PostgreSQL单连接池、两处完成写入故障回滚和本地/S3媒体证据。prepare/build fail已通过文件与真实PostgreSQL单连接池局部检查，包括关闭后的真实拒绝、受控资源报告、原身份重放、父终态/新依赖守卫、实际PG父锁跨截止拒绝和具名CHECK父子回滚。File新增过期用例仅验证有效调用跨截止，不宣称观察到实际排队；受控资源报告只验证服务映射，不证明真实V8 OOM。process_result的ImageTask父规则已修约，native采集/归属封版、结果入队/final上传、显式恢复及幂等消息事件投影仍待实现验证；底层attachment file存储不代表collector/B通过。真实Next大工件传输已有局部资格，实际Worker/Agent整链路尚未验收，不代表完整S3/S4已完成。
+
+原生商品生成输入副本复用同一 `generation_tasks` JSONB：white `build_protection.payload.options.generationInput` 与父 `ecommerceSnapshot.processing.protection.generationInput` 保存首次入队的 `bounds/quality`，参与原阶段摘要；可信完成后进入Agent Task及ImageTask的 `ecommerceExecution.generationInput`。新manifest/staged artifacts精确保留 `mask/generation_reference/generation_mask` 三角色及原身份，后两者沿原临时媒体登记生命周期；原mask、原件和保护坐标保持。首次入队、全部工件完成登记和新图片任务执行快照绑定复用既有事务/父锁；恢复不读取后来默认值，旧字段缺省不改变旧摘要。不新增表、列、迁移或第二队列。
+
+副参考生成准备仍复用 `prepare_reference`，以显式 `options.generationInput={bounds,quality}` 区分分析用途。父 `processing.generationReferences[]` 独立保存逻辑父任务、原素材及版本、计划摘要、job/inputDigest 与完整 manifest；原分析 `prepareReferences` 与 checkpoint 不改写。生成 options 和规范化的冻结计划／路由参与阶段身份，同一素材的分析与生成工件不能互换。生成完成只合并本阶段并唤醒原父任务；File mutation 与 PostgreSQL 复用原父锁／同一 executor，提交图片前等待全部所需副本。
+
+### process_result的ImageTask父契约（待实现）
+
+沿既有generation_tasks的image与image_processing记录，不新增表、列、通用owner/lease或第二队列。仅结果child的parent_task_id指真实image，run_id/conversation_id/project_id保留可选原归属；业务attempt绑定image payload.attemptNo，不取row attempt_no代替。原claim从recovery穿过provider响应、取流/关闭/登记与最终锁内关联；锁外I/O后不换成新读到的epoch。失权独立退出，不能失败/退款/新create或清新owner；payload-only通用mutation不能代替实际row租约校验。
+
+| 私有JSON位置                                                     | 固定含义与提交边界                                                                                                                                                                                                                  |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| image.payload.nativeAcquisition                                  | 仅同步no-ID、尚未durable且实际有现授权可再读URL时，原claim先于媒体I/O保存version、业务attempt/null upstream及原槽最小locator；不存inline bytes/长base64、凭据/临时路径，不进digest或公开result/error/event/log，过期不可读为Unknown |
+| image.payload.nativeResults                                      | 全原槽裁决且至少一原件经原claim合法关联才首封版；保存原ID/一基index、stored原件稳定Provider/实例/key/asset/version/EOF hash/bytes/layout或metadataRejected，以及安全read/store错误洞；部分洞终局，同job不能回填                     |
+| image.payload.resultProcessing                                   | 仅jobId/inputDigest；enqueue同事务建立/复用结果child、写引用并让出image，child完成只使同image本地保存可继续                                                                                                                         |
+| image_processing.payload.imageResultBinding.sourceIdentityDigest | 含辅助输入时绑定原kind、完整references/mask、保护/delivery与selector/options字段的规范源摘要；摘要参与inputDigest，不复制原base64或增加image辅助快照。                                                                              |
+| image_processing.payload.sources[].frozenResultSource            | 仅首次采集inline/direct HTTP辅助源时为true，参与inputDigest；区分复用登记源，要求原登记为本ImageTask的永久image及固定source=image-task-result-source。                                                                              |
+| agent.payload.tasks[].childTasks[].imageProcessingFact           | 仅正常Agent poll/patch已应用到实际copy的`{jobId,inputDigest,factIdentity,eventType}`，供B receipt去重与File漏写补偿；不是执行权或通用outbox                                                                                         |
+
+创建factory在input spread之后重置三个image私有字段及executionId，TS输入/普通update不开放；公共ImageTask和Run/task仍显式白名单。原槽在normalize/dedupe/flatMap前确定，resultId为image ID加一基槽序；inputIndex另行零基分配。metadataRejected保留真实opaque原件而非假尺寸/MIME；全部取得失败不生成native/ref/空成功child。
+
+未封版且有真实upstream ID，按原TC-R04查询同一提交继续取得/保存，不新create/收费；没有ID仅按原私有授权locator重取。没有持久源或不可再读保留Unknown/needs_review，不自动模型重建/换渠道/退款。封版同事务清取得快照；已有native/ref后新claim纯本地复用，不再query/download/register，失败槽不回填，稳定job/digest不含parent epoch或签名URL。结果四模式、source/mask保护证据与固定有序摘要沿现契约，prepare/build摘要不改。
+
+辅助源首次冻结在任务锁外按原编码写入、计数/hash并仅读metadata，复用既有安全出站与超时；child与image.resultProcessing同事务发布，最后CAS同时核原源字段投影、原resultProcessing及有效claim/native/Run。已发布后的ensure/consume只使用原child的sources和编码facts重建并核对摘要，不重下源站；源/options改变或并发落败返回ownership_lost，File不重写generation文件。原references、mask与delivery保持。此片只开放local辅助冻结；已登记辅助image按原storageProvider/externalStorageId采集与重验，不受新object写入开关影响。system proxy缺origin上下文、object native/final各自保留原限制，不能退回legacy绕过。
+
+child complete持child当前执行/lease，锁内核当前image业务/native/ref及可选Run，不能要求已让出的旧parent lease。它不直接写image success、Agent wake、日志/资产/增强或费用；有新有效image owner保留其worker/epoch/lease与原due，等待写null前同锁重核child success，不能迟到覆盖唤醒。随后image合法claim锁外保存合格媒体，再以原消费tuple锁内关联、合并当前payload，复用原成功业务链。详情POST/recovery先判native/ref本地分支，不伪pending upstream/结果URL，也不新增image paused；显式同stage retry只重跑local处理，下次child换execution，不更换原件或digest。
+
+Run cancellation可先于image HTTP取消落盘；四个关联点都核Run取消或completed/failed/cancelled终态，普通paused无cancellation不等同取消。image取消只级联相同结果child，pending清owner并completed，running保留原owner/epoch/租约和关闭证据为cancel_requested，不误伤其他copy或prepare/build。结果fail/close ACK需独立资格，不能借现prepare/build局部结论。
+
+PG锁序为可选Run→image→child→registrations，所有登记复验复用同executor批读；File为creative→一次generation mutation，不锁内做媒体I/O或反向重入。子/父真值同事务，媒体与消息不声称跨Provider/文件原子。最终结果所需原format/真实alpha由Task2原件事实提供，优先复用既有无target/stats原bytes路径；Web只流复制并核同原件到现image file writer取得合法URL，final同hash/bytes且登记合格才复用。保留nativeSource/保护baseline及增强URL equality，公开.bin白名单不扩大。
+
+Run正常事实继续经真实成员link→image poll→patch应用，noRun不进事件；不能凭易变context.parentTaskId猜logical/copy。B factIdentity用已持久child execution/worker/failure，或success execution/manifestDigest；无epoch准入暂停用实际行转换时间与资源事实，不以读取时钟造事件。key再绑定Run/logical task/当前attempt/actual image和eventType，同失败重放一次，显式新执行再同pause/error是新转换。
+
+该copy指针的eventType只取`task.needs_review/task.child.completed/task.child.failed`。投影收据复用`creative_run_events.data.imageProcessingProjectionKey`（File为`creative-runtime.json.events[].data`中的同名字段），不增加表或列；key绑定Run、logical task、当前logical attempt、实际image、factIdentity和eventType。poll前后比对及锁内复核的来源快照只在当前进程传递，不增加持久字段；指针与收据均不保存native/ref、locator、资源原报告或执行权，也不进入公开Run/task/SSE白名单。
+
+PG查receipt、Run/私有指针、event/assistant共用持Run锁executor。File仅B先提交Run truth/指针，再在creative锁内一次写runtime event+assistant并notify。正常patch/link后、Run GET鉴权及owner确认后序列化前、action resume变更前可从外层显式补已应用指针的缺失receipt，不需旧Agentlease；低层get保持纯读，不锁内重入。补偿不改logical状态、不取得执行权/重开任务，未link、无指针、取消/新attempt/已替代事实不补，自然completed可补仍匹配完成receipt，无缺口不写。不承诺历史事件全量重建。publicAgentRunEvent必须剔除私有projection key，禁止raw passthrough泄漏locator/原报告/路径。
+
+本节是固定设计与后续实施门，未取得collector、B事务、来源/本地恢复、alpha/峰值、合法native交付或receipt补偿的运行结论；新/旧CHECK及Provider补门以各自真实回执为准，不扩Compose/S5、实际Worker/GPU或生产范围。
+
 ## 环境变量
 
 ```bash
@@ -37,7 +124,7 @@ VOZEB PRO 的 PostgreSQL 真实表名统一使用项目名前缀 `vozeb_pro_`。
 
 ## 核心表
 
-- `vozeb_pro_image_enhancement_jobs`：独立于原生生图成功状态的持久增强任务，以 `user_id + image_task_id + result_id` 唯一绑定原件版本。`status/phase/next_poll_at/lease_token/lease_until` 支持有界到期领取、行锁跳过争用与旧执行租约校验；`payload` 保存冻结原件、目标和模型连接引用、远端幂等键与任务、尝试事件、永久AI／交付件及固定接收确认身份，不保存端点或Token。原图成功写入与增强入队在同一PG事务，发布关联资产读取／登记复用同一executor；完整媒体保存并回读校验后发布，收据丢失保持成功而只恢复确认。本人读取按任务及用户定向查询，调度只查询到期行。文件Provider使用 `image-enhancement-jobs.json`：原任务锁内先保存意图，执行前核原生成功及冻结原件；发布先creative再enhancement锁，复用锁内快照、先保存creative再写job，跨文件中断沿稳定child身份恢复。该表的实际媒体／GPU及前台接入仍按M5逐项验收。
+- `vozeb_pro_image_enhancement_jobs`：独立于原生生图成功状态的持久增强任务，以 `user_id + image_task_id + result_id` 唯一绑定原件版本。`status/phase/next_poll_at/lease_token/lease_until` 支持有界到期领取、行锁跳过争用与旧执行租约校验；`payload` 保存冻结原件、目标和模型连接引用、远端幂等键与任务、尝试事件、永久AI／交付件及固定接收确认身份，不保存端点或Token。`publicationProcessing.promotion` 保存已闭合CPU结果的固定 `aiStorageKey/deliveredStorageKey` 永久目标，重试复用原字节及同一目标；最终资产与父任务提交前复核原图片、父子绑定、媒体登记、取消及有效租约。原图成功写入与增强入队在同一PG事务，发布关联资产读取／登记复用同一executor；完整媒体保存并回读校验后发布，收据丢失保持成功而只恢复确认。本人读取按任务及用户定向查询，调度只查询到期行。文件Provider使用 `image-enhancement-jobs.json`：原任务锁内先保存意图，执行前核原生成功及冻结原件；发布先creative再enhancement锁，复用锁内快照、先保存creative再写job，跨文件中断沿稳定child身份恢复。该表的实际媒体／GPU及前台接入仍按M5逐项验收。
 
   普通成功图片的任务结果与创作资产metadata保留公开resultId、enhancementId、nativeSource或enhancementSkip；后者仅含skipped及已知原因。普通4K关闭策略仍有原件事实和独立skipped job，其他无job分支不伪造原件事实。重复登记使用同一来源任务及任务内压缩序号，增强件为独立child，不能覆盖原assetId。增强payload的timings分别保存Worker排队、当前attempt引擎执行及实际交付编码事实；成功Worker快照替换旧Worker计时，独立保留Web编码计时，查询失败不抹除已存事实。只读响应不从轮询间隔推算耗时，未测量字段保持缺失。
 
@@ -50,6 +137,8 @@ VOZEB PRO 的 PostgreSQL 真实表名统一使用项目名前缀 `vozeb_pro_`。
 持久远端计划的可选 `requestTta` 另行冻结请求字段值与存在性，不参与引擎策略摘要；旧计划缺失时继续省略请求字段。Worker 能力升级不得改变同一幂等键的请求正文，丢回包恢复必须复用已接受的原任务。
 
 增强任务 JSON 的 `staged.delivered` 与 `publication.delivered` 保存最终实际格式 `png|jpeg`、地址、尺寸、字节数和摘要；新增无保护全局交付为 JPEG，受保护交付与旧暂存 PNG 保持原格式。远端 `remoteResult` 及完整 AI 结果仍严格 PNG，回执绑定该远端结果；无需表迁移，不覆盖历史文件。
+
+生成完成后的整图增强：新结果可保存独立 `enhancementSource`（`generation_final`），冻结已保存最终成图的站内URL、SHA、字节数、真实尺寸、格式和实际透明度；`nativeSource`仍表示未经改写的上游原件。CPU结果槽位可带 `finalImage`，摘要仅在该字段存在时追加，已有完成清单摘要保持。生成保护/合成先验收并保存原图，随后增强任务按该最终源使用既有 `full_image` 流程和JPEG交付，不再携带旧蒙版增强交付合同；原PNG和生成证据保留，增强版另存并绑定原图父资产。后台开关、画质目标、真实透明图限制、倍率/预算及幂等规则保持。旧已冻结M7/M8任务继续使用以下原合同，不补签、不重新推理；无需新表或迁移。
 
 M7 在既有图片任务 JSON 中增加创建时冻结的 `enhancementDelivery`（`ecommerce-delivery.v2`）：明确全局整图或 `product_background`，后者保存商品锚点/源尺寸、规范方向色彩、源/规范源摘要及可信 inline PNG 蒙版/摘要。结果的 `productEnhancementEvidence`（`product-baseline.v2`）分别绑定真实 provider native 与合格原图及其合成证据，不覆盖 `nativeSource`。增强任务 payload 的 `decision.delivery` 固定该合同和合格原图身份，`requestedTarget` 保留请求目标；严格商品背景的实际 target 保持源画幅。`staged/publication.protection` 保存规范版本、源/AI/蒙版/final 摘要、锚点、尺寸及保护像素计数，发布时重建验证。无需新增表或迁移；公开读取只返回范围和技术事实白名单，不返回蒙版或连接凭据。
 
@@ -101,7 +190,7 @@ M8 沿用同一 JSON 结构增加 `scope: local_edit` 与 `scene-enhancement.v1`
 - `vozeb_pro_creative_run_events`：Agent Run 持久事件，使用递增 `bigserial` ID 为 SSE 断线续传提供精确游标；PostgreSQL 事务写入事件后发送 `vozeb_pro_run_events` 通知唤醒其他实例，通知不承载业务数据，丢失时仍从本表恢复。
 - `vozeb_pro_canvas_projects`：Canvas 项目聚合快照，保存用户、标题、创作会话 ID、节点、连线、视口和项目助手会话；列表查询只投影标题、时间和节点/连线计数，进入单项目后才读取完整快照。交互保存按用户、项目、`updatedAt` 和 mutation ID 执行单次条件更新，PostgreSQL 在 JSONB 内按稳定实体 ID 原位合并并保持数组顺序，文件 Provider 在项目锁内应用同一 mutation；幂等标识仅为服务端内部字段，不进入公开项目响应。
 - `vozeb_pro_library_assets`：用户素材库聚合记录，保存文本或服务器媒体引用、标签、来源和备注；不保存媒体 base64，素材页按用户、类型、关键词和页码在服务端裁剪。
-- `vozeb_pro_local_media_assets`：图片、视频和音频的统一媒体登记表，保存稳定站内 `storage_key`、本地/对象存储 Provider、对象存储配置与对象 Key、同步时间、临时/长期分类、用户归属、原文件名、来源、会话/Run/任务/项目关联、MIME、大小和过期时间；媒体读取与删除以该登记和业务引用检查为权限边界。
+- `vozeb_pro_local_media_assets`：图片、视频、音频和内部附件的统一媒体登记表，`type` 允许 `image/video/audio/attachment`，保存稳定站内 `storage_key`、本地/对象存储 Provider、对象存储配置与对象 Key、同步时间、临时/长期分类、用户归属、原文件名、来源、会话/Run/任务/项目关联、MIME、大小和过期时间；媒体读取与删除以该登记和业务引用检查为权限边界。内部原生候选的关闭非空文件使用 `reference/permanent/attachment`、固定 `application/octet-stream`、`attachments/*.bin` 与 `source=image-processing-native`，沿既有 local/object file writer 保存原字节；登记类型不表示已通过图像解码。初始化同时更新新表定义和已存在表的同名类型 CHECK，不新增列或表。公开 data-URL 与 reference 路径白名单沿原规则，`.bin` 不取得公开 GET 资格。
 - `vozeb_pro_drama_projects`：短剧项目聚合快照，保存用户、标题、状态和完整 `project_json`；项目内包含创作会话 ID、多集、角色/场景/道具/线索、内容审核状态、分镜及图片、视频、音频、整集合成任务状态，并按用户与更新时间建立列表索引。
 - `vozeb_pro_drama_project_versions`：短剧项目独立版本快照，按项目保存递增版本号、保存原因、完整快照和创建时间；项目或用户删除时级联删除，`(project_id, version)` 保持唯一。
 - `vozeb_pro_published_works`：作品稳定身份，保存所有者、公开 slug、素材/Canvas/短剧来源、当前编辑版本、当前公开版本、生命周期、访问量、精选状态和用户下架时间；slug 忽略大小写唯一，下架或公开版本变化会清除精选状态。
@@ -118,6 +207,8 @@ M8 沿用同一 JSON 结构增加 `scope: local_edit` 与 `scene-enhancement.v1`
 文本、图片、视频、音频和漫剧整集合成终态更新使用带 `user_id + task_type + allowed status` 条件的原子 `UPDATE`；任务尝试元数据通过存储层原子 mutate 合并，避免取消状态被旧快照覆盖。用户取消、后台成功、后台失败和过期检查同时发生时只有一个状态转换能成功，退款由成功抢占终态或检测到已取消结果的一方执行。
 
 生成恢复通过 `worker_id + lease_until` 原子领取到期任务；页面唤醒和常驻 Worker 复用同一恢复服务。上游创建成功后先保存任务 ID，再进入查询阶段；查询到结果先写 `result_ready`，下一批只完成媒体保存。`submitting` 结果不确定且无法对账时进入 `needs_review`，只有管理员明确提供上游任务 ID、结果或确认失败后才能继续。Webhook 事件先按渠道与事件 ID 幂等登记，再匹配已有媒体任务并清除租约；未匹配事件保留为 `unmatched`，不得创建新任务。
+
+白底商品细节的原取景策略保存于Agent计划 `preserve.sourceFraming=visible_extent`，并冻结到图像阶段白底 `options.sourceFraming` 与输入摘要。prepare/build暂停的安全消息和事件使用既有 `imageProcessingProjectionKey` 幂等收据，任务真值提交后可由读取补齐；原始进程诊断仍只保存在阶段结果，不进入公开消息。沿用现有JSONB和事件表，不新增物理表或列。
 
 Agent Run 的状态与任务数组继续保存在 `generation_tasks.payload`，每个多副本子任务同时保存子任务 ID、完成状态、尝试次数和结果，恢复时复用已完成结果并继续轮询未完成任务；事件独立写入 `creative_run_events`。状态更新、助手消息终态和事件追加在同一 PostgreSQL 事务内完成；暂停、恢复、取消、完成和失败竞争时，旧 Run 快照不能覆盖更新后的状态。文件 Provider 使用串行 mutation queue 保持相同的进程内语义。短剧成本概览按 `user_id + project_id + task_type + status` 在数据库聚合，并使用 `generation_tasks_user_project_idx`，不读取数千条完整任务 JSON 后再汇总。
 
@@ -325,6 +416,8 @@ PayPly 下单由服务端向 `VOZEB_PRO_PAYPLY_CHECKOUT_URL` 发起请求，密�
 规划上下文读取当前会话的持久摘要和最近 12 条已完成消息，更早消息按序写入 `creative_conversations.context_summary`，并用 `context_summary_through_sequence` 防止重复摘要。服务端按 Surface 和实际能力筛选模型、只加入用户显式选择的 Skill，并完整保留这份已验证上下文，不再叠加平台固定字符预算或输出 token 上限。当前 Run 的用户消息和助手占位消息不会重复进入自身规划上下文；真实供应商上下文能力仍需在启用渠道时验收。
 
 任务可保存多份媒体引用。依赖任务完成后，执行器从其稳定 `assetId` 重新读取持久媒体位置并注入下游图片或视频请求；`parent_asset_id` 保存首个父资产，其余父资产 ID 记录在资产 metadata 中。
+
+规划阶段失败后，用户明确重试会在原 Run 的 `generation_tasks.payload.planningRequestId` 保存新的私有规划请求身份，与 failed→planning 状态更新原子提交。重试继续复用原会话及用户/助手消息；Worker 恢复、重复调度与同轮协议回退必须复用这份身份，不得重新生成。普通 Agent 规划与电商编辑规划均以它派生计费幂等键；首次规划沿原 Run 身份。电商规划消息中的嵌套 JSON 按键稳定序列化，避免 JSONB 读回的键顺序改变消费指纹。历史消费、退款与同键异参 409 校验保持原有约束。
 
 同一用户的 `client_request_id` 保持唯一。重复提交 Agent Run 时返回原运行，不重复创建用户消息、助手占位消息、子任务或计费。每份并发结果以独立子任务身份合并写回父任务，并追加 `task.child.completed/failed`；已经成功的子任务与资产不会因兄弟失败而丢失。SSE 使用 `creative_run_events.id` 作为 `Last-Event-ID`，只重放游标之后的事件。
 

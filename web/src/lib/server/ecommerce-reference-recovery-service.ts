@@ -4,6 +4,7 @@ import { originalImageSourceUrl } from "@/lib/media-image-url";
 import { AGENT_RUN_TTL_MS, type AgentRun } from "./agent-run-store";
 import { getCreativeAssetsByIds, mutateCreativeRun } from "./creative-runtime-store";
 import { loadEcommercePlanningImage } from "./ecommerce-generation-service";
+import { hasOnlyCompletedEcommerceReferencePrepares } from "./image-processing-service";
 import { confirmedReferenceDecision, referenceReviewKind, referenceSourceTuple, unsubmittedReferenceCheckpoint } from "./ecommerce-reference-recovery";
 
 export async function recoverEcommerceReferences(input: { run: AgentRun; recovery: CreativeReferenceRecovery; actorId: string; conversationId: string; origin: string; cookie: string }) {
@@ -42,7 +43,7 @@ export async function recoverEcommerceReferences(input: { run: AgentRun; recover
             const checkpoint = current.ecommerceSnapshot?.referenceCheckpoint;
             if (
                 !unsubmittedReferenceCheckpoint(current) ||
-                context.persistedChildren.length ||
+                !hasOnlyCompletedEcommerceReferencePrepares(current, context.persistedChildren) ||
                 current.userId !== input.actorId ||
                 current.conversationId !== input.conversationId ||
                 checkpoint?.state !== "needs_review" ||
@@ -106,6 +107,6 @@ export async function recoverEcommerceReferences(input: { run: AgentRun; recover
         },
         ["paused"],
         undefined,
-        { referenceRecovery: true },
+        { resumeWithChildren: true },
     );
 }

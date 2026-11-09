@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { AgentImageProcessingFactChangedError, AgentImageProcessingProjectionError, observeAgentImageProcessingFact, type AgentImageProcessingObservation } from "./agent-run-image-processing-projection";
 import { getAuthSettings, refundUserPoints, type LogicalModelCapability } from "@/lib/auth/store";
 import { withCreativeFoundation, type CreativeReview } from "@/lib/creative-agent-contract";
 import { isCreativeAutoValue, type CreativeAsset, type CreativeGenerationMode, type CreativeGenerationPreferences, type CreativeSurface } from "@/lib/creative-runtime-contract";
@@ -9,7 +11,7 @@ import { reviewCreativeOutputs } from "@/lib/server/creative-review-service";
 import { requestStructuredText, type TextPlanningCandidate } from "@/lib/server/text-planning-runtime";
 import { registerAgentTaskAssets } from "@/lib/server/agent-run-assets";
 import { buildAgentProjectHandoff } from "@/lib/server/agent-run-project-handoff";
-import { getAgentRun, updateAgentRunById, updateAgentRunTaskById, type AgentRun, type AgentRunChildTask, type AgentRunReference, type AgentRunTask } from "@/lib/server/agent-run-store";
+import { getAgentRun, reconcileAgentRunImageProcessingFacts, updateAgentRunById, updateAgentRunTaskById, type AgentRun, type AgentRunChildTask, type AgentRunReference, type AgentRunTask } from "@/lib/server/agent-run-store";
 import { resolveEcommerceRoleCandidates, routeEcommerceRole, type EcommerceRoleCandidate } from "@/lib/server/ecommerce-model-routing";
 import { publicEcommerceProgress } from "@/lib/server/ecommerce-generation-service";
 import { assetAccessUrl, creativeAssetContext, resolveTaskReferences } from "@/lib/server/agent-run-surface-policy";
@@ -18,6 +20,9 @@ import { agentChildTaskTerminal, agentTaskCopies, resolveAgentTaskCount, resolve
 import { agentRunCompletionReply, agentRunFailureMessage, resultSummary } from "@/lib/server/agent-run-messages";
 import { getCreativeAssetsByIds } from "@/lib/server/creative-runtime-store";
 import { toSafeGenerationErrorMessage } from "@/lib/server/generation-errors";
+import { processIndependentEcommerceReview } from "./ecommerce-visual-review";
+import { independentAdvisoryReview } from "./ecommerce-visual-review-identity";
+import type { GenerationTaskLease } from "./generation-task-scheduler";
 import { scheduleGenerationTask } from "@/lib/server/generation-task-scheduler";
 import { getStoredGenerationTaskRecord, linkStoredGenerationTask } from "@/lib/server/generation-task-store";
 import { maintenanceWorkerContextHeaders } from "@/lib/server/maintenance-auth";
@@ -31,12 +36,16 @@ import { acceptsMediaReference, mergeTaskReferences, taskImageUrls, taskReferenc
 import { checkEcommerceResultWithFallback, checkEcommerceTechnicalResult, ecommerceQualityGate, ecommerceResultDeliveryGate, unavailableEcommerceQualityCheck } from "./ecommerce-quality-check";
 import { buildEcommerceGenerationTrace } from "./ecommerce-generation-trace";
 import { ecommerceCheckpointMessage, hasUnresolvedEcommerceCheckpoint } from "./agent-run-checkpoint";
+import { readCompletedImageTaskResult } from "./image-task-result-processing";
 
 export { planToOps, taskResultOps } from "./agent-run-canvas-ops";
 export { acceptsMediaReference, mergeTaskReferences, requestedTextLimit, reviewCorrection, taskImageUrls, taskReferences, taskResultItems, textConstraintInstruction } from "./agent-run-execution-helpers";
 
-class AgentChildTaskTerminalError extends Error {}
+class AgentChildTaskTerminalError extends Error {
+    imageProcessingObservation?: AgentImageProcessingObservation;
+}
 class AgentChildTaskDeferredError extends Error {
+    imageProcessingObservation?: AgentImageProcessingObservation;
     constructor(
         message: string,
         readonly needsReview = false,
@@ -562,7 +571,11 @@ function shouldBlockOnReview(run: AgentRun) {
     return run.tasks.length > 1 || run.surface === "drama" || /严格检查|高质量模式|完整复盘/u.test(run.prompt);
 }
 
-export async function processAgentRunReview(run: AgentRun, origin: string, cookie: string) {
+export async function processAgentRunReview(run: AgentRun, origin: string, cookie: string, lease?: GenerationTaskLease) {
+    if (independentAdvisoryReview(run) && !run.reviewed) {
+        if (!lease) return { status: "ownership_lost" as const, attempts: run.reviewAttempts || 0 };
+        return processIndependentEcommerceReview(run, origin, cookie, lease);
+    }
     if (run.status !== "completed" || run.reviewed) return { status: "completed" as const, attempts: run.reviewAttempts || 0 };
     const attempts = (run.reviewAttempts || 0) + 1;
     const started = await updateAgentRunById(run.id, { reviewStatus: "reviewing", reviewAttempts: attempts }, { type: "run.review.started", data: { attempt: attempts } }, ["completed"], undefined, run.tasks, {
@@ -697,7 +710,20 @@ export async function refundTextResponse(userId: string, model: string, headers:
 }
 
 export async function runTaskWithRetry(runId: string, task: AgentRunTask, origin: string, cookie: string, executionId: string, settings?: Awaited<ReturnType<typeof getAuthSettings>>) {
-    const resumeExisting = task.childTasks?.some((child) => child.status === "pending" || child.status === "needs_review") || ((task.status === "running" || task.status === "needs_review") && task.taskId && !task.childTasks?.length);
+    try {
+        return await runTaskWithRetryInternal(runId, task, origin, cookie, executionId, settings);
+    } catch (error) {
+        if (!(error instanceof AgentImageProcessingProjectionError)) throw error;
+        console.error("Agent image result projection is incomplete", error);
+        return "deferred" as const;
+    }
+}
+
+async function runTaskWithRetryInternal(runId: string, task: AgentRunTask, origin: string, cookie: string, executionId: string, settings?: Awaited<ReturnType<typeof getAuthSettings>>) {
+    const resumingAppliedCompletion =
+        (task.status === "running" || task.status === "needs_review") && task.childTasks?.some((child) => child.status === "completed" && child.attempt === task.attempts && child.imageProcessingFact?.eventType === "task.child.completed");
+    const resumeExisting =
+        resumingAppliedCompletion || task.childTasks?.some((child) => child.status === "pending" || child.status === "needs_review") || ((task.status === "running" || task.status === "needs_review") && task.taskId && !task.childTasks?.length);
     const attempt = resumeExisting ? Math.max(1, task.attempts) : task.attempts + 1;
     if (!(await canContinue(runId, executionId))) return;
     const checkpointRun = await getAgentRun(runId);
@@ -768,13 +794,17 @@ export async function runTaskWithRetry(runId: string, task: AgentRunTask, origin
         );
         return "completed" as const;
     } catch (error) {
+        if (error instanceof AgentImageProcessingProjectionError) throw error;
         if (error instanceof AgentChildTaskDeferredError) {
             const latest = await getAgentRun(runId);
             const latestTask = latest?.tasks.find((item) => item.id === task.id);
             if (error.needsReview && latestTask && (await canContinue(runId, executionId))) {
-                const childTasks = latestTask.childTasks?.map((child) => (child.status === "pending" || child.status === "needs_review" ? { ...child, status: "needs_review" as const, error: error.message } : child));
-                await patchTask(runId, task.id, { status: "needs_review", error: error.message, ...(childTasks ? { childTasks } : {}) }, "task.needs_review", executionId);
-                return "needs_review" as const;
+                const observed = error.imageProcessingObservation;
+                const childTasks = observed
+                    ? latestTask.childTasks?.filter((child) => child.id === observed.imageId).map((child) => ({ ...child, status: "needs_review" as const, error: error.message }))
+                    : latestTask.childTasks?.map((child) => (child.status === "pending" || child.status === "needs_review" ? { ...child, status: "needs_review" as const, error: error.message } : child));
+                const patched = await patchTask(runId, task.id, { status: "needs_review", error: error.message, ...(childTasks ? { childTasks } : {}) }, "task.needs_review", executionId, observed);
+                return patched ? ("needs_review" as const) : ("deferred" as const);
             }
             if (latestTask && latestTask.error !== error.message && (await canContinue(runId, executionId))) {
                 await patchTask(runId, task.id, { error: error.message }, "task.waiting", executionId);
@@ -785,7 +815,10 @@ export async function runTaskWithRetry(runId: string, task: AgentRunTask, origin
         if (await canContinue(runId, executionId)) {
             const latest = await getAgentRun(runId);
             const latestTask = latest?.tasks.find((item) => item.id === task.id);
-            const childTasks = latestTask?.childTasks?.map((child) => (child.status === "pending" ? { ...child, status: "failed" as const, error: message } : child));
+            const observed = error instanceof AgentChildTaskTerminalError ? error.imageProcessingObservation : undefined;
+            const childTasks = observed
+                ? latestTask?.childTasks?.filter((child) => child.id === observed.imageId && child.status === "pending").map((child) => ({ ...child, status: "failed" as const, error: message }))
+                : latestTask?.childTasks?.map((child) => (child.status === "pending" ? { ...child, status: "failed" as const, error: message } : child));
             const imageTaskIds = Array.from(new Set([...(latestTask?.taskIds || []), ...(latestTask?.childTasks || []).map((child) => child.id), latestTask?.taskId].filter((id): id is string => Boolean(id))));
             if (latest?.ecommerceSnapshot && latestTask?.ecommerceExecution && imageTaskIds.length) {
                 await persistEcommerceGenerationTrace(
@@ -859,7 +892,7 @@ async function checkAndRecordEcommerceResult(
         : taskImageUrls(result);
     const mediaTasks = await Promise.all(sourceTaskIds.map((id) => getImageTask(id)));
     const mediaResults = mediaTasks.flatMap((child) =>
-        (child?.result?.results?.length ? child.result.results : child?.result?.batchEvidence ? [] : child?.result ? [child.result] : []).map((media, index) => ({ media, resultId: media.resultId || `${child!.id}:${index + 1}` })),
+        (child?.result?.results?.length ? child.result.results : child?.result?.batchEvidence ? [] : child?.result ? [child.result] : []).map((media, index) => ({ media, image: child!, resultId: media.resultId || `${child!.id}:${index + 1}` })),
     );
     const hasBatchEvidence = Boolean(snapshot?.plan?.canvas && mediaTasks.some((child) => child?.result?.batchEvidence));
     const batchEvidence = mediaTasks.flatMap((child) => child?.result?.batchEvidence || []);
@@ -896,7 +929,13 @@ async function checkAndRecordEcommerceResult(
           }
         : undefined;
     if (!checkInput) throw new Error("电商编辑计划缺失");
-    const technicalCheck = phase === "technical" ? await checkEcommerceTechnicalResult(checkInput) : snapshot?.technicalCheck;
+    const technicalCheck =
+        phase === "technical"
+            ? await checkEcommerceTechnicalResult(checkInput, async (resultId) => {
+                  const original = mediaResults.find((item) => item.resultId === resultId);
+                  return original ? readCompletedImageTaskResult(run, original.image, resultId) : undefined;
+              })
+            : snapshot?.technicalCheck;
     const qualityCheck =
         phase === "technical"
             ? undefined
@@ -1086,6 +1125,10 @@ export async function dispatchTask(task: AgentRunTask, origin: string, cookie: s
             child = { id: taskId, status: "pending", attempt };
             if (!(await patchTask(run.id, task.id, { taskId, taskIds: [taskId], childTasks: [child] }, "task.created", executionId))) throw new Error("Agent Run 已由新执行器接管");
         }
+        if (task.type === "image" && task.sceneProtection?.mask.serverUrl) {
+            const pending = await getStoredGenerationTaskRecord("image", taskId);
+            if (pending?.status === "pending" && pending.executionPhase === "created" && !pending.nextPollAt) await scheduleGenerationTask("image", taskId, { nextPollAt: Date.now() });
+        }
         try {
             if (child?.status === "completed") {
                 const assetIds = task.ecommerceExecution
@@ -1102,17 +1145,33 @@ export async function dispatchTask(task: AgentRunTask, origin: string, cookie: s
                     throw new AgentChildTaskDeferredError("生成任务查询暂时不可用");
                 }
             }
-            const result = await pollTask(origin, task.type === "video" ? "/api/video-tasks" : path, taskId, cookie, run.id, task.type, executionId, recoverNeedsReview);
+            const polled = await pollAgentCopy(task, origin, task.type === "video" ? "/api/video-tasks" : path, taskId, cookie, run.id, executionId, recoverNeedsReview);
+            const result = polled.result;
             const assetIds = task.ecommerceExecution
                 ? undefined
                 : (await registerAgentTaskAssets(run, { ...task, title: copies > 1 ? `${task.title} ${index + 1}` : task.title, count: 1, attempts: attempt, result }, result, [taskId])).map((asset) => asset.id);
             const completedChild = { id: taskId, status: "completed" as const, attempt: child?.attempt || attempt, result };
-            if (!(await patchTask(run.id, task.id, { taskId, taskIds: [taskId], childTasks: [completedChild], ...(assetIds ? { assetIds } : {}) }, "task.child.completed", executionId))) throw new Error("Agent Run 已由新执行器接管");
+            if (!(await patchTask(run.id, task.id, { taskId, taskIds: [taskId], childTasks: [completedChild], ...(assetIds ? { assetIds } : {}) }, "task.child.completed", executionId, polled.observed))) {
+                if (polled.observed) throw new AgentChildTaskDeferredError("图像结果处理状态已变化，请稍后检查。");
+                throw new Error("Agent Run 已由新执行器接管");
+            }
             return { index, result, taskId, assetIds };
         } catch (error) {
-            if (error instanceof AgentChildTaskDeferredError) throw error;
+            if (error instanceof AgentImageProcessingProjectionError || error instanceof AgentChildTaskDeferredError) throw error;
+            if (error instanceof AgentImageProcessingFactChangedError) throw new AgentChildTaskDeferredError(error.message);
             const message = toSafeGenerationErrorMessage(error, "生成任务失败");
-            if (taskId) await patchTask(run.id, task.id, { taskIds: [taskId], childTasks: [{ id: taskId, status: "failed", attempt: child?.attempt || attempt, error: message }] }, "task.child.failed", executionId);
+            const observed = error instanceof AgentChildTaskTerminalError ? error.imageProcessingObservation : undefined;
+            if (taskId) {
+                const patched = await patchTask(
+                    run.id,
+                    task.id,
+                    { ...(observed ? { status: "failed" as const, error: message } : {}), taskIds: [taskId], childTasks: [{ id: taskId, status: "failed", attempt: child?.attempt || attempt, error: message }] },
+                    "task.child.failed",
+                    executionId,
+                    observed,
+                );
+                if (!patched && observed) throw new AgentChildTaskDeferredError("图像结果处理状态已变化，请稍后检查。");
+            }
             throw error;
         }
     });
@@ -1151,8 +1210,8 @@ function normalizeChildTasks(task: AgentRunTask): AgentRunChildTask[] {
     return ids.map((id) => ({ id, status: "pending", attempt: Math.max(1, task.attempts) }));
 }
 
-export function linkAgentChildTask(run: AgentRun, task: AgentRunTask, taskId: string, attempt: number) {
-    return linkStoredGenerationTask(task.type, taskId, {
+export async function linkAgentChildTask(run: AgentRun, task: AgentRunTask, taskId: string, attempt: number) {
+    const linked = await linkStoredGenerationTask(task.type, taskId, {
         conversationId: run.conversationId,
         runId: run.id,
         surface: run.surface,
@@ -1160,6 +1219,9 @@ export function linkAgentChildTask(run: AgentRun, task: AgentRunTask, taskId: st
         parentTaskId: run.id,
         attemptNo: attempt,
     });
+    const current = await getAgentRun(run.id);
+    if (current) await reconcileAgentRunImageProcessingFacts(current);
+    return linked;
 }
 
 export function directCanvasTextContent(task: AgentRunTask) {
@@ -1172,6 +1234,30 @@ export function directCanvasTextContent(task: AgentRunTask) {
     if (displayed?.[1]?.trim()) return displayed[1].trim();
     const plain = prompt.match(/(?:内容|文字|文本|文案|标题)[^，。；;\n]{0,18}(?:写(?:成)?|写为|为|是|设置为|设为|改为|改成|填(?:写)?为)[:：\s]*([^，。；;\n]{1,160})/u);
     return plain?.[1]?.trim() || null;
+}
+
+async function pollAgentCopy(task: AgentRunTask, origin: string, path: string, imageId: string, cookie: string, runId: string, executionId: string, recoverNeedsReview: boolean) {
+    const before = task.type === "image" ? await observeAgentImageProcessingFact(runId, task.id, imageId) : undefined;
+    let result: unknown;
+    try {
+        const applied = task.childTasks?.find((child) => child.id === imageId)?.imageProcessingFact;
+        const recoverAppliedFact = recoverNeedsReview && (!before || isDeepStrictEqual(applied, before.fact));
+        result = await pollTask(origin, path, imageId, cookie, runId, task.type, executionId, recoverAppliedFact);
+    } catch (error) {
+        const after = task.type === "image" ? await observeAgentImageProcessingFact(runId, task.id, imageId) : undefined;
+        if (!isDeepStrictEqual(before, after)) throw new AgentChildTaskDeferredError("图像结果处理状态已变化，请稍后检查。");
+        if (before && error instanceof AgentChildTaskDeferredError && error.needsReview) {
+            if (before.fact?.eventType !== "task.needs_review") throw new AgentChildTaskDeferredError("图像结果处理状态已变化，请稍后检查。");
+            error.imageProcessingObservation = before;
+        } else if (before && error instanceof AgentChildTaskTerminalError) {
+            if (before.fact?.eventType !== "task.child.failed") throw new AgentChildTaskDeferredError("图像结果处理状态已变化，请稍后检查。");
+            error.imageProcessingObservation = before;
+        }
+        throw error;
+    }
+    const after = task.type === "image" ? await observeAgentImageProcessingFact(runId, task.id, imageId) : undefined;
+    if (!isDeepStrictEqual(before, after) || (before && before.fact?.eventType !== "task.child.completed")) throw new AgentChildTaskDeferredError("图像结果处理状态已变化，请稍后检查。");
+    return { result, observed: before };
 }
 
 export async function pollTask(origin: string, path: string, taskId: string, cookie: string, runId: string, type: AgentRunTask["type"], executionId: string, recoverNeedsReview = false) {
@@ -1204,8 +1290,8 @@ export async function pollTask(origin: string, path: string, taskId: string, coo
     throw new AgentChildTaskDeferredError("生成任务仍在处理中");
 }
 
-export async function patchTask(runId: string, taskId: string, patch: Partial<AgentRunTask>, eventType: string, executionId: string) {
-    return updateAgentRunTaskById(runId, taskId, patch, eventType, executionId);
+export async function patchTask(runId: string, taskId: string, patch: Partial<AgentRunTask>, eventType: string, executionId: string, observed?: AgentImageProcessingObservation) {
+    return updateAgentRunTaskById(runId, taskId, patch, eventType, executionId, observed);
 }
 
 function runtimeRequestHeaders(cookie: string, initial?: HeadersInit) {

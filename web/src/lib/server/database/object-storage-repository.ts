@@ -1,6 +1,6 @@
 import { DEFAULT_OBJECT_STORAGE_CDN_BASE_URL } from "@/lib/object-storage-contract";
 import { readJsonDataFile, writeJsonDataFile } from "@/lib/server/data-adapter";
-import { ensurePostgresSchema, getDatabaseProvider, postgresQuery } from "@/lib/server/database/postgres";
+import { ensurePostgresSchema, getDatabaseProvider, postgresQuery, type QueryExecutor } from "@/lib/server/database/postgres";
 
 export type StoredObjectStorageSettings = {
     id: "default";
@@ -20,10 +20,11 @@ export type StoredObjectStorageSettings = {
 const FILE_NAME = "object-storage-settings.json";
 let mutationQueue = Promise.resolve();
 
-export async function readObjectStorageSettings() {
+export async function readObjectStorageSettings(executor?: QueryExecutor) {
     if (getDatabaseProvider() === "postgres") {
-        await ensurePostgresSchema();
-        const result = await postgresQuery("SELECT * FROM object_storage_settings WHERE id = 'default'");
+        if (!executor) await ensurePostgresSchema();
+        const query: QueryExecutor["query"] = executor ? executor.query.bind(executor) : postgresQuery;
+        const result = await query("SELECT * FROM object_storage_settings WHERE id = 'default'");
         return result.rows[0] ? mapRow(result.rows[0]) : defaultSettings();
     }
     return normalizeSettings(await readJsonDataFile<unknown>(FILE_NAME, {}));

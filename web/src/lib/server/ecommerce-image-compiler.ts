@@ -1,3 +1,4 @@
+import type { ImageProcessingGenerationInput } from "../image-processing/contracts";
 import { ecommerceCanvasSize, type EcommerceCanvasConstraint, type EcommerceEditPlan, type EcommerceEditProtection, type EcommercePhotographyPlan, type EcommerceReferenceUse } from "./ecommerce-edit-plan";
 import type { EcommerceRoleCandidate, EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 
@@ -27,6 +28,7 @@ export type EcommerceCompiledImageRequest = {
     protection?: EcommerceEditProtection;
     photography?: EcommercePhotographyPlan;
     mask?: { mode: "independent"; required: true };
+    generationInput?: ImageProcessingGenerationInput;
     reason?: "independent_mask_unsupported";
     parameters: { variant: EcommerceImageProviderProfile["profileId"]; size?: string };
     modelSnapshot: EcommerceRoleRouteSnapshot;
@@ -89,6 +91,7 @@ export function compileEcommerceImageRequest(plan: EcommerceEditPlan, profile: E
     const prompt = [
         profile.compilerFamily === "openai-image-2.5" ? compileOpenAiPrompt(plan, referenceRoles) : compileNanoBananaPrompt(plan, referenceRoles),
         ...compilePhotography(plan),
+        ...(plan.preserve.sourceFraming === "visible_extent" ? ["取景保护：保留原照片已可见的商品范围、拍摄角度与边缘截断，不得补全画面外的商品结构，不得新增或删除可见部件，不得拉伸或再次裁切商品。"] : []),
         ...(canvas ? [`画布硬约束：${ecommerceCanvasSize(canvas)}（${canvas.mode}）；${canvas.allowReframe ? "只按此尺寸或比例执行" : "保持原机位和构图，不得裁切、补边或改变画幅"}。尺寸以此约束为准。`] : []),
     ].join("\n");
     const common = {
