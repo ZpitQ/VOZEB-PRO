@@ -153,6 +153,57 @@ describe("generation reference admission", () => {
     });
 });
 
+describe("WebP source admission", () => {
+    it.each([
+        { label: "RGB analysis", channels: 3, operation: "prepare_reference", options: {}, profile: "prepare_reference", checkpoints: [], requiredMemoryBytes: 680525824 },
+        { label: "RGBA analysis", channels: 4, operation: "prepare_reference", options: {}, profile: "prepare_reference", checkpoints: [], requiredMemoryBytes: 680525824 },
+        { label: "RGB full review", channels: 3, operation: "prepare_review", options: {}, profile: "prepare_review", checkpoints: [decoded], requiredMemoryBytes: 1073741824 },
+        { label: "RGBA full review", channels: 4, operation: "prepare_review", options: {}, profile: "prepare_review", checkpoints: [decoded], requiredMemoryBytes: 1073741824 },
+        { label: "RGB crop review", channels: 3, operation: "prepare_review", options: { region: { x: 1, y: 1, width: 999, height: 999 } }, profile: "prepare_review", checkpoints: [decoded], requiredMemoryBytes: 1073741824 },
+        { label: "RGBA crop review", channels: 4, operation: "prepare_review", options: { region: { x: 1, y: 1, width: 999, height: 999 } }, profile: "prepare_review", checkpoints: [decoded], requiredMemoryBytes: 1073741824 },
+        {
+            label: "RGB generation reference",
+            channels: 3,
+            operation: "prepare_reference",
+            options: { generationInput: { bounds: { width: 8000, height: 8000 }, quality: "high" } },
+            profile: "generation_reference",
+            checkpoints: [],
+            requiredMemoryBytes: 979369984,
+        },
+        {
+            label: "RGBA generation reference",
+            channels: 4,
+            operation: "prepare_reference",
+            options: { generationInput: { bounds: { width: 8000, height: 8000 }, quality: "high" } },
+            profile: "generation_reference",
+            checkpoints: [],
+            requiredMemoryBytes: 979369984,
+        },
+        { label: "RGB white protection", channels: 3, operation: "build_protection", options: { transparentBackground: false }, profile: "white_protection", checkpoints: [], requiredMemoryBytes: 979369984 },
+        { label: "RGBA white protection", channels: 4, operation: "build_protection", options: { transparentBackground: true }, profile: "white_protection", checkpoints: [], requiredMemoryBytes: 979369984 },
+        { label: "RGB local protection", channels: 3, operation: "build_protection", options: local, profile: "local_protection", checkpoints: [], requiredMemoryBytes: 915406848 },
+        { label: "RGBA local protection", channels: 4, operation: "build_protection", options: local, profile: "local_protection", checkpoints: [], requiredMemoryBytes: 915406848 },
+        { label: "RGB scene selection", channels: 3, operation: "build_protection", options: selection, profile: "scene_selection", checkpoints: [], requiredMemoryBytes: 915406848 },
+        { label: "RGBA scene selection", channels: 4, operation: "build_protection", options: selection, profile: "scene_selection", checkpoints: [], requiredMemoryBytes: 915406848 },
+        { label: "RGB white protection with a complete checkpoint", channels: 3, operation: "build_protection", options: { transparentBackground: false }, profile: "white_protection", checkpoints: [decoded], requiredMemoryBytes: 160432128 },
+        { label: "RGBA white protection with a complete checkpoint", channels: 4, operation: "build_protection", options: { transparentBackground: true }, profile: "white_protection", checkpoints: [decoded], requiredMemoryBytes: 160432128 },
+    ])("prices $label within its source role", ({ channels, operation, options, profile, checkpoints, requiredMemoryBytes }) => {
+        expect(estimateImageProcessingMemory(request(operation, options), facts(checkpoints, [{ ...encoded, layout: { format: "webp", depth: "uchar", channels } }]))).toEqual(calibrated(profile, requiredMemoryBytes));
+    });
+
+    it.each([3, 4])("prices a %i-channel WebP scene source with its complete 64MP checkpoint", (channels) => {
+        const encodedInputs = [{ ...protectedEncoded[0], layout: { format: "webp", depth: "uchar", channels } }, protectedEncoded[1], protectedEncoded[2]];
+        expect(estimateImageProcessingMemory(sceneTask, facts([source64, native64], encodedInputs))).toEqual(calibrated("scene_result", 1422917632));
+    });
+
+    it.each([3, 4])("keeps an unmeasured %i-channel WebP provider result unavailable", (channels) => {
+        const task = request("process_result", { mode: "ordinary", results: [{ resultId: "result:1", resultIndex: 1, inputIndex: 0 }], transparentBackground: false });
+        const estimate = estimateImageProcessingMemory(task, facts([], [{ ...encoded, layout: { format: "webp", depth: "uchar", channels } }]));
+        expect(estimate).toEqual(uncalibrated("ordinary_result"));
+        expect(decideImageProcessingAdmission(estimate, free)).toEqual({ status: "unavailable", code: "image_processing_resource_unavailable", reason: "profile_uncalibrated" });
+    });
+});
+
 describe("prepare_review admission budgets", () => {
     const capacity = { totalMemoryBytes: 1073741824, availableMemoryBytes: 1073741824, availableSlots: 1 };
 

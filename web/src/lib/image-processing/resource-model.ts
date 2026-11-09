@@ -120,21 +120,22 @@ export function estimateImageProcessingMemory(request: ImageProcessingResourceRe
             (layout.format === "png" && layout.depth === "uchar" && (layout.channels === 3 || layout.channels === 4)) ||
             (layout.format === "png" && layout.depth === "ushort" && layout.channels === 4) ||
             (layout.format === "jpeg" && layout.depth === "uchar" && layout.channels === 3) ||
-            (layout.format === "tiff" && layout.depth === "float" && layout.channels === 3);
+            (layout.format === "tiff" && layout.depth === "float" && layout.channels === 3) ||
+            isMeasuredWebpSource(encoded[0]);
         // Measured 64MP full/crop review paths keep one reserve, independent of decoded checkpoints.
         return measured ? calibrated(profile, 1024 * MiB) : uncalibrated;
     }
     if (request.operation === "prepare_reference") {
         if (request.options.generationInput) {
-            if (nativeCoefficient(encoded[0]) !== 4) return uncalibrated;
+            if (nativeCoefficient(encoded[0]) !== 4 && !isMeasuredWebpSource(encoded[0])) return uncalibrated;
             return calibrated(profile, 140 * MiB + 13 * decodedPixels(request, facts, 0, REFERENCE_PIXELS));
         }
-        const coefficient = nativeCoefficient(encoded[0]);
+        const coefficient = isMeasuredWebpSource(encoded[0]) ? 8 : nativeCoefficient(encoded[0]);
         if (coefficient === undefined) return uncalibrated;
         return calibrated(profile, 140 * MiB + coefficient * REFERENCE_PIXELS + 4 * MiB + 4 * 2048 ** 2);
     }
     if (request.operation === "build_protection") {
-        if (nativeCoefficient(encoded[0]) !== 4) return uncalibrated;
+        if (nativeCoefficient(encoded[0]) !== 4 && !isMeasuredWebpSource(encoded[0])) return uncalibrated;
         const options = request.options;
         let coefficient: number;
         if ("mode" in options) coefficient = options.mode === "scene_selection" ? (options.freezeEnhancementBaseline ? 20 : 12) : options.freezeEnhancementBaseline ? 29 : 12;
@@ -156,8 +157,8 @@ export function estimateImageProcessingMemory(request: ImageProcessingResourceRe
     }
 
     const source = encoded[options.sourceInputIndex];
-    if (nativeCoefficient(source) !== 4) return uncalibrated;
     const sourcePixels = decodedPixels(request, facts, options.sourceInputIndex, NATIVE_PIXELS);
+    if (nativeCoefficient(source) !== 4 && !(options.mode === "scene_protection" && isMeasuredWebpSource(source) && sourcePixels <= REFERENCE_PIXELS)) return uncalibrated;
     if (options.mode === "layers") return calibrated(profile, 120 * MiB + source.bytes + nativeBytes + (readable.length ? 20 : 12) * sourcePixels);
 
     const mask = encoded[options.maskInputIndex];
@@ -182,6 +183,11 @@ function decodedPixels(request: ImageProcessingResourceRequest, facts: ImageProc
 
 function sameSize(value: ImageProcessingSize, expected: ImageProcessingSize) {
     return value.width === expected.width && value.height === expected.height;
+}
+
+function isMeasuredWebpSource(input: EncodedImageProcessingInput) {
+    const layout = input.layout;
+    return layout?.format === "webp" && layout.depth === "uchar" && (layout.channels === 3 || layout.channels === 4);
 }
 
 function nativeCoefficient(input: EncodedImageProcessingInput) {
