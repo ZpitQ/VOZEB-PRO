@@ -11,7 +11,7 @@
         "worker:generation": "node scripts/build-image-processing.mjs && node --env-file-if-exists=.env.local scripts/generation-worker.mjs",
         "backup:disaster": "node --env-file-if-exists=.env.local scripts/disaster-backup.mjs",
         "restore:disaster": "node --env-file-if-exists=.env.local scripts/disaster-restore.mjs",
-        "test": "vitest run",
+        "test": "node scripts/build-image-processing.mjs && vitest run",
         "test:protocols": "vitest run scripts/protocol-fixture-server.test.mjs src/lib/server/active-protocol-media-matrix.live.test.ts src/lib/server/active-protocol-media-proxy-matrix.live.test.ts src/lib/server/protocol-media-matrix.live.test.ts src/lib/server/protocol-model-catalog.live.test.ts src/lib/server/text-planning-runtime.integration.test.ts src/lib/server/audio-task-runtime.test.ts src/lib/server/generation-task-cancellation-service.test.ts --reporter=verbose",
         "lint": "eslint . --quiet",
         "pree2e": "node scripts/prepare-e2e.mjs",

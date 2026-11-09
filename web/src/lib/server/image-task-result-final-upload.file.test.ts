@@ -48,7 +48,9 @@ describe("file image task result final upload", () => {
         const { getObjectStorageRuntimeConfig } = await import("./object-storage-config");
         expect((await getObjectStorageRuntimeConfig()).enabled).toBe(false);
         userId = "fixture-result-final-upload-" + randomUUID();
-        source = await sharp({ create: { width: 2, height: 2, channels: 3, background: { r: 24, g: 48, b: 72 } } }).png().toBuffer();
+        source = await sharp({ create: { width: 2, height: 2, channels: 3, background: { r: 24, g: 48, b: 72 } } })
+            .png()
+            .toBuffer();
     }, 30_000);
 
     afterAll(async () => {
@@ -91,14 +93,16 @@ describe("file image task result final upload", () => {
         const imageClaim = imageClaims[0];
         assert.ok(imageClaim?.executionId);
         const original = { taskId: image.id, workerId: imageWorkerId, executionId: imageClaim.executionId };
-        expect(await capture.captureImageTaskNativeResults({
-            ...original,
-            attemptNo: 1,
-            upstreamTaskId: null,
-            result: { dataUrl: "data:image/png;base64," + source.toString("base64") },
-            origin: "https://image.example.com",
-            authContext: "",
-        })).toMatchObject({ state: "native_ready" });
+        expect(
+            await capture.captureImageTaskNativeResults({
+                ...original,
+                attemptNo: 1,
+                upstreamTaskId: null,
+                result: { dataUrl: "data:image/png;base64," + source.toString("base64") },
+                origin: "https://image.example.com",
+                authContext: "",
+            }),
+        ).toMatchObject({ state: "native_ready" });
         const sealed = await imageTasks.getImageTask(image.id);
         assert.ok(sealed?.nativeResults);
         expect(sealed.runId).toBeUndefined();
@@ -106,10 +110,27 @@ describe("file image task result final upload", () => {
         expect(sealed.nativeResults.slots).toHaveLength(1);
         const slot = sealed.nativeResults.slots[0];
         assert.ok(slot?.status === "stored");
-        expect(slot).toMatchObject({ resultId: image.id + ":1", resultIndex: 1, scope: "reference", storageProvider: "local", bytes: 95, sha256: "a19d822cdb8eebfbbd5a5521f524b002fee7db2dc90513e6647ec005ed6b1db6", layout: { format: "png", depth: "uchar", channels: 3 } });
+        expect(slot).toMatchObject({
+            resultId: image.id + ":1",
+            resultIndex: 1,
+            scope: "reference",
+            storageProvider: "local",
+            bytes: 95,
+            sha256: "a19d822cdb8eebfbbd5a5521f524b002fee7db2dc90513e6647ec005ed6b1db6",
+            layout: { format: "png", depth: "uchar", channels: 3 },
+        });
         const nativePath = path.join(media.REFERENCE_MEDIA_ROOT, slot.storageKey);
         expect(await readFile(nativePath)).toEqual(source);
-        expect(await registrations.getLocalMediaRegistration(slot.storageKey)).toMatchObject({ ownerUserId: userId, taskId: image.id, scope: "reference", storageClass: "permanent", type: "attachment", mimeType: "application/octet-stream", storageProvider: "local", bytes: 95 });
+        expect(await registrations.getLocalMediaRegistration(slot.storageKey)).toMatchObject({
+            ownerUserId: userId,
+            taskId: image.id,
+            scope: "reference",
+            storageClass: "permanent",
+            type: "attachment",
+            mimeType: "application/octet-stream",
+            storageProvider: "local",
+            bytes: 95,
+        });
 
         expect(await processing.ensureImageTaskResultProcessing(original)).toEqual({ state: "waiting" });
         const waiting = await imageTasks.getImageTask(image.id);
@@ -127,7 +148,10 @@ describe("file image task result final upload", () => {
         expect(payload.inputs).toEqual([{ assetId: slot.assetId, assetVersion: slot.assetVersion, expectedSha256: slot.sha256 }]);
         expect(payload.options).toEqual({ mode: "ordinary", results: [{ resultId: slot.resultId, resultIndex: 1, inputIndex: 0 }], transparentBackground: false });
         expect(payload.sources).toEqual([{ inputIndex: 0, scope: "reference", storageKey: slot.storageKey, storageProvider: "local" }]);
-        expect(payload).toMatchObject({ imageResultBinding: { imageTaskId: image.id, userId, nativeResults: sealed.nativeResults }, resource: { facts: { encodedInputs: [{ inputIndex: 0, assetId: slot.assetId, assetVersion: slot.assetVersion, sha256: slot.sha256, bytes: 95, layout: { format: "png", depth: "uchar", channels: 3 } }], decodedInputs: [] } } });
+        expect(payload).toMatchObject({
+            imageResultBinding: { imageTaskId: image.id, userId, nativeResults: sealed.nativeResults },
+            resource: { facts: { encodedInputs: [{ inputIndex: 0, assetId: slot.assetId, assetVersion: slot.assetVersion, sha256: slot.sha256, bytes: 95, layout: { format: "png", depth: "uchar", channels: 3 } }], decodedInputs: [] } },
+        });
         const input = payload.inputs[0];
         assert.ok(input);
         const outputDirectory = await mkdtemp(path.join(directory, "ordinary-operation-"));
@@ -160,7 +184,15 @@ describe("file image task result final upload", () => {
         expect(beforeImage.nextPollAt).toBeUndefined();
         expect(beforeImage.payload.executionId).toBeUndefined();
         expect(beforeImage.runId).toBeUndefined();
-        expect(beforeChild).toMatchObject({ type: "image_processing", userId, parentTaskId: image.id, status: "running", workerId: childWorkerId, leaseUntil: childClaim.leaseUntil, payload: { executionId: childClaim.executionId, inputDigest: waiting.resultProcessing.inputDigest } });
+        expect(beforeChild).toMatchObject({
+            type: "image_processing",
+            userId,
+            parentTaskId: image.id,
+            status: "running",
+            workerId: childWorkerId,
+            leaseUntil: childClaim.leaseUntil,
+            payload: { executionId: childClaim.executionId, inputDigest: waiting.resultProcessing.inputDigest },
+        });
         expect(beforeChild.runId).toBeUndefined();
         expect(beforeChild.resultPayload).toBeUndefined();
         const response = new Response(new Uint8Array(finalBytes));

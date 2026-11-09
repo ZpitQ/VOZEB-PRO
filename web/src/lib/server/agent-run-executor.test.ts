@@ -632,7 +632,7 @@ describe("executeAgentRun backend settings", () => {
         mocks.scheduleGenerationTask.mockReset().mockResolvedValue(undefined);
         mocks.updateImageTask.mockReset().mockImplementation(async (id: string, patch: Record<string, unknown>) => ({ id, ...patch }));
         mocks.getImageTask.mockReset().mockResolvedValue(null);
-        mocks.getStoredGenerationTaskRecord.mockReset().mockResolvedValue({ executionPhase: "needs_review" });
+        mocks.getStoredGenerationTaskRecord.mockReset().mockResolvedValue({ executionPhase: "needs_review", payload: {} });
         mocks.fetchSafeOutbound.mockReset().mockRejectedValue(new Error("fixture forbids remote reads"));
         mocks.getCreativeConversationContext.mockResolvedValue({ summary: "", summaryThroughSequence: 0, recentMessages: [] });
         mocks.reviewCreativeOutputs.mockResolvedValue({ mode: "visual", status: "passed", summary: "检查通过", issues: [], retryTaskIds: [] });
@@ -2105,6 +2105,7 @@ describe("executeAgentRun backend settings", () => {
         mocks.getAuthSettings.mockResolvedValue(settings("image-model", "image-channel"));
         mocks.getStoredGenerationTaskRecord.mockImplementation(async (_type, id) => ({
             id,
+            payload: {},
             executionPhase: id === "source-child" ? "needs_review" : phase,
             lastUpstreamStatus: id === "source-child" ? "reference_source_unavailable" : phase,
             upstreamTaskId: id === "sibling-child" && phase !== "created" ? "original-sibling-upstream" : undefined,
