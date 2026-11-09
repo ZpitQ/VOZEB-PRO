@@ -1125,6 +1125,10 @@ export async function dispatchTask(task: AgentRunTask, origin: string, cookie: s
             child = { id: taskId, status: "pending", attempt };
             if (!(await patchTask(run.id, task.id, { taskId, taskIds: [taskId], childTasks: [child] }, "task.created", executionId))) throw new Error("Agent Run 已由新执行器接管");
         }
+        if (task.type === "image" && task.sceneProtection?.mask.serverUrl) {
+            const pending = await getStoredGenerationTaskRecord("image", taskId);
+            if (pending?.status === "pending" && pending.executionPhase === "created" && !pending.nextPollAt) await scheduleGenerationTask("image", taskId, { nextPollAt: Date.now() });
+        }
         try {
             if (child?.status === "completed") {
                 const assetIds = task.ecommerceExecution

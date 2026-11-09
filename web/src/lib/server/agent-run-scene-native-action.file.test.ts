@@ -1110,66 +1110,103 @@ describe("scene confirmation persists its receipt before a new claim builds the 
         30_000,
     );
 
-    it("submits the same native-confirmed scene ImageTask after claim B without an inline stored mask and seals a direct PNG result", async () => {
-        const fixture = await nativeSceneSubmissionFixture();
-        const { images, imageRuntime, first, second, cookie, claimedImage, claim, task, paused, registeredSource, registeredMask, original, native, receiptBefore, prepareBefore, build, buildBefore, moneyBefore } = fixture;
-        boundary.create.mockImplementationOnce(async (submission, requestOrigin, _publicOrigin, requestCookie) => {
-            const { pending: _pending, ...result } = await fixture.submitProviderAttempt(submission, requestOrigin, requestCookie, "fixture-native-scene-submit:" + submission.id);
-            return { ...result, dataUrl: "data:image/png;base64," + original.toString("base64") };
+    it("keeps the native scene ImageTask unclaimable before its parent child is published, then submits the same task and seals a direct PNG result", async () => {
+        const imageRoute = await import("@/app/api/image-tasks/route");
+        const actualPost = imageRoute.POST;
+        const posted = Promise.withResolvers<string>();
+        const released = Promise.withResolvers<void>();
+        const post = vi.spyOn(imageRoute, "POST").mockImplementationOnce(async (request) => {
+            const response = await actualPost(request);
+            const envelope: { task?: { id?: string } } = await response.clone().json();
+            assert(envelope.task?.id);
+            posted.resolve(envelope.task.id);
+            await released.promise;
+            return response;
         });
-        const step = await imageRuntime.createImageTaskUpstreamStep(claimedImage, origin, origin, cookie);
-        const charge = fixture.charge();
-        const afterStep = await images.getImageTask(first.taskId);
-        const afterSchedule = await tasks.getStoredGenerationTaskRecord("image", first.taskId);
-        const moneyAfter = await financialTruth();
-        expect(await readFile(registeredSource.filePath)).toEqual(original);
-        expect(await readFile(registeredMask.filePath)).toEqual(native.bytes);
-        expect((await runs.getAgentRun(paused.id))?.ecommerceSnapshot?.processing?.sceneSelection).toStrictEqual(receiptBefore);
-        expect(await tasks.getStoredGenerationTaskRecord("image_processing", prepareBefore.id)).toStrictEqual(prepareBefore);
-        expect(await tasks.getStoredGenerationTaskRecord("image_processing", build.id)).toStrictEqual(buildBefore);
-        // Direct results must use the canvas recorded on the transient provider submission.
-        expect(
-            step,
-            JSON.stringify({
+        const pending = nativeSceneSubmissionFixture();
+        try {
+            const taskId = await Promise.race([
+                posted.promise,
+                pending.then(() => {
+                    throw new Error("SETUP: actual native ImageTask POST did not reach the publication gate");
+                }),
+            ]);
+            const unlinked = await tasks.getStoredGenerationTaskRecord("image", taskId);
+            assert(unlinked?.runId);
+            const parent = await runs.getAgentRun(unlinked.runId);
+            assert(parent);
+            expect(unlinked).toMatchObject({ status: "pending", executionPhase: "created" });
+            expect(parent.tasks[0]).toMatchObject({ status: "running", attempts: 1 });
+            expect(parent.tasks[0].taskIds || []).not.toContain(taskId);
+            expect(parent.tasks[0].childTasks || []).not.toContainEqual(expect.objectContaining({ id: taskId }));
+            expect(await scheduler.claimDueGenerationTasks({ workerId: "scene-before-child-publication-worker", taskIds: [taskId], limit: 1 })).toStrictEqual([]);
+            expect(boundary.create).not.toHaveBeenCalled();
+            released.resolve();
+            const fixture = await pending;
+            expect(fixture.first.taskId).toBe(taskId);
+            const { images, imageRuntime, first, second, cookie, claimedImage, claim, task, paused, registeredSource, registeredMask, original, native, receiptBefore, prepareBefore, build, buildBefore, moneyBefore } = fixture;
+            boundary.create.mockImplementationOnce(async (submission, requestOrigin, _publicOrigin, requestCookie) => {
+                const { pending: _pending, ...result } = await fixture.submitProviderAttempt(submission, requestOrigin, requestCookie, "fixture-native-scene-submit:" + submission.id);
+                return { ...result, dataUrl: "data:image/png;base64," + original.toString("base64") };
+            });
+            const step = await imageRuntime.createImageTaskUpstreamStep(claimedImage, origin, origin, cookie);
+            const charge = fixture.charge();
+            const afterStep = await images.getImageTask(first.taskId);
+            const afterSchedule = await tasks.getStoredGenerationTaskRecord("image", first.taskId);
+            const moneyAfter = await financialTruth();
+            expect(await readFile(registeredSource.filePath)).toEqual(original);
+            expect(await readFile(registeredMask.filePath)).toEqual(native.bytes);
+            expect((await runs.getAgentRun(paused.id))?.ecommerceSnapshot?.processing?.sceneSelection).toStrictEqual(receiptBefore);
+            expect(await tasks.getStoredGenerationTaskRecord("image_processing", prepareBefore.id)).toStrictEqual(prepareBefore);
+            expect(await tasks.getStoredGenerationTaskRecord("image_processing", build.id)).toStrictEqual(buildBefore);
+            // Direct results must use the canvas recorded on the transient provider submission.
+            expect(
                 step,
-                providerCalls: boundary.create.mock.calls.length,
-                attempts: afterStep?.attempts,
-                billing: afterStep?.billing,
-                upstream: afterStep?.upstream,
-                executionPhase: afterSchedule?.executionPhase,
-                submittedAt: afterSchedule?.submittedAt,
-                financialUnchanged: JSON.stringify(moneyAfter) === JSON.stringify(moneyBefore),
-            }),
-        ).toMatchObject({ state: "result_ready", status: "native_ready", resultUrl: expect.stringMatching(/^\/api\/reference-assets\//) });
+                JSON.stringify({
+                    step,
+                    providerCalls: boundary.create.mock.calls.length,
+                    attempts: afterStep?.attempts,
+                    billing: afterStep?.billing,
+                    upstream: afterStep?.upstream,
+                    executionPhase: afterSchedule?.executionPhase,
+                    submittedAt: afterSchedule?.submittedAt,
+                    financialUnchanged: JSON.stringify(moneyAfter) === JSON.stringify(moneyBefore),
+                }),
+            ).toMatchObject({ state: "result_ready", status: "native_ready", resultUrl: expect.stringMatching(/^\/api\/reference-assets\//) });
 
-        expect(boundary.create).toHaveBeenCalledOnce();
-        assert(charge && afterStep);
-        expect(charge).toMatchObject({ cost: 2 });
-        expect(afterStep).toMatchObject({
-            id: first.taskId,
-            runId: paused.id,
-            executionId: claim.payload.executionId,
-            attemptNo: 1,
-            billing: { pointsCost: 2, pointsRecordId: charge.recordId, refunded: false },
-            mask: claimedImage.mask,
-            sceneProtection: task.sceneProtection,
-            ecommerceCanvasRequest: { size: "100x80" },
-            nativeResults: { version: "image-task-native-results.v1", attemptNo: 1, upstreamTaskId: null, slots: [{ status: "stored", resultId: first.taskId + ":1", resultIndex: 1, sha256: fixture.baseline.sourceSha256, bytes: original.length }] },
-        });
-        expect(afterStep.upstream).toBeUndefined();
-        expect(afterStep.result).toBeUndefined();
-        const slot = afterStep.nativeResults?.slots[0];
-        assert(slot?.status === "stored");
-        const storedNative = await references.readReferenceAsset(slot.storageKey);
-        assert(storedNative);
-        expect(await readFile(storedNative.filePath)).toEqual(original);
-        expect(afterStep.attempts).toHaveLength(1);
-        expect(afterStep.attempts?.[0]).toMatchObject({ attemptNo: 1, status: "running" });
-        expect(afterSchedule).toMatchObject({ executionPhase: "submitting" });
-        expect(afterSchedule?.upstreamTaskId).toBeUndefined();
-        expect(moneyAfter.pointRecords.filter((record) => record.type === "consume")).toMatchObject([{ id: charge.recordId, amount: -2, userId }]);
-        expect((await images.getImageTask(second.taskId))?.attempts).toBeUndefined();
-        expect((await runs.getAgentRun(paused.id))?.tasks[0].childTasks).toStrictEqual(task.childTasks);
+            expect(boundary.create).toHaveBeenCalledOnce();
+            assert(charge && afterStep);
+            expect(charge).toMatchObject({ cost: 2 });
+            expect(afterStep).toMatchObject({
+                id: first.taskId,
+                runId: paused.id,
+                executionId: claim.payload.executionId,
+                attemptNo: 1,
+                billing: { pointsCost: 2, pointsRecordId: charge.recordId, refunded: false },
+                mask: claimedImage.mask,
+                sceneProtection: task.sceneProtection,
+                ecommerceCanvasRequest: { size: "100x80" },
+                nativeResults: { version: "image-task-native-results.v1", attemptNo: 1, upstreamTaskId: null, slots: [{ status: "stored", resultId: first.taskId + ":1", resultIndex: 1, sha256: fixture.baseline.sourceSha256, bytes: original.length }] },
+            });
+            expect(afterStep.upstream).toBeUndefined();
+            expect(afterStep.result).toBeUndefined();
+            const slot = afterStep.nativeResults?.slots[0];
+            assert(slot?.status === "stored");
+            const storedNative = await references.readReferenceAsset(slot.storageKey);
+            assert(storedNative);
+            expect(await readFile(storedNative.filePath)).toEqual(original);
+            expect(afterStep.attempts).toHaveLength(1);
+            expect(afterStep.attempts?.[0]).toMatchObject({ attemptNo: 1, status: "running" });
+            expect(afterSchedule).toMatchObject({ executionPhase: "submitting" });
+            expect(afterSchedule?.upstreamTaskId).toBeUndefined();
+            expect(moneyAfter.pointRecords.filter((record) => record.type === "consume")).toMatchObject([{ id: charge.recordId, amount: -2, userId }]);
+            expect((await images.getImageTask(second.taskId))?.attempts).toBeUndefined();
+            expect((await runs.getAgentRun(paused.id))?.tasks[0].childTasks).toStrictEqual(task.childTasks);
+        } finally {
+            released.resolve();
+            await Promise.allSettled([pending]);
+            post.mockRestore();
+        }
     }, 30_000);
 
     async function expectLifecycleBindingsUnchanged(fixture: NativeScenePreclaimFixture, before: Awaited<ReturnType<typeof submissionPreimage>>) {

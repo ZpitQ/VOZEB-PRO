@@ -120,7 +120,8 @@ export async function schedulePreparedImageTask(task: ImageTask, reviewReason: s
         executionPhase: "created",
         channelId: task.config.channelId,
         provider: task.config.advancedConfig?.protocol || task.config.apiFormat,
-        nextPollAt: Date.now(),
+        // Native scene submission requires the Agent's durable child link.
+        nextPollAt: task.runId && task.sceneProtection?.mask.serverUrl ? undefined : Date.now(),
         lastUpstreamStatus: "created",
     });
     return { needsReview: false as const };

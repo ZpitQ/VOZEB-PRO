@@ -291,19 +291,28 @@ async function withPrepareWorker(source: Buffer, scenario: (fixture: WorkerCase)
         async function captureChild() {
             assert.ok(workerPid, "SETUP: real Worker PID missing before child capture");
             const parentPid = workerPid;
+            let captured: ChildIdentity | undefined;
             try {
                 for (;;) {
                     childObserverStop.signal.throwIfAborted();
-                    const text = (await readFile("/proc/" + parentPid + "/task/" + parentPid + "/children", "utf8")).trim();
-                    if (!text) continue;
-                    const ids = text.split(/\s+/);
-                    assert.equal(ids.length, 1, "SETUP: expected one real Worker child, not a replacement PID");
-                    const pid = Number(ids[0]);
-                    assert.ok(Number.isSafeInteger(pid) && pid > 0 && pid !== parentPid && pid !== process.pid, "SETUP: invalid real child PID");
-                    const captured = await readChildIdentity(pid);
-                    assert.equal(captured.parentPid, parentPid, "SETUP: child is not owned by this Worker");
+                    if (!captured) {
+                        const text = (await readFile("/proc/" + parentPid + "/task/" + parentPid + "/children", "utf8")).trim();
+                        if (!text) continue;
+                        const ids = text.split(/\s+/);
+                        assert.equal(ids.length, 1, "SETUP: expected one real Worker child, not a replacement PID");
+                        const pid = Number(ids[0]);
+                        assert.ok(Number.isSafeInteger(pid) && pid > 0 && pid !== parentPid && pid !== process.pid, "SETUP: invalid real child PID");
+                        captured = await readChildIdentity(pid);
+                        assert.equal(captured.parentPid, parentPid, "SETUP: child is not owned by this Worker");
+                    }
+                    const pid = captured.pid;
+                    const current = await readChildIdentity(pid);
+                    assertSameChild(current, captured);
+                    assert.notEqual(current.state, "Z", "SETUP: real child closed before the exec barrier");
                     const args = (await readFile("/proc/" + pid + "/cmdline", "utf8")).split("\0");
                     assert.equal(args.pop(), "", "SETUP: malformed real child command line");
+                    // This owned PID is visible before exec replaces the Worker's argv.
+                    if (args.length === 0 || (args.length === 3 && args[0] === process.execPath && args[1] === "--max-old-space-size=64" && args[2] === workerScript)) continue;
                     assert.deepEqual(
                         args,
                         [process.execPath, "--max-old-space-size=" + seed.profile.processHeapMb, fileURLToPath(new URL("../../../.image-processing-runtime/workers/image-processing-child.mjs", import.meta.url))],
@@ -434,7 +443,7 @@ async function withPrepareWorker(source: Buffer, scenario: (fixture: WorkerCase)
             const watcher = watch(taskDirectory, () => changed.resolve());
             watcher.once("error", (error) => {
                 watchError = error;
-                observedFailure = error;
+                observedFailure ??= error;
                 fixtureFailure.reject(error);
                 changed.resolve();
             });
@@ -605,7 +614,7 @@ async function withPrepareWorker(source: Buffer, scenario: (fixture: WorkerCase)
                     assert.ok(workerPid);
                     assert.equal((await readFile("/proc/" + workerPid + "/task/" + workerPid + "/children", "utf8")).trim(), "", "SETUP: Worker already has a child before input EOF");
                     childObserver = captureChild().catch((error: unknown) => {
-                        observedFailure = error;
+                        observedFailure ??= error;
                         fixtureFailure.reject(error);
                     });
                 }
@@ -783,7 +792,7 @@ async function withPrepareWorker(source: Buffer, scenario: (fixture: WorkerCase)
         const server = createServer((request, response) => {
             const running = handle(request, response)
                 .catch((error: unknown) => {
-                    observedFailure = error;
+                    observedFailure ??= error;
                     fixtureFailure.reject(error);
                     if (!response.headersSent) response.writeHead(500, { "content-type": "application/json" });
                     response.end(JSON.stringify({ code: 500, data: null, msg: "Worker fault fixture rejected the request" }));
@@ -800,7 +809,7 @@ async function withPrepareWorker(source: Buffer, scenario: (fixture: WorkerCase)
                 });
             });
             server.on("error", (error) => {
-                observedFailure = error;
+                observedFailure ??= error;
                 fixtureFailure.reject(error);
             });
             const address = server.address();
@@ -904,9 +913,9 @@ async function withPrepareWorker(source: Buffer, scenario: (fixture: WorkerCase)
                         throw new Error(diagnostics("CLEANUP: forced SIGKILL is not valid rejected/fail qualification"));
                     }
                     expect(await closed).toStrictEqual({ code: 0, signal: null });
-                    expect(stderr, diagnostics("Worker reported an unknown image fault outcome")).toBe("");
                     await Promise.all([...requests]);
                     if (observedFailure) throw observedFailure;
+                    expect(stderr, diagnostics("Worker reported an unknown image fault outcome")).toBe("");
                     expect(await seed.registrations.getLocalMediaRegistration(seed.original.token)).toStrictEqual(seed.registration);
                     expect(await readFile(seed.sourcePath)).toEqual(source);
                     expect(await readdir(workerTemp)).toStrictEqual([]);

@@ -1692,12 +1692,25 @@ test("resource-resume-ui:成功后刷新按原Run运行态恢复且保留旧助�
     expect((await response.json()).data.run).toMatchObject({ id: fixture.runId, conversationId: fixture.conversationId, status: "running" });
     await expect(page.getByTestId("creative-generation-elapsed")).toBeVisible();
     const eventsBeforeReload = fixture.eventSnapshots.length;
-    const restoredRun = page.waitForResponse((value) => value.request().method() === "GET" && new URL(value.url()).pathname === `/api/agent/runs/${fixture.runId}`);
-    const restoredMessages = page.waitForResponse((value) => value.request().method() === "GET" && new URL(value.url()).pathname === `/api/creative/conversations/${fixture.conversationId}/messages`);
+    await page.reload({ waitUntil: "commit" });
+    const restoredRun = page
+        .waitForRequest((value) => value.method() === "GET" && new URL(value.url()).pathname === `/api/agent/runs/${fixture.runId}`)
+        .then(async (request) => {
+            const response = await request.response();
+            assert.ok(response);
+            return response.json();
+        });
+    const restoredMessages = page
+        .waitForRequest((value) => value.method() === "GET" && new URL(value.url()).pathname === `/api/creative/conversations/${fixture.conversationId}/messages`)
+        .then(async (request) => {
+            const response = await request.response();
+            assert.ok(response);
+            return response.json();
+        });
     const restoredStream = page.waitForRequest((value) => value.method() === "GET" && new URL(value.url()).pathname === `/api/agent/runs/${fixture.runId}/events`);
-    await page.reload({ waitUntil: "domcontentloaded" });
-    expect((await (await restoredRun).json()).data.run).toMatchObject({ id: fixture.runId, conversationId: fixture.conversationId, status: "running" });
-    expect((await (await restoredMessages).json()).data.messages).toMatchObject([
+    const [runPayload, messagesPayload] = await Promise.all([restoredRun, restoredMessages]);
+    expect(runPayload.data.run).toMatchObject({ id: fixture.runId, conversationId: fixture.conversationId, status: "running" });
+    expect(messagesPayload.data.messages).toMatchObject([
         { id: "task16-input", status: "completed" },
         { id: "task16-assistant", runId: fixture.runId, status: "completed" },
     ]);

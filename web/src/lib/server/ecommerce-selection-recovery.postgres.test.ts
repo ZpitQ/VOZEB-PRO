@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -11,6 +12,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { AgentRun } from "./agent-run-store";
 import type { AuthSettings } from "@/lib/auth/store";
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
+import type { CompletedImageProcessingStage } from "./image-processing-service";
 import { createProtocolFixtureServer } from "../../../scripts/protocol-fixture-server.mjs";
 
 const nextContext = vi.hoisted(() => ({ cookie: "" }));
@@ -18,7 +20,12 @@ vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => (nextContext
 vi.mock("next/server", async (original) => ({ ...(await original<typeof import("next/server")>()), after: () => {} }));
 const enabled = process.env.VOZEB_PRO_RUN_ECOMMERCE_POSTGRES_INTEGRATION === "1";
 const postgresDescribe = enabled ? describe : describe.skip;
-type ProcessResult = { pid: number; outcome: { status?: number; body?: unknown }; run: AgentRun };
+type ProcessResult = {
+    pid: number;
+    outcome: { status?: number; body?: unknown };
+    run: AgentRun;
+    nativeEvidence?: { jobId: string; operation: string; actorPid: number; nativePid: number; exitCode: number; completion: CompletedImageProcessingStage };
+};
 type HttpGate = { arrived: Promise<void>; release: () => void; wait: Promise<void>; arrive: () => void };
 
 postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent process recovery", () => {
@@ -57,6 +64,12 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
         vi.stubEnv("VOZEB_PRO_ALLOW_PRIVATE_UPSTREAMS", "1");
         vi.stubEnv("VOZEB_PRO_PRIVATE_UPSTREAM_HOSTS", "127.0.0.1");
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "off");
+        // Scene results reserve the calibrated pixel domain before CPU decoding.
+        vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_MEMORY_MB", "8192");
+        vi.stubEnv("VOZEB_PRO_GENERATION_WORKER_HEAP_MB", "64");
+        vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB", "6144");
+        vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_HEAP_MB", "384");
+        vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_CONCURRENCY", "1");
         [database, auth, stores, runtime, scheduler, images] = await Promise.all([
             import("./database"),
             import("@/lib/auth/store"),
@@ -215,6 +228,7 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
                 { id: "fixture-image", name: "夹具图片", capability: "image", enabled: true, bindings: [{ id: "fixture-image-binding", channelId: "fixture", upstreamModel: "gpt-image-2.5-flare", enabled: true, priority: 1 }] },
             ],
             defaultModels: { textModel: "fixture-text", imageModel: "fixture-image", videoModel: "", audioModel: "" },
+            ecommerceModelRoles: { vision_analysis: ["fixture-text"], edit_planning: ["fixture-text"], image_generation: ["fixture-image"], quality_check: ["fixture-text"] },
             modelPointCosts: { "fixture-text": 0, "fixture-image": 0 },
         });
     }, 120_000);
@@ -242,6 +256,7 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
             if (server) await settle(sealAdmission);
             // server.close only closes transport; also drain any final accepted handler.
             await settle(drainHandlers);
+            await settle(clearAgentReservations);
             if (fixture) await settle(() => close(fixture.server));
             if (originalSettings) await settle(() => auth.setAuthSettings(originalSettings));
             if (database) {
@@ -265,6 +280,8 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
         await drainHandlers();
         const { listStoredGenerationTaskRecordsByRunIds } = await import("./generation-task-store");
         const records = await listStoredGenerationTaskRecordsByRunIds([...ownedRuns], [userId]);
+        const { cancelImageProcessingTaskForRun } = await import("./image-processing-service");
+        for (const record of records) if (record.type === "image_processing" && ["pending", "running"].includes(record.status)) await cancelImageProcessingTaskForRun({ userId, runId: record.runId!, jobId: record.id });
         for (const record of records)
             if (record.type === "image" && ["pending", "running", "paused"].includes(record.status)) {
                 const image = await images.getImageTask(record.id);
@@ -275,7 +292,16 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
             if (run && ["planning", "running", "paused"].includes(run.status)) await stores.setAgentRunStatus(run, "cancelled");
         }
         ownedRuns.clear();
+        await clearAgentReservations();
         if (handlerFailures.length) throw new AggregateError(handlerFailures.splice(0), "Isolated HTTP handler failed");
+    }
+
+    async function clearAgentReservations() {
+        if (!database || !userId) return;
+        if (children.size || handlers.size || server?.listening) throw new Error("Owned fixture work must stop before reservation cleanup");
+        await database.postgresQuery("DELETE FROM generation_concurrency_reservations WHERE user_id = $1 AND task_type = 'agent'", [userId]);
+        const remaining = await database.postgresQuery<{ total: string }>("SELECT count(*) AS total FROM generation_concurrency_reservations WHERE user_id = $1 AND task_type = 'agent'", [userId]);
+        expect(Number(remaining.rows[0]?.total)).toBe(0);
     }
 
     async function sealAdmission() {
@@ -289,14 +315,14 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
     }
 
     async function stopCommands() {
-        barrier?.release();
-        barrier = undefined;
-        imagePostBarrier?.release();
-        imagePostBarrier = undefined;
         const pending = [...children.entries()];
         for (const [child] of pending) if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
         // close follows process exit and drainage of all inherited stdio pipes.
         await Promise.all(pending.map(([, settled]) => settled));
+        barrier?.release();
+        barrier = undefined;
+        imagePostBarrier?.release();
+        imagePostBarrier = undefined;
     }
 
     async function drainHandlers() {
@@ -338,15 +364,23 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
                 lighting: { keyLight: "existing soft light", fillLight: "existing fill", whiteBalance: "neutral", contactShadow: "local vase shadow" },
                 composition: { focalSubject: "cabinet", depth: "existing depth", negativeSpace: "existing space" },
             };
-        const { compileEcommerceImageRequest } = await import("./ecommerce-image-compiler");
-        const compiled = compileEcommerceImageRequest(plan, {
-            profileId: "gpt-image-2.5-flare",
-            compilerFamily: "openai-image-2.5",
-            supportsIndependentMask: true,
-            modelSnapshot: { logicalRole: "image_generation", capability: "image", logicalModelId: "fixture-image", channelId: "fixture", upstreamModel: "gpt-image-2.5-flare", apiFormat: "openai" },
-        });
-        const run = (await stores.createAgentRun(userId, { clientRequestId: randomUUID(), conversationId: conversation.id, surface: "chat", prompt: "只加柜面花瓶", assetIds: [asset.id], skillIds: [], modelIds: [] })).run;
+        const { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } = await import("./ecommerce-image-compiler");
+        const routing = await import("./ecommerce-model-routing");
+        const configured = await auth.getFreshAuthSettings();
+        const imageRole = routing.routeEcommerceRole(configured, "image_generation");
+        const visionRoles = routing.resolveEcommerceRoleCandidates(configured, "vision_analysis", "text");
+        const qualityRole = routing.routeEcommerceRole(configured, "quality_check");
+        assert(imageRole && visionRoles[0] && qualityRole);
+        const profile = resolveEcommerceImageProviderProfile(imageRole.snapshot);
+        assert(profile?.supportsIndependentMask);
+        const compiled = compileEcommerceImageRequest(plan, profile);
+        const run = (await stores.createAgentRun(userId, { clientRequestId: randomUUID(), conversationId: conversation.id, surface: "chat", prompt: "三层抽屉柜只加柜面花瓶", assetIds: [asset.id], skillIds: [], modelIds: [] })).run;
         ownedRuns.add(run.id);
+        const nativeSelection = version !== "ecommerce-edit.v1" && version !== "ecommerce-edit.v2";
+        const executionId = randomUUID();
+        const { buildEcommercePlanningInput } = await import("./ecommerce-generation-snapshot");
+        const { createEcommerceReferenceCheckpoint } = await import("./ecommerce-reference-recovery");
+        const referenceCheckpoint = createEcommerceReferenceCheckpoint(run, buildEcommercePlanningInput(run, [asset], { summary: "", recentMessages: [] }), [asset]);
         const task = {
             id: "fixture-scene-task",
             title: "生成图片",
@@ -360,10 +394,11 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
             ecommerceExecution: compiled,
             references: [{ assetId: asset.id, type: "image" as const, title: "scene", url: sourcePath, width: 6, height: 4, ecommerceRole: "scene" as const }],
         };
-        const saved = await stores.updateAgentRunById(
+        let saved = await stores.updateAgentRunById(
             run.id,
             {
-                status: "paused",
+                status: nativeSelection ? "running" : "paused",
+                executionId: nativeSelection ? executionId : undefined,
                 reviewed: true,
                 tasks: [task],
                 ecommerceSnapshot: {
@@ -373,6 +408,9 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
                     mode: "active",
                     input: { userRequest: run.prompt, assetIds: [asset.id], conversationId: conversation.id, surface: "chat" },
                     plan,
+                    compilerVersion: compiled.compilerVersion,
+                    modelRouteSnapshots: { image_generation: imageRole.snapshot, vision_analysis: visionRoles[0].snapshot, quality_check: qualityRole.snapshot },
+                    ...(nativeSelection ? { referenceCheckpoint } : {}),
                     continuity: {
                         parentResultId: plan.continuity.parentResultId,
                         branchId: plan.continuity.branchId,
@@ -387,6 +425,45 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
             ["planning"],
         );
         if (!saved) throw new Error("Fixture paused run was not persisted");
+        if (nativeSelection) {
+            const preparation = await import("./ecommerce-reference-preparation");
+            await preparation.prepareEcommerceReferences(saved, executionId);
+            const waiting = (await stores.getAgentRun(run.id))?.ecommerceSnapshot?.processing?.waitingFor;
+            assert(waiting);
+            const prepared = await processCommand(saved, "native", { jobId: waiting.jobId });
+            expect(prepared.nativeEvidence).toMatchObject({ jobId: waiting.jobId, operation: "prepare_reference", actorPid: prepared.pid, exitCode: 0, completion: { parentRescheduled: true } });
+            expect(prepared.nativeEvidence?.nativePid).not.toBe(prepared.pid);
+            const snapshot = prepared.run.ecommerceSnapshot;
+            assert(snapshot?.referenceCheckpoint && snapshot.processing);
+            const reference = await preparation.readCompletedEcommerceReference(prepared.run, asset.id);
+            assert(reference);
+            const checkpoint = snapshot.referenceCheckpoint;
+            const { analyzeEcommerceReferences } = await import("./ecommerce-visual-analysis");
+            const analysis = await analyzeEcommerceReferences(
+                { origin, cookie: `vozeb_pro_session=${cookie}`, userId, requestId: checkpoint.analysisStage.requestId, planningInput: checkpoint.planningInput, preparedReferences: [reference], analysisVersion: "ecommerce-visual-analysis.v4" },
+                visionRoles,
+            );
+            const { resolveEcommerceReferenceDecision } = await import("./ecommerce-reference-purpose");
+            const decision = resolveEcommerceReferenceDecision({ planningInput: checkpoint.planningInput, analysis });
+            expect(decision.state).toBe("resolved");
+            saved = await stores.updateAgentRunById(
+                run.id,
+                {
+                    status: "paused",
+                    executionId: undefined,
+                    ecommerceSnapshot: {
+                        ...snapshot,
+                        visualAnalysis: analysis,
+                        referenceDecision: decision,
+                        referenceCheckpoint: { ...checkpoint, state: "resolved", analysisStage: { ...checkpoint.analysisStage, state: "completed" }, analysis, decision, route: visionRoles[0].snapshot },
+                    },
+                },
+                undefined,
+                ["running"],
+            );
+            assert(saved);
+            await scheduler.scheduleGenerationTask("agent", run.id, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "paused" });
+        }
         return { run: saved, selection: { baselineAssetId: asset.id, region: { x: 2, y: 1, width: 2, height: 2 } } };
     }
 
@@ -395,9 +472,9 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
         return barrier;
     }
 
-    function processCommand(run: AgentRun, command: "confirm" | "recover" | "read", extra: Record<string, unknown> = {}) {
+    function processCommand(run: AgentRun, command: "confirm" | "recover" | "read" | "native" | "consume_result", extra: Record<string, unknown> = {}) {
         const resultKey = randomUUID();
-        const input = { command, origin, cookie, resultKey, runId: run.id, conversationId: run.conversationId, ...extra };
+        const input = { command, origin, cookie, resultKey, runId: run.id, conversationId: run.conversationId, fixtureDirectory: directory, ...extra };
         const child = spawn(process.execPath, [path.resolve("node_modules/vitest/vitest.mjs"), "run", "src/lib/server/ecommerce-process-fixture.test.ts", "--no-file-parallelism", "--reporter=dot"], {
             cwd: process.cwd(),
             env: { ...process.env, VOZEB_PRO_ECOMMERCE_PROCESS_INPUT: JSON.stringify(input) },
@@ -512,7 +589,7 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
         expect(await stores.getAgentRun(run.id)).toEqual(cleanedRun);
         expect(await runtime.listCreativeRunEvents(run.id)).toEqual(cleanedEvents);
         const { listStoredGenerationTaskRecordsByRunIds } = await import("./generation-task-store");
-        expect(await listStoredGenerationTaskRecordsByRunIds([run.id], [userId])).toEqual([]);
+        expect(await listStoredGenerationTaskRecordsByRunIds([run.id], [userId])).toMatchObject([{ type: "image_processing", status: "success", payload: { operation: "prepare_reference" } }]);
         expect(cleanedRun?.status).toBe("cancelled");
         expect(imageRequests.filter((request) => request.context.runId === run.id)).toEqual([]);
     }, 120_000);
@@ -605,7 +682,7 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
         expect(imageRequests.filter((request) => request.context.runId === run.id)).toEqual([]);
     }, 120_000);
 
-    it("allows exactly one of two independent confirmation processes to mutate the original task", async () => {
+    it("records one receipt for two independent identical confirmation processes without changing the original task", async () => {
         const { run, selection } = await paused();
         const gate = holdSource(2);
         const first = processCommand(run, "confirm", { sceneSelection: selection });
@@ -622,10 +699,21 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
         gate.release();
         const outcomes = await Promise.all([first, second]);
         expect(new Set(outcomes.map((result) => result.pid)).size).toBe(2);
-        expect(outcomes.map((result) => result.outcome.status).sort()).toEqual([200, 409]);
+        expect(outcomes.map((result) => result.outcome.status).sort()).toEqual([200, 200]);
         const saved = (await stores.getAgentRun(run.id))!;
-        expect(saved.tasks).toMatchObject([{ id: run.tasks[0].id, attempts: 0, status: "ready", count: 1, sceneProtection: { targetRegion: selection.region, confirmation: { actorUserId: userId } } }]);
-        expect(saved.ecommerceSnapshot).toEqual(run.ecommerceSnapshot);
+        expect(saved.tasks).toEqual(run.tasks);
+        const receipt = saved.ecommerceSnapshot?.processing?.sceneSelection;
+        const prepare = run.ecommerceSnapshot?.processing?.prepareReferences[0];
+        assert(receipt && prepare?.manifest);
+        expect(receipt).toMatchObject({
+            version: "scene-selection-receipt.v1",
+            parentTaskId: run.tasks[0].id,
+            baseline: { assetId: selection.baselineAssetId, sha256: prepare.manifest.sourceIdentities[0].sha256, bytes: prepare.manifest.sourceIdentities[0].bytes, width: 6, height: 4 },
+            prepare: { jobId: prepare.jobId, inputDigest: prepare.inputDigest, executionId: prepare.manifest.executionId },
+            region: selection.region,
+            confirmation: { actorUserId: userId, confirmedAt: expect.any(Number) },
+        });
+        expect(saved.ecommerceSnapshot).toEqual({ ...run.ecommerceSnapshot, processing: { ...run.ecommerceSnapshot!.processing!, sceneSelection: receipt } });
         expect(saved.tasks[0].taskIds).toBeUndefined();
         expect((await runtime.listCreativeRunEvents(run.id)).filter((event) => event.type === "run.resumed")).toHaveLength(1);
     }, 120_000);
@@ -657,21 +745,31 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
             expect(confirmed.outcome).toMatchObject({ status: 200, body: { code: 0 } });
             const restored = await processCommand(run, "read");
             expect(restored.pid).not.toBe(confirmed.pid);
-            expect(restored.run.tasks[0]).toMatchObject({ id: run.tasks[0].id, status: "ready", attempts: 0, count: 1, ecommerceExecution: run.tasks[0].ecommerceExecution });
-            expect(restored.run.ecommerceSnapshot).toEqual(run.ecommerceSnapshot);
+            expect(restored.run.tasks).toEqual(run.tasks);
+            expect(restored.run.ecommerceSnapshot).toEqual(confirmed.run.ecommerceSnapshot);
+            expect(restored.run.ecommerceSnapshot!.plan).toEqual(run.ecommerceSnapshot!.plan);
+            expect(restored.run.ecommerceSnapshot!.referenceCheckpoint).toEqual(run.ecommerceSnapshot!.referenceCheckpoint);
+            expect(restored.run.ecommerceSnapshot!.processing).toMatchObject({
+                prepareReferences: run.ecommerceSnapshot!.processing!.prepareReferences,
+                sceneSelection: { parentTaskId: run.tasks[0].id, region: selection.region, confirmation: { actorUserId: userId } },
+            });
             if (version !== "ecommerce-edit.v5") expect(restored.run.ecommerceSnapshot!.plan).not.toHaveProperty("photography");
         },
         120_000,
     );
 
-    it("rejects unauthenticated, cross-user, cross-conversation, duplicate, old-version and QA-paused confirmations", async () => {
+    it("rejects unauthenticated, cross-user, cross-conversation, replacement, old-version and QA-paused confirmations while replaying an identical receipt", async () => {
         const { run, selection } = await paused();
         expect((await processCommand(run, "confirm", { cookie: "", sceneSelection: selection })).outcome.status).toBe(401);
         expect((await processCommand(run, "confirm", { cookie: otherCookie, sceneSelection: selection })).outcome.status).toBe(404);
         expect((await processCommand(run, "confirm", { conversationId: "fixture-other-conversation", sceneSelection: selection })).outcome.status).toBe(409);
         expect((await processCommand(run, "confirm", { sceneSelection: { ...selection, baselineAssetId: "fixture-other-baseline" } })).outcome.status).toBe(409);
         expect((await processCommand(run, "confirm", { sceneSelection: selection })).outcome.status).toBe(200);
-        expect((await processCommand(run, "confirm", { sceneSelection: selection })).outcome.status).toBe(409);
+        const confirmed = await stores.getAgentRun(run.id);
+        expect((await processCommand(run, "confirm", { sceneSelection: selection })).outcome.status).toBe(200);
+        expect(await stores.getAgentRun(run.id)).toEqual(confirmed);
+        expect((await processCommand(run, "confirm", { sceneSelection: { ...selection, region: { x: 1, y: 1, width: 2, height: 2 } } })).outcome.status).toBe(409);
+        expect((await runtime.listCreativeRunEvents(run.id)).filter((event) => event.type === "run.resumed")).toHaveLength(1);
         for (const version of ["ecommerce-edit.v1", "ecommerce-edit.v2"] as const) {
             const old = await paused(version);
             expect((await processCommand(old.run, "confirm", { sceneSelection: old.selection })).outcome.status).toBe(409);
@@ -698,12 +796,32 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
 
     async function recoverStages(run: AgentRun) {
         const snapshot = structuredClone(run.ecommerceSnapshot);
+        const nativeScene = Boolean(snapshot?.processing?.sceneSelection);
         const pids: number[] = [];
         const creations = () => fixture.requests.filter((item: { method: string; path: string }) => item.method === "POST" && item.path.endsWith("/images/edits")).length;
         const initialCreations = creations();
+        const { getStoredGenerationTaskRecord, listStoredGenerationTaskRecordsByRunIds } = await import("./generation-task-store");
+        if (nativeScene) {
+            await scheduler.scheduleGenerationTask("agent", run.id, { executionPhase: "created", nextPollAt: Date.now() });
+            const building = await processCommand(run, "recover");
+            pids.push(building.pid);
+            const waiting = building.run.ecommerceSnapshot?.processing?.waitingFor;
+            assert(waiting);
+            expect(building.run.tasks).toEqual(run.tasks);
+            expect(await getStoredGenerationTaskRecord("image_processing", waiting.jobId)).toMatchObject({ runId: run.id, parentTaskId: run.tasks[0].id, status: "pending", payload: { operation: "build_protection" } });
+            expect((await listStoredGenerationTaskRecordsByRunIds([run.id], [userId])).filter((record) => record.type === "image")).toEqual([]);
+            expect(creations()).toBe(initialCreations);
+            const built = await processCommand(run, "native", { jobId: waiting.jobId });
+            pids.push(built.pid);
+            expect(built.nativeEvidence).toMatchObject({ jobId: waiting.jobId, operation: "build_protection", actorPid: built.pid, exitCode: 0, completion: { parentRescheduled: true } });
+            expect(built.nativeEvidence?.nativePid).not.toBe(built.pid);
+            expect(built.run.ecommerceSnapshot?.processing?.sceneSelection).toEqual(snapshot!.processing!.sceneSelection);
+            expect(built.run.ecommerceSnapshot?.processing?.waitingFor).toBeUndefined();
+        }
         let originalChildId: string | undefined;
         let originalUpstreamId: string | undefined;
-        for (const phase of ["created", "polling", "result_ready", "completed"] as const) {
+        const phases = nativeScene ? (["created", "polling", "result_ready", "persisting", "completed"] as const) : (["created", "polling", "result_ready", "completed"] as const);
+        for (const phase of phases) {
             // Advance the explicitly owned child to its next due recovery turn;
             // production backoff remains intact and no timer/retry is added.
             if (originalChildId) await scheduler.scheduleGenerationTask("image", originalChildId, { nextPollAt: Date.now() });
@@ -724,7 +842,6 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
             expect(childId).toBe(originalChildId);
             expect(result.run.tasks[0]).toMatchObject({ id: run.tasks[0].id, attempts: 1, count: 1, taskIds: [originalChildId], childTasks: [{ id: originalChildId, attempt: 1 }] });
             expect(result.run.tasks[0].ecommerceExecution).toEqual(run.tasks[0].ecommerceExecution);
-            const { getStoredGenerationTaskRecord, listStoredGenerationTaskRecordsByRunIds } = await import("./generation-task-store");
             const record = await getStoredGenerationTaskRecord("image", childId!);
             expect(
                 record?.executionPhase,
@@ -744,7 +861,13 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
             expect(imageRequests.filter((request) => request.context.runId === run.id)).toEqual([
                 expect.objectContaining({ context: expect.objectContaining({ parentTaskId: run.tasks[0].id, attemptNo: 1, clientRequestId: `${run.clientRequestId}:${run.tasks[0].id}:1:1` }) }),
             ]);
-            expect(await listStoredGenerationTaskRecordsByRunIds([run.id], [userId])).toHaveLength(1);
+            const records = await listStoredGenerationTaskRecordsByRunIds([run.id], [userId]);
+            expect(records.filter((child) => child.type === "image")).toHaveLength(1);
+            if (nativeScene) {
+                expect(records.filter((child) => child.type === "image_processing" && child.payload.operation === "prepare_reference")).toMatchObject([{ status: "success", executionPhase: "completed" }]);
+                expect(records.filter((child) => child.type === "image_processing" && child.payload.operation === "build_protection")).toMatchObject([{ status: "success", executionPhase: "completed" }]);
+                expect(records.filter((child) => child.type === "image_processing" && child.payload.operation === "process_result")).toHaveLength(phase === "persisting" || phase === "completed" ? 1 : 0);
+            } else expect(records).toHaveLength(1);
             expect(creations()).toBe(initialCreations + (phase === "created" ? 0 : 1));
             if (phase !== "created") {
                 originalUpstreamId ||= record?.upstreamTaskId;
@@ -755,8 +878,31 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
             }
             expect(result.run.ecommerceSnapshot!.plan).toEqual(snapshot!.plan);
             expect(result.run.ecommerceSnapshot!.continuity).toEqual(snapshot!.continuity);
+            expect(result.run.tasks[0].ecommerceExecution?.compilerVersion).toBe(run.tasks[0].ecommerceExecution?.compilerVersion);
+            if (phase === "persisting") {
+                const waiting = await images.getImageTask(childId!);
+                assert(waiting?.resultProcessing && waiting.nativeResults && waiting.billing && waiting.attempts?.[0]);
+                const resultJobId = waiting.resultProcessing.jobId;
+                expect(await getStoredGenerationTaskRecord("image_processing", resultJobId)).toMatchObject({ parentTaskId: childId, runId: run.id, status: "pending", payload: { operation: "process_result" } });
+                const native = await processCommand(run, "native", { jobId: resultJobId });
+                pids.push(native.pid);
+                expect(native.nativeEvidence).toMatchObject({ jobId: resultJobId, operation: "process_result", actorPid: native.pid, exitCode: 0, completion: { parentRescheduled: true } });
+                expect(native.nativeEvidence?.nativePid).not.toBe(native.pid);
+                const consumed = await processCommand(run, "consume_result", { imageId: childId });
+                pids.push(consumed.pid);
+                expect(consumed.outcome).toEqual({ state: "completed" });
+                expect(await images.getImageTask(childId!)).toMatchObject({
+                    id: childId,
+                    status: "success",
+                    nativeResults: waiting.nativeResults,
+                    resultProcessing: waiting.resultProcessing,
+                    upstream: waiting.upstream,
+                    billing: waiting.billing,
+                    attempts: [{ ...waiting.attempts[0], status: "succeeded", completedAt: expect.any(Number), pointsCost: waiting.billing.pointsCost, pointsRecordId: waiting.billing.pointsRecordId }],
+                });
+            }
         }
-        expect(new Set(pids).size).toBe(4);
+        expect(new Set(pids).size).toBe(nativeScene ? 9 : 4);
         const completed = (await stores.getAgentRun(run.id))!;
         expect(completed.status).toBe("completed");
         expect(completed.ecommerceSnapshot!.qualityCheck).toMatchObject({ version: ["ecommerce-edit.v4", "ecommerce-edit.v5"].includes(run.ecommerceSnapshot!.plan!.planVersion) ? "ecommerce-quality.v2" : "ecommerce-quality.v1", status: "passed" });
