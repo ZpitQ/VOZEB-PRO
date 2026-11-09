@@ -27,7 +27,7 @@ describe("release workflow contract", () => {
         expect(source).not.toMatch(/uses:\s+[^\s]+@(v\d|main|master)\b/);
     });
 
-    it("runs static, unit, and sharded Chromium quality jobs in parallel", () => {
+    it("runs static, unit, and grouped Chromium quality jobs in parallel", () => {
         const source = workflow("quality.yml");
         const jobs = parseDocument(source).toJS().jobs;
 
@@ -38,7 +38,11 @@ describe("release workflow contract", () => {
         expect(jobs.web.needs).toEqual(["web-checks", "web-unit", "web-chromium"]);
         expect(jobs["web-checks"].services).toBeUndefined();
         expect(jobs["web-unit"].services).toBeUndefined();
-        expect(jobs["web-chromium"].steps.find((item) => item.name === "Browser E2E").run).toBe('pnpm run e2e --project=chromium --shard="${{ matrix.shard }}/2"');
+        expect(jobs["web-unit"].strategy).toEqual({ "fail-fast": false, matrix: { group: ["core", "recovery"] } });
+        expect(jobs["web-unit"].steps.find((item) => item.name === "Unit tests")).toMatchObject({ if: "${{ matrix.group == 'core' }}", run: "pnpm test --exclude src/lib/server/ecommerce-reference-recovery.file.test.ts" });
+        expect(jobs["web-unit"].steps.find((item) => item.name === "Reference recovery tests")).toMatchObject({ if: "${{ matrix.group == 'recovery' }}", run: "pnpm test src/lib/server/ecommerce-reference-recovery.file.test.ts --maxWorkers=1" });
+        expect(jobs["web-chromium"].steps.find((item) => item.name === "Browser E2E")).toMatchObject({ if: "${{ matrix.shard == 1 }}", run: "pnpm run e2e --project=chromium '(?:^|/)ecommerce-product-generation[.]spec[.]ts$'" });
+        expect(jobs["web-chromium"].steps.find((item) => item.name === "Remaining browser E2E")).toMatchObject({ if: "${{ matrix.shard == 2 }}", run: "pnpm run e2e --project=chromium --grep-invert 'ecommerce-product-generation[.]spec[.]ts'" });
         expect(jobs["web-chromium"].steps.find((item) => item.name === "Upload browser artifacts").with.name).toBe("web-playwright-report-chromium-${{ matrix.shard }}");
         expect(source).not.toContain("mobile-390");
         expect(source).not.toContain("mobile-430");
@@ -67,8 +71,12 @@ describe("release workflow contract", () => {
         expect(jobs.quality.needs).toEqual(["quality-checks", "quality-unit", "quality-chromium"]);
         expect(jobs["quality-checks"].services).toBeUndefined();
         expect(jobs["quality-unit"].services).toBeUndefined();
+        expect(jobs["quality-unit"].strategy).toEqual({ "fail-fast": false, matrix: { group: ["core", "recovery"] } });
+        expect(jobs["quality-unit"].steps.find((item) => item.name === "Unit tests")).toMatchObject({ if: "${{ matrix.group == 'core' }}", run: "pnpm test --exclude src/lib/server/ecommerce-reference-recovery.file.test.ts" });
+        expect(jobs["quality-unit"].steps.find((item) => item.name === "Reference recovery tests")).toMatchObject({ if: "${{ matrix.group == 'recovery' }}", run: "pnpm test src/lib/server/ecommerce-reference-recovery.file.test.ts --maxWorkers=1" });
         expect(jobs.build.needs).toContain("quality");
-        expect(jobs["quality-chromium"].steps.find((item) => item.name === "Browser E2E").run).toBe('pnpm run e2e --project=chromium --shard="${{ matrix.shard }}/2"');
+        expect(jobs["quality-chromium"].steps.find((item) => item.name === "Browser E2E")).toMatchObject({ if: "${{ matrix.shard == 1 }}", run: "pnpm run e2e --project=chromium '(?:^|/)ecommerce-product-generation[.]spec[.]ts$'" });
+        expect(jobs["quality-chromium"].steps.find((item) => item.name === "Remaining browser E2E")).toMatchObject({ if: "${{ matrix.shard == 2 }}", run: "pnpm run e2e --project=chromium --grep-invert 'ecommerce-product-generation[.]spec[.]ts'" });
         expect(jobs["quality-chromium"].steps.find((item) => item.name === "Upload browser artifacts").with.name).toBe("web-playwright-report-chromium-${{ matrix.shard }}");
         expect(document.toString()).not.toContain("mobile-390");
         expect(document.toString()).not.toContain("mobile-430");
@@ -82,7 +90,7 @@ describe("release workflow contract", () => {
         expect(document.errors).toEqual([]);
 
         const step = document.toJS().jobs[job].steps.find((item) => item.name === "PostgreSQL integration tests");
-        expect(step?.if).toBe("${{ matrix.shard == 1 }}");
+        expect(step?.if).toBe("${{ matrix.shard == 2 }}");
         expect(step?.run).toContain("pnpm exec vitest run --no-file-parallelism");
     });
 

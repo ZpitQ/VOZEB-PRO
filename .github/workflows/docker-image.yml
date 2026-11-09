@@ -44,7 +44,11 @@ jobs:
         run: pnpm run format:check
 
   quality-unit:
-    name: quality / unit
+    name: quality / unit-${{ matrix.group }}
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [core, recovery]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -65,7 +69,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Unit tests
-        run: pnpm test
+        if: ${{ matrix.group == 'core' }}
+        run: pnpm test --exclude src/lib/server/ecommerce-reference-recovery.file.test.ts
+      - name: Reference recovery tests
+        if: ${{ matrix.group == 'recovery' }}
+        run: pnpm test src/lib/server/ecommerce-reference-recovery.file.test.ts --maxWorkers=1
 
   quality-chromium:
     name: quality / chromium-${{ matrix.shard }}
@@ -113,11 +121,17 @@ jobs:
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
       - name: Browser E2E
-        run: pnpm run e2e --project=chromium --shard="${{ matrix.shard }}/2"
+        if: ${{ matrix.shard == 1 }}
+        run: pnpm run e2e --project=chromium '(?:^|/)ecommerce-product-generation[.]spec[.]ts$'
+        env:
+          VOZEB_PRO_E2E_DATABASE_URL: postgres://vozeb:vozeb-e2e-password@127.0.0.1:5432/vozeb_pro_e2e
+      - name: Remaining browser E2E
+        if: ${{ matrix.shard == 2 }}
+        run: pnpm run e2e --project=chromium --grep-invert 'ecommerce-product-generation[.]spec[.]ts'
         env:
           VOZEB_PRO_E2E_DATABASE_URL: postgres://vozeb:vozeb-e2e-password@127.0.0.1:5432/vozeb_pro_e2e
       - name: PostgreSQL integration tests
-        if: ${{ matrix.shard == 1 }}
+        if: ${{ matrix.shard == 2 }}
         run: >-
           pnpm exec vitest run --no-file-parallelism
           src/lib/server/database/auth-entity-concurrency.postgres.test.ts
@@ -353,4 +367,3 @@ jobs:
               --notes "主应用镜像：$IMAGE_NAME:$RELEASE_TAG" \
               release-assets/vozeb-pro-sbom.spdx.json
           fi
-
