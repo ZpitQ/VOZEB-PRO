@@ -475,7 +475,7 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
     function processCommand(run: AgentRun, command: "confirm" | "recover" | "read" | "native" | "consume_result", extra: Record<string, unknown> = {}) {
         const resultKey = randomUUID();
         const input = { command, origin, cookie, resultKey, runId: run.id, conversationId: run.conversationId, fixtureDirectory: directory, ...extra };
-        const child = spawn(process.execPath, [path.resolve("node_modules/vitest/vitest.mjs"), "run", "src/lib/server/ecommerce-process-fixture.test.ts", "--no-file-parallelism", "--reporter=dot"], {
+        const child = spawn(process.execPath, [path.resolve("node_modules/vitest/vitest.mjs"), "run", "src/lib/server/ecommerce-process-fixture.test.ts", "--pool=threads", "--maxWorkers=1", "--no-file-parallelism", "--reporter=dot"], {
             cwd: process.cwd(),
             env: { ...process.env, VOZEB_PRO_ECOMMERCE_PROCESS_INPUT: JSON.stringify(input) },
             stdio: ["ignore", "pipe", "pipe"],

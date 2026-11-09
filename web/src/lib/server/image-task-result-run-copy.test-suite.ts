@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { constants, tmpdir } from "node:os";
 import path from "node:path";
@@ -9238,11 +9238,15 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                     async function actor(command: "project_result_copy" | "public_read") {
                         const resultKey = randomUUID();
                         const input = { command, provider, fixtureDirectory: directory, origin, cookie: boundary.cookie.slice("vozeb_pro_session=".length), resultKey, runId: initial.id, conversationId: conversation.id, logicalTaskId: task.id };
-                        const processActor = spawn(process.execPath, [path.resolve("node_modules/vitest/vitest.mjs"), "run", "src/lib/server/ecommerce-process-fixture.test.ts", "--no-file-parallelism", "--reporter=dot"], {
-                            cwd: process.cwd(),
-                            env: { ...process.env, VOZEB_PRO_ECOMMERCE_PROCESS_INPUT: JSON.stringify(input) },
-                            stdio: ["ignore", "pipe", "pipe"],
-                        });
+                        const processActor = spawn(
+                            process.execPath,
+                            [path.resolve("node_modules/vitest/vitest.mjs"), "run", "src/lib/server/ecommerce-process-fixture.test.ts", "--pool=threads", "--maxWorkers=1", "--no-file-parallelism", "--reporter=dot"],
+                            {
+                                cwd: process.cwd(),
+                                env: { ...process.env, VOZEB_PRO_ECOMMERCE_PROCESS_INPUT: JSON.stringify(input) },
+                                stdio: ["ignore", "pipe", "pipe"],
+                            },
+                        );
                         let output = "";
                         processActor.stdout.on("data", (chunk) => (output += chunk));
                         processActor.stderr.on("data", (chunk) => (output += chunk));
@@ -9279,10 +9283,10 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                     expect(await imageTasks.getImageTask(copy.taskId)).toStrictEqual(sourceImage);
                     expect(await tasks.getStoredGenerationTaskRecord("image_processing", child.id)).toStrictEqual(sourceChild);
 
-                    const runtimeLock = await stat(path.join(directory, "creative-runtime.json.lock"));
-                    // Wait for the existing production stale window; the new actor recovers the real lock.
-                    const staleLockWaitMs = Math.min(60_000, Math.max(0, runtimeLock.mtimeMs + 60_000 - Date.now()));
-                    await new Promise((resolve) => setTimeout(resolve, staleLockWaitMs));
+                    const lockPath = path.join(directory, "creative-runtime.json.lock");
+                    const runtimeLock = await stat(lockPath);
+                    // The actor has exited; age its orphaned lock to exercise real stale-lock recovery.
+                    await utimes(lockPath, runtimeLock.atime, new Date(0));
                     const first = await actor("public_read");
                     assert.ok(first.read);
                     expect(first.pid).not.toBe(interrupted.pid);
