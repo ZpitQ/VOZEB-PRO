@@ -31,15 +31,15 @@ describe("generation runtime process drain", () => {
         const harness = path.join(directory, "harness.mjs");
         await writeFile(
             app,
-            `import { createServer } from "node:http"; let pending; const server = createServer((request, response) => { if (request.url === "/drain") { pending = response; console.log("WORK_ACTIVE"); } else if (request.url === "/release") { pending.end("finished"); response.end("released"); } else response.end("ok"); }); server.listen(${port}, "127.0.0.1"); process.on("SIGTERM", () => { console.log("WEB_STOPPING"); server.close(() => process.exit(0)); });`,
+            `import { createServer } from "node:http"; let pending; const server = createServer((request, response) => { if (request.url === "/drain") { pending = response; console.log("WORK_ACTIVE"); } else if (request.url === "/release") { pending.end("finished"); response.end("released"); } else response.end("ok"); }); server.listen(Number(process.env.PORT), "127.0.0.1"); process.on("SIGTERM", () => { console.log("WEB_STOPPING"); server.close(() => process.exit(0)); });`,
         );
-        await writeFile(worker, `process.on("SIGTERM", () => console.log("WORKER_DRAINING")); await fetch(${JSON.stringify(origin + "/drain")}).then((response) => response.text()); console.log("WORKER_FINISHED");`);
+        await writeFile(worker, `process.on("SIGTERM", () => console.log("WORKER_DRAINING")); await fetch(process.env.VOZEB_PRO_WORKER_API_ORIGIN + "/drain").then((response) => response.text()); console.log("WORKER_FINISHED");`);
         const runtime = new URL("./generation-runtime.mjs", import.meta.url).href;
         await writeFile(
             harness,
-            `import { superviseGenerationRuntime } from ${JSON.stringify(runtime)}; process.exitCode = await superviseGenerationRuntime({ app: { command: process.execPath, args: [${JSON.stringify(app)}], cwd: ${JSON.stringify(directory)} }, workerScript: ${JSON.stringify(worker)}, environment: { ...process.env, VOZEB_PRO_WORKER_API_ORIGIN: ${JSON.stringify(origin)} } });`,
+            `const { superviseGenerationRuntime } = await import(process.argv[2]); process.exitCode = await superviseGenerationRuntime({ app: { command: process.execPath, args: ["app.mjs"], cwd: process.cwd() }, workerScript: "worker.mjs", environment: process.env });`,
         );
-        const child = spawn(process.execPath, [harness], { cwd: directory, stdio: ["ignore", "pipe", "pipe"] });
+        const child = spawn(process.execPath, [harness, runtime], { cwd: directory, env: { ...process.env, PORT: String(port), VOZEB_PRO_WORKER_API_ORIGIN: origin }, stdio: ["ignore", "pipe", "pipe"] });
         children.push(child);
         const observed = observe(child);
         await observed.line("WORK_ACTIVE");
