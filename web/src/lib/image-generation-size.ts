@@ -32,8 +32,10 @@ export function resolveEcommerceCanvasRequestSize(canvas: EcommerceCanvasConstra
     const { width, height } = parseImageRatio(ratio);
     const basePixels = quality ? QUALITY_BASE[quality] : undefined;
     const targetPixels = basePixels ? basePixels * basePixels : DEFAULT_IMAGE_SHORT_SIDE * DEFAULT_IMAGE_SHORT_SIDE * (Math.max(width, height) / Math.min(width, height));
-    const scale = Math.max(1, Math.round(Math.sqrt(targetPixels / (width * height))));
-    const size = { width: width * scale, height: height * scale };
+    const scale = Math.sqrt(targetPixels / (width * height));
+    const pixels = { width: Math.round(width * scale), height: Math.round(height * scale) };
+    const integerScale = Math.max(1, Math.round(scale));
+    const size = scale < 1 && pixels.width > 0 && pixels.height > 0 && pixels.width < width && pixels.height < height ? pixels : { width: width * integerScale, height: height * integerScale };
     validateEcommerceDimensions(size);
     return `${size.width}x${size.height}`;
 }

@@ -14,6 +14,7 @@ import { parseValidatedAgentFunctionCall } from "./agent-function-call";
 import {
     ecommerceVisibleStructureSchema,
     normalizeEcommerceVisibleStructure,
+    matchesEcommerceCanvasDimensions,
     validateEcommerceDimensions,
     type EcommerceVisibleStructure,
     type EcommerceManualRegion,
@@ -82,7 +83,7 @@ function matchesEcommerceCanvas(constraint: EcommerceCanvasConstraint, size: Eco
     } catch {
         return false;
     }
-    return constraint.mode === "exact" ? size.width === constraint.size.width && size.height === constraint.size.height : BigInt(size.width) * BigInt(constraint.size.height) === BigInt(size.height) * BigInt(constraint.size.width);
+    return matchesEcommerceCanvasDimensions(constraint, size);
 }
 export type EcommerceQualityCheckItem = {
     resultId: string;

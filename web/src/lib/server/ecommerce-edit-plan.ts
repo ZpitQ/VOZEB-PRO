@@ -168,6 +168,17 @@ export function ecommerceCanvasSize(canvas: EcommerceCanvasConstraint): string {
     while (b) [a, b] = [b, a % b];
     return `${width / a}:${height / a}`;
 }
+export function matchesEcommerceCanvasDimensions(canvas: EcommerceCanvasConstraint, size: EcommerceDimensions): boolean {
+    if (canvas.mode === "exact") return size.width === canvas.size.width && size.height === canvas.size.height;
+    const [width, height] = ecommerceCanvasSize(canvas).split(":").map(BigInt);
+    const actualWidth = BigInt(size.width);
+    const actualHeight = BigInt(size.height);
+    const cross = actualWidth * height - actualHeight * width;
+    if (cross === BigInt(0)) return true;
+    // Ratios below their reduced integer terms use the existing half-pixel grid contract.
+    return actualWidth < width && actualHeight < height && BigInt(2) * (cross < BigInt(0) ? -cross : cross) < width + height;
+}
+
 export type EcommerceModelRoles = {
     visionAnalysis: string;
     editPlanning: string;

@@ -3,7 +3,7 @@ import { App } from "antd";
 import { describe, expect, it, vi } from "vitest";
 
 import { agentMediaDownloadName } from "./agent-media-download";
-import { formatAgentArtifactText, formatAgentMessageText } from "./agent-message-format";
+import { formatAgentArtifactText, formatAgentMessageText, friendlyAgentError } from "./agent-message-format";
 import { agentMediaPreviewPopupStyles, AgentMediaPreview } from "./agent-media-preview";
 import { AgentMessageActions } from "./agent-message-actions";
 
@@ -70,6 +70,12 @@ describe("agent message controls", () => {
         expect(formatAgentMessageText('{"error":"request timeout"}')).toBe("模型响应超时，请稍后重试。");
         expect(formatAgentMessageText('{"error":"fetch failed: ECONNRESET"}')).toBe("模型服务连接失败，请稍后重试。");
         expect(formatAgentMessageText('{"error":"status=429"}')).toBe("请求过于频繁，请稍后重试。");
+    });
+
+    it("identifies rejected image inputs separately from unsupported request parameters", () => {
+        const expected = "模型拒绝了输入图片，请检查图片格式和尺寸后重试。";
+        expect(friendlyAgentError("Invalid input image file. Please check the uploaded image.")).toBe(expected);
+        expect(formatAgentMessageText('{"error":{"code":"invalid_image_file","message":"Invalid input image file. Please check the uploaded image."}}')).toBe(expected);
     });
 
     it("keeps generated text while removing upstream display directives", () => {

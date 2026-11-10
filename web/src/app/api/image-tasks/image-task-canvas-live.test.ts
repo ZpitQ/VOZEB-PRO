@@ -38,6 +38,11 @@ afterEach(async () => {
 async function fixture(status = 200, message = "unsupported size") {
     const requests: Array<{ path: string; size: string | undefined; ratio?: string; contentType: string }> = [];
     const server = createServer(async (req, res) => {
+        if (req.method === "GET" && req.url?.startsWith("/api/generation-log-assets/")) {
+            const bytes = await readFile(localAssetUrlToPath(req.url));
+            res.writeHead(200, { "content-type": "image/png" });
+            return void res.end(bytes);
+        }
         const chunks: Buffer[] = [];
         for await (const chunk of req) chunks.push(Buffer.from(chunk));
         const contentType = String(req.headers["content-type"] || "");
@@ -95,6 +100,30 @@ function task(origin: string, encoding: "multipart" | "json", canvas?: Ecommerce
 }
 
 describe("ecommerce final OpenAI canvas request", () => {
+    it("bounds a large coprime baseline ratio before sending and accepting the result", async () => {
+        const upstream = await fixture();
+        const canvas: EcommerceCanvasConstraint = { mode: "ratio", size: { width: 7997, height: 5334 }, source: "baseline", allowReframe: true };
+        try {
+            const input = task(upstream.origin, "json", canvas);
+            input.config.quality = "high";
+            const created = await createImageTask(input);
+            expect(resolveCanvasRequestSize(created, "high")).toBe("3526x2352");
+            const result = await runOpenAiImageTask(created, upstream.origin, "", "", true);
+            expect(upstream.requests).toHaveLength(1);
+            expect(upstream.requests[0]).toMatchObject({ path: "/v1/images/edits", size: "3526x2352" });
+            const restored = (await getImageTask(created.id))!;
+            expect(restored.ecommerceExecution?.canvas).toEqual(canvas);
+            const {
+                results: [stored],
+            } = await prepareImageTaskResults(restored, result, upstream.origin, "");
+            expect(stored.canvasEvidence).toMatchObject({ constraint: canvas, requestedSize: { width: 3526, height: 2352 }, nativeSize: { width: 3526, height: 2352 } });
+            expect(evaluateEcommerceCanvas(canvas, stored.canvasEvidence!.nativeSize, stored.canvasEvidence!.storedSize)).toEqual({ nativeMatches: true, storedMatches: true, hardFailures: [] });
+            expect(evaluateEcommerceCanvas(canvas, { width: 3526, height: 2400 }, { width: 3526, height: 2400 }).hardFailures).toEqual(["canvas_geometry"]);
+        } finally {
+            await upstream.close();
+        }
+    });
+
     it.each([
         { quality: "low", shortSide: 4, longSide: 262144 },
         { quality: "medium", shortSide: 8, longSide: 524288 },

@@ -66,6 +66,7 @@ function actionableErrorMessage(value: string) {
 function classifiedTechnicalError(value: string) {
     const message = extractErrorMessage(value);
     if (!message) return "";
+    if (/invalid_image_file|invalid input image file/i.test(message)) return "模型拒绝了输入图片，请检查图片格式和尺寸后重试。";
     if (/积分不足|余额不足/.test(message)) return "积分不足";
     if (/status\s*[=:]\s*(401|403)|unauthorized|forbidden|鉴权失败|api\s*key|密钥/i.test(message)) return "当前渠道鉴权失败，请管理员检查 API Key 和模型权限。";
     if (/status\s*[=:]\s*429|rate.?limit|限流|请求过于频繁/i.test(message)) return "请求过于频繁，请稍后重试。";
