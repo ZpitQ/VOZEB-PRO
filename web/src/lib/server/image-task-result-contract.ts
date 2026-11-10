@@ -10,7 +10,8 @@ import type { ImageTask, ImageTaskReference } from "./image-task-store";
 import type { LocalMediaRegistration } from "./local-media-registry";
 
 export function imageTaskNativeSceneBaseline(image: ImageTask): ImageProcessingBaseline | undefined {
-    if (!image.runId || resolveResultSize(image.config.quality, "1:1") !== resolveResultSize("4k", "1:1") || !image.mask?.serverUrl) return;
+    // Only a frozen enhancement delivery supplies a normalized 4K baseline.
+    if (!image.runId || resolveResultSize(image.config.quality, "1:1") !== resolveResultSize("4k", "1:1") || !image.mask?.serverUrl || !image.enhancementDelivery) return;
     const delivery = image.enhancementDelivery;
     if (
         delivery?.version !== "ecommerce-delivery.v2" ||
@@ -52,7 +53,7 @@ function isConfirmedLocalSceneRun(image: ImageTask) {
         isDeepStrictEqual(image.mask, protection.mask),
     );
     if (!confirmed) return false;
-    if (resolveResultSize(image.config.quality, "1:1") !== resolveResultSize("4k", "1:1")) return !image.enhancementDelivery;
+    if (resolveResultSize(image.config.quality, "1:1") !== resolveResultSize("4k", "1:1") || !image.enhancementDelivery) return !image.enhancementDelivery;
     if (!image.mask?.serverUrl) return false;
     return Boolean(imageTaskNativeSceneBaseline(image));
 }

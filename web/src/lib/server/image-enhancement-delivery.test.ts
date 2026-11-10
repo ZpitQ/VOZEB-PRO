@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
 import { freezeEcommerceEnhancementDelivery } from "./image-enhancement-delivery";
+import { imageTaskResultOptions, usesImageTaskResultProcessing } from "./image-task-result-contract";
 import type { ImageTask } from "./image-task-store";
 import { buildSceneEditProtection } from "./ecommerce-product-regions";
 
@@ -69,6 +70,33 @@ describe("creation-time ecommerce enhancement delivery", () => {
         const read = vi.fn(async () => source);
         return { task, source, read };
     }
+    it("retains high quality scene protection without a legacy enhancement delivery", async () => {
+        const { task } = await local();
+        const protection = task.sceneProtection!;
+        const mask = { ...protection.mask, dataUrl: "", serverUrl: "/api/reference-assets/temporary/fixture-mask.png" };
+        const image: ImageTask = {
+            ...task,
+            id: "scene-image",
+            userId: "owner",
+            username: "fixture",
+            displayName: "Fixture",
+            source: "image-workbench",
+            status: "running",
+            prompt: "Edit the vase",
+            createdAt: 1,
+            updatedAt: 1,
+            runId: "scene-run",
+            config: { ...task.config, quality: "high" },
+            mask,
+            sceneProtection: { ...protection, mask },
+            ecommerceExecution: { ...task.ecommerceExecution!, canvas: { mode: "exact", size: protection.sourceSize, source: "baseline", allowReframe: false }, mask: { mode: "independent", required: true } },
+            ecommerceCanvasRequest: { size: "6x4" },
+        };
+        expect(usesImageTaskResultProcessing(image)).toBe(true);
+        const options = imageTaskResultOptions(image, [{ resultId: "native:1", resultIndex: 1, inputIndex: 0 }]);
+        expect(options).toMatchObject({ mode: "scene_protection", sourceInputIndex: 1, maskInputIndex: 2, protection: { sourceAssetId: "scene", sourceSize: { width: 6, height: 4 } } });
+        expect(options).not.toHaveProperty("baseline");
+    });
     it("freezes a confirmed local scene source and its canonical upright digest before generation", async () => {
         const { task, source, read } = await local();
         const frozen = await freezeEcommerceEnhancementDelivery(task, read);
