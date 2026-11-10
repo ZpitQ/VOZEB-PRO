@@ -1,5 +1,5 @@
 import { parseImageDimensions } from "@/lib/image-size";
-import { ecommerceCanvasSize, validateEcommerceDimensions, type EcommerceCanvasProviderRequest } from "@/lib/server/ecommerce-edit-plan";
+import { ecommerceCanvasSize, matchesEcommerceCanvasDimensions, validateEcommerceDimensions, type EcommerceCanvasProviderRequest } from "@/lib/server/ecommerce-edit-plan";
 import { updateImageTask, type ImageTask } from "@/lib/server/image-task-store";
 
 import { parseImageRatio, resolveEcommerceCanvasRequestSize } from "@/lib/image-generation-size";
@@ -25,13 +25,16 @@ export async function recordEcommerceCanvasRequest(task: ImageTask, request: Eco
     if (!canvas) return;
     const dimensions = canvasProviderDimensions(request);
     const ratio = request.aspectRatio || (request.size?.includes(":") ? request.size : undefined);
-    const geometries = [dimensions, ratio ? parseImageRatio(ratio) : undefined].filter((size) => size !== undefined);
-    if (!geometries.length || (canvas.mode === "exact" && !dimensions)) throw new EcommerceCanvasAdapterReview(adapter);
-    for (const size of geometries) {
+    if ((!dimensions && !ratio) || (canvas.mode === "exact" && !dimensions)) throw new EcommerceCanvasAdapterReview(adapter);
+    if (dimensions) {
+        validateEcommerceDimensions(dimensions);
+        if (!matchesEcommerceCanvasDimensions(canvas, dimensions)) throw new EcommerceCanvasAdapterReview(adapter);
+    }
+    if (ratio) {
+        const size = parseImageRatio(ratio);
         validateEcommerceDimensions(size);
         if (BigInt(size.width) * BigInt(canvas.size.height) !== BigInt(size.height) * BigInt(canvas.size.width)) throw new EcommerceCanvasAdapterReview(adapter);
     }
-    if (canvas.mode === "exact" && (dimensions!.width !== canvas.size.width || dimensions!.height !== canvas.size.height)) throw new EcommerceCanvasAdapterReview(adapter);
     await updateImageTask(task.id, { ecommerceCanvasRequest: request });
     task.ecommerceCanvasRequest = request;
 }

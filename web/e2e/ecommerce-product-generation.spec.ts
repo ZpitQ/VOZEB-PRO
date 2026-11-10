@@ -962,7 +962,7 @@ test("large-reference:四千八百万像素参考图完成真实创作并刷新�
 test("large-product-reference:四千二百多万像素商品完成原尺寸保护并刷新恢复", async ({ page, request }, testInfo) => {
     test.skip(testInfo.project.name !== "chromium", "大商品原尺寸保护回归只在桌面 Chromium 执行");
     const goldenCase = cases[5];
-    const userRequest = goldenCase.userRequest + " 输出图片尺寸1024x1024。";
+    const userRequest = goldenCase.userRequest;
     const product = {
         name: goldenCase.productFileName,
         mimeType: "image/png",
@@ -1020,7 +1020,7 @@ test("large-product-reference:四千二百多万像素商品完成原尺寸保�
         expectTraceRoutes(trace);
         expectLatestTraceVersions(trace);
         expect(trace.imageTaskIds).toHaveLength(1);
-        expect(traceStage(trace, "edit_planning").output).toMatchObject({ operation: "product_to_scene", canvas: { mode: "exact", source: "user_text", size: { width: 1024, height: 1024 } } });
+        expect(traceStage(trace, "edit_planning").output).toMatchObject({ operation: "product_to_scene", canvas: { mode: "ratio", source: "baseline", size: { width: 7997, height: 5334 } } });
         expect(traceStage(trace, "image_generation").output).toMatchObject({
             mask: { mode: "independent", required: true },
             protection: { sourceSize: { width: 7997, height: 5334 }, productCore: [{ x: 2400, y: 1200, width: 3200, height: 2800 }], maskProvider: "white-background-flood-fill.v1", maskTrust: "trusted" },
@@ -1029,10 +1029,14 @@ test("large-product-reference:四千二百多万像素商品完成原尺寸保�
         await testInfo.attach("large-product-protection.json", { body: JSON.stringify(traceStage(trace, "image_generation").output.protection, null, 2), contentType: "application/json" });
         const assetsResponse = await request.get(`/api/creative/conversations/${run.conversationId}/assets`);
         expect(assetsResponse.ok()).toBe(true);
-        const assetsPayload: { data: { assets: Array<{ id: string; sourceRunId?: string; serverUrl?: string }> } } = await assetsResponse.json();
+        const assetsPayload: { data: { assets: Array<{ id: string; sourceRunId?: string; serverUrl?: string; width?: number; height?: number }> } } = await assetsResponse.json();
         const deliveredAsset = assetsPayload.data.assets.find((asset) => asset.id === run.assetIds?.[0]);
         assert.ok(deliveredAsset?.serverUrl);
         expect(deliveredAsset.sourceRunId).toBe(run.id);
+        expect(deliveredAsset.width).toBeGreaterThan(0);
+        expect(deliveredAsset.width).toBeLessThan(7997);
+        expect(deliveredAsset.height).toBeGreaterThan(0);
+        expect(deliveredAsset.height).toBeLessThan(5334);
         const expectedSource = new URL(deliveredAsset.serverUrl, page.url());
         const resultImage = page.getByTestId("creative-media-result").last().getByTestId("creative-primary-result").getByRole("img");
         await expect(resultImage).toBeVisible({ timeout: 30_000 });
