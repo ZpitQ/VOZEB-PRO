@@ -109,10 +109,13 @@ export async function captureImageTaskNativeResults(input: NativeCaptureInput): 
                 hash.update(chunk);
             }
             const sha256 = hash.digest("hex");
-            let metadataFacts: { layout: NonNullable<Extract<NativeResults["slots"][number], { status: "stored" }>["layout"]> } | { metadataRejected: true };
+            let metadataFacts: { layout: NonNullable<Extract<NativeResults["slots"][number], { status: "stored" }>["layout"]>; metadataSize: { width: number; height: number } } | { metadataRejected: true };
             try {
                 const metadata = await sharp(sourcePath, { limitInputPixels: false, failOn: "error" }).metadata();
-                metadataFacts = metadata.format && metadata.depth && metadata.channels ? { layout: { format: metadata.format, depth: metadata.depth, channels: metadata.channels } } : { metadataRejected: true };
+                metadataFacts =
+                    metadata.format && metadata.depth && metadata.channels
+                        ? { layout: { format: metadata.format, depth: metadata.depth, channels: metadata.channels }, metadataSize: { width: metadata.width, height: metadata.height } }
+                        : { metadataRejected: true };
             } catch {
                 metadataFacts = { metadataRejected: true };
             }

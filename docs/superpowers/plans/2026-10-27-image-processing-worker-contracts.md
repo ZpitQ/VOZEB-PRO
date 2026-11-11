@@ -82,21 +82,21 @@ prepare/build建立子阶段、保存父检查点的 `waitingFor` 和将父记�
 | `payload.operation`        | `prepare_reference`、`build_protection`、`process_result`之一                                                       |
 | `payload.inputDigest`      | 本阶段确定性输入摘要，也是同一业务身份的请求指纹                                                                    |
 | `payload.algorithmVersion` | 本阶段明确的算法版本，版本变化建立新阶段身份                                                                        |
-| `payload.inputs`           | 每项含 `assetId`、`assetVersion`；有冻结hash时带 `expectedSha256`；只有与完整解码hash绑定的检查点尺寸可用于降低预算 |
+| `payload.inputs`           | 每项含 `assetId`、`assetVersion`；有冻结hash时带 `expectedSha256`；预算尺寸必须来自与输入hash绑定的文件元数据或完整解码检查点 |
 | `payload.options`          | 判别式操作参数；只存该阶段实际需要的保护/目标尺寸/结果处理选项，不存完整模型配置                                    |
 | `payload.resource`         | 冻结`profileVersion/requiredMemoryBytes/facts`；facts绑定输入身份和实际编码布局，需求来自各操作实测模型             |
 | `payload.executionId`      | 每次领取新生成，连同worker_id约束续租、上传、完成和失败                                                             |
 | `result_payload`           | 完成manifest、工件引用、退出/资源摘要；不存原图RGBA或长base64                                                       |
 
-首次 `prepare_reference` 尚无内容hash时，以用户、Run、操作、assetId、已冻结assetVersion及输入策略版本建立身份。Web在claim前对归属已验证的原件流式hash/计数，并对同一关闭后的受控临时文件读取元数据，将真实hash、字节量和format/depth/channels一次性冻结为该阶段的内部资源事实；不完整解码。初始inputDigest仍绑定最初规范输入，补hash不重算摘要或新建任务，也不能覆盖已经冻结的hash；资源profile另行冻结。后续阶段必须包含该hash。已有checkpoint带hash时，预处理也必须验证，不能以“初次”绕过已知身份。
+首次 `prepare_reference` 尚无内容hash时，以用户、Run、操作、assetId、已冻结assetVersion及输入策略版本建立身份。Web在claim前对归属已验证的原件流式hash/计数，并对同一关闭后的受控临时文件读取元数据，将真实hash、字节量、format/depth/channels和metadataSize一次性冻结为该阶段的内部资源事实；不完整解码。初始inputDigest仍绑定最初规范输入，补hash不重算摘要或新建任务，也不能覆盖已经冻结的hash；资源profile另行冻结。后续阶段必须包含该hash。已有checkpoint带hash时，预处理也必须验证，不能以“初次”绕过已知身份。
 
-首次预处理按 `prepare_reference` 操作独立校准的64MP输入profile准入，不信任客户端或仅登记的宽高，也不在取得额度前完整解码。S3完成该操作的完整任务预算校准前不得启用其领取；S2的934MiB商品分割候选不能替代该预算。真实尺寸、方向、hash和分析缩图在子进程内验证后一起保存；后续阶段才能依据该检查点估算。超64MP和可读头损坏图仍在该边界拒绝。
+首次预处理按 `prepare_reference` 操作独立校准的64MP输入profile准入，不信任客户端或仅登记的宽高，也不在取得额度前完整解码。S3完成该操作的完整任务预算校准前不得启用其领取；S2的934MiB商品分割候选不能替代该预算。真实尺寸、方向、hash和分析缩图在子进程内验证后一起保存；后续阶段优先依据该检查点估算。超64MP和可读头损坏图仍在该边界拒绝。
 
-结果处理的压缩输入没有参考预处理的20MiB统一上限。服务端按媒体归属和登记Provider读取原件，取得同一编码文件的实际字节量与真实格式/位深/通道，绑定输入索引、assetId、assetVersion和冻结hash，保存于内部resource事实；登记MIME、文件名、Content-Length或客户端声明不能替代实际值，也不能把文件头尺寸当作完整解码检查点。首次prepare仍保留64MP，仅用layout选择经校准的工作区系数。source、mask、native和编码产物按各操作实际存活的工作区计入；缺少匹配事实或未校准分支明确不可领取，不借用其他操作预算。传输完成后、启动子进程前再次核对冻结bytes/hash，防止原件变化先产生完整Buffer分配。
+结果处理的压缩输入没有参考预处理的20MiB统一上限。服务端按媒体归属和登记Provider读取原件，取得同一编码文件的实际字节量、真实格式/位深/通道及元数据宽高，绑定输入索引、assetId、assetVersion和冻结hash，保存于内部resource事实；登记MIME、文件名、Content-Length或客户端声明不能替代实际值，也不能把文件头尺寸当作完整解码检查点。结果处理优先用匹配身份的完整解码尺寸，否则用同一hash的metadataSize估算；两者均缺失时仍预留操作上限。首次prepare仍保留64MP，仅用layout选择经校准的工作区系数。source、mask、native和编码产物按各操作实际存活的工作区计入；缺少匹配事实或未校准分支明确不可领取，不借用其他操作预算。传输完成后、启动子进程前再次核对冻结bytes/hash，防止原件变化先产生完整Buffer分配。
 
-`facts.encodedInputs`逐项保存`inputIndex/assetId/assetVersion/sha256/bytes`和真实`layout:{format,depth,channels}`；仅同一文件的元数据读取实际失败时，以互斥的`metadataRejected:true`替代layout。该标记只允许坏native槽省去无法进入的解码/输出工作区，实际编码字节仍计入；全局source/mask不能借此准入。缺少采集结果与元数据已失败不同。`facts.decodedInputs`只保存同身份完整处理检查点的真实宽高，未完成解码时为空。
+`facts.encodedInputs`逐项保存`inputIndex/assetId/assetVersion/sha256/bytes`和真实`layout:{format,depth,channels}`及可选`metadataSize:{width,height}`；仅同一文件的元数据读取实际失败时，以互斥的`metadataRejected:true`替代layout和metadataSize。该标记只允许坏native槽省去无法进入的解码/输出工作区，实际编码字节仍计入；全局source/mask不能借此准入。缺少采集结果与元数据已失败不同。`facts.decodedInputs`只保存同身份完整处理检查点的真实宽高，未完成解码时为空。
 
-当前模型版本为`image-processing-memory.s8.v1`，已测prepare的uchar PNG/JPEG、ushort PNG及float三通道TIFF；后续保护/结果只对已校准uchar PNG/JPEG布局准入。首次prepare分别保留64MP，对应样本需求405/649/893MiB；布局缺失时不能套用405MiB。多结果累计实际编码输入与各成功槽的输出预留，raw/codec按单活跃槽峰值计入。这些系数是锁定Sharp版本的实测工程预留，不是任意编解码器的数学内存上界；未校准布局明确不可领取。
+当前模型版本为`image-processing-memory.s8.v2`，已测prepare的uchar PNG/JPEG、ushort PNG及float三通道TIFF；后续保护/结果只对已校准uchar PNG/JPEG布局准入。首次prepare分别保留64MP，对应样本需求405/649/893MiB；布局缺失时不能套用405MiB。多结果累计实际编码输入与各成功槽的输出预留，raw/codec按单活跃槽峰值计入；保护结果同时计入原件、蒙版和较大native的像素工作区。预算尺寸不免除子进程完整解码、真实尺寸、hash及保护检查。这些系数是锁定Sharp版本的实测工程预留，不是任意编解码器的数学内存上界；未校准布局明确不可领取。
 
 `process_enhancement` 的四类工程预留为：global JPEG 1536MiB，legacy PNG、product、scene 各1280MiB；仅覆盖当前producer/B0已定义的PNG8 RGB(A)/JPEG3输入角色和几何域，域外保持uncalibrated，不代表通用内存上界或并发容量。
 

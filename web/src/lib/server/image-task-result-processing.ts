@@ -1004,7 +1004,7 @@ async function resultProcessingPayload(original: StoredGenerationTaskRecord, bin
     }));
     const encodedInputs = stored.map<EncodedImageProcessingInput>((slot, inputIndex) => {
         const identity = { inputIndex, assetId: slot.assetId, assetVersion: slot.assetVersion, sha256: slot.sha256, bytes: slot.bytes };
-        return slot.metadataRejected === true ? { ...identity, metadataRejected: true } : { ...identity, layout: slot.layout };
+        return slot.metadataRejected === true ? { ...identity, metadataRejected: true } : { ...identity, layout: slot.layout, ...(slot.metadataSize ? { metadataSize: slot.metadataSize } : {}) };
     });
     const published = image.resultProcessing ? await getStoredGenerationTaskRecord("image_processing", image.resultProcessing.jobId) : undefined;
     if (image.resultProcessing && !published) throw new ImageResultOwnershipLost();
@@ -1053,7 +1053,7 @@ async function resultProcessingPayload(original: StoredGenerationTaskRecord, bin
                 assetVersion: assetId,
                 sha256: createHash("sha256").update(bytes).digest("hex"),
                 bytes: bytes.length,
-                ...(metadata.format && metadata.depth && metadata.channels ? { layout: { format: metadata.format, depth: metadata.depth, channels: metadata.channels } } : {}),
+                ...(metadata.format && metadata.depth && metadata.channels ? { layout: { format: metadata.format, depth: metadata.depth, channels: metadata.channels }, metadataSize: { width: metadata.width, height: metadata.height } } : {}),
             };
             parentMask = { inputIndex, imageTaskId: image.id };
         }
@@ -1077,28 +1077,39 @@ async function resultProcessingPayload(original: StoredGenerationTaskRecord, bin
         options.mode === "ordinary"
             ? [options.mode, options.results.map((result) => [result.resultId, result.resultIndex, result.inputIndex]), options.targetSize ? [options.targetSize.width, options.targetSize.height] : null, options.transparentBackground]
             : options;
-    const inputDigest = createHash("sha256")
-        .update(
-            JSON.stringify([
-                ALGORITHM_VERSION,
-                IMAGE_PROCESSING_MEMORY_MODEL_VERSION,
-                binding.userId,
-                binding.imageTaskId,
-                nativeResults.version,
-                nativeResults.attemptNo,
-                nativeResults.upstreamTaskId,
-                nativeResults.slots.map(nativeSlotIdentity),
-                inputs.map((input) => [input.assetId, input.assetVersion, input.expectedSha256]),
-                sources.map((source) => [source.inputIndex, source.scope, source.storageKey, source.storageProvider, source.externalStorageId ?? null, ...(source.frozenResultSource ? ["image-task-result-source"] : [])]),
-                encodedInputs.map((input) => [input.inputIndex, input.assetId, input.assetVersion, input.sha256, input.bytes, input.metadataRejected === true, input.layout ? [input.layout.format, input.layout.depth, input.layout.channels] : null]),
-                [],
-                optionsIdentity,
-                ...(binding.sourceIdentityDigest ? [binding.sourceIdentityDigest] : []),
-                ...(parentMask ? [[parentMask.inputIndex, parentMask.imageTaskId]] : []),
-                ...(binding.run ? [[binding.run.runId, binding.run.agentTaskId, binding.run.agentAttempt]] : []),
-            ]),
-        )
-        .digest("hex");
+    const inputDigest =
+        frozen?.inputDigest ??
+        createHash("sha256")
+            .update(
+                JSON.stringify([
+                    ALGORITHM_VERSION,
+                    IMAGE_PROCESSING_MEMORY_MODEL_VERSION,
+                    binding.userId,
+                    binding.imageTaskId,
+                    nativeResults.version,
+                    nativeResults.attemptNo,
+                    nativeResults.upstreamTaskId,
+                    nativeResults.slots.map(nativeSlotIdentity),
+                    inputs.map((input) => [input.assetId, input.assetVersion, input.expectedSha256]),
+                    sources.map((source) => [source.inputIndex, source.scope, source.storageKey, source.storageProvider, source.externalStorageId ?? null, ...(source.frozenResultSource ? ["image-task-result-source"] : [])]),
+                    encodedInputs.map((input) => [
+                        input.inputIndex,
+                        input.assetId,
+                        input.assetVersion,
+                        input.sha256,
+                        input.bytes,
+                        input.metadataRejected === true,
+                        input.layout ? [input.layout.format, input.layout.depth, input.layout.channels] : null,
+                        ...(input.metadataSize ? [[input.metadataSize.width, input.metadataSize.height]] : []),
+                    ]),
+                    [],
+                    optionsIdentity,
+                    ...(binding.sourceIdentityDigest ? [binding.sourceIdentityDigest] : []),
+                    ...(parentMask ? [[parentMask.inputIndex, parentMask.imageTaskId]] : []),
+                    ...(binding.run ? [[binding.run.runId, binding.run.agentTaskId, binding.run.agentAttempt]] : []),
+                ]),
+            )
+            .digest("hex");
     const operation = { operation: "process_result" as const, options };
     const { profileVersion, ...configuration } = imageProcessingResourceConfig(process.env);
     const estimate = estimateImageProcessingMemory({ ...operation, inputs }, facts);
@@ -1167,7 +1178,7 @@ async function freezeResultSource(original: StoredGenerationTaskRecord, referenc
             assetVersion: assetId,
             sha256: hash.digest("hex"),
             bytes,
-            ...(metadata.format && metadata.depth && metadata.channels ? { layout: { format: metadata.format, depth: metadata.depth, channels: metadata.channels } } : {}),
+            ...(metadata.format && metadata.depth && metadata.channels ? { layout: { format: metadata.format, depth: metadata.depth, channels: metadata.channels }, metadataSize: { width: metadata.width, height: metadata.height } } : {}),
         };
         const source: ImageProcessingPayload["sources"][number] = {
             inputIndex,
@@ -1197,7 +1208,7 @@ function nativeSlotIdentity(slot: NativeResults["slots"][number]) {
         slot.externalStorageId ?? null,
         slot.sha256,
         slot.bytes,
-        slot.metadataRejected === true ? ["metadata_rejected"] : [slot.layout.format, slot.layout.depth, slot.layout.channels],
+        slot.metadataRejected === true ? ["metadata_rejected"] : [slot.layout.format, slot.layout.depth, slot.layout.channels, ...(slot.metadataSize ? [[slot.metadataSize.width, slot.metadataSize.height]] : [])],
     ];
 }
 
