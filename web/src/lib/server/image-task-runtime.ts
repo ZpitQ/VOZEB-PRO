@@ -442,9 +442,11 @@ export async function persistImageTaskResult(task: ImageTask, origin: string, re
 
     const inlineDataUrl = resultUrl === "inline://image-task-result" ? current.result?.dataUrl || "" : resultUrl;
     const remoteUrl = resultUrl === "inline://image-task-result" ? current.result?.remoteUrl : /^https?:\/\//i.test(resultUrl) ? resultUrl : undefined;
-    if (!inlineDataUrl && !remoteUrl) throw new GenerationSubmissionSafeFailure("图片任务缺少可持久化结果");
+    if (!inlineDataUrl && !remoteUrl && !current.nativeAcquisition) throw new GenerationSubmissionSafeFailure("图片任务缺少可持久化结果");
     const legacyResults = current.result?.results?.length ? current.result.results : [{ dataUrl: inlineDataUrl, remoteUrl }];
-    const normalizedResults = legacyResults.map((item, index) => (index === 0 ? { ...item, dataUrl: inlineDataUrl || item.dataUrl, remoteUrl: remoteUrl || item.remoteUrl } : item));
+    const normalizedResults = current.nativeAcquisition
+        ? current.nativeAcquisition.slots.map((slot) => ({ dataUrl: slot.source?.url || "", remoteUrl: slot.source?.remoteUrl }))
+        : legacyResults.map((item, index) => (index === 0 ? { ...item, dataUrl: inlineDataUrl || item.dataUrl, remoteUrl: remoteUrl || item.remoteUrl } : item));
     if (resultClaim) {
         const captured = await captureProviderNativeResult(task, { ...normalizedResults[0], results: normalizedResults }, origin, authContext, resultClaim);
         if (captured.state !== "native_ready") throw new Error("Native image result acquisition did not retain the current image claim");

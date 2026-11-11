@@ -148,7 +148,6 @@ export type ImageTask = GenerationTaskContext & {
     enhancementDelivery?: EcommerceEnhancementDelivery;
 };
 
-const TASK_STALE_MS = 3 * 60 * 1000;
 export async function createImageTask(input: Omit<ImageTask, "id" | "status" | "createdAt" | "updatedAt" | "enhancementPolicy" | "executionId" | "nativeAcquisition" | "nativeResults" | "resultProcessing">) {
     const now = Date.now();
     const task: ImageTask = {
@@ -171,7 +170,7 @@ export async function getImageTask(id: string) {
 }
 
 export function countActiveImageTasksForUser(userId: string) {
-    return countActiveStoredGenerationTasks(userId, "image", TASK_STALE_MS);
+    return countActiveStoredGenerationTasks(userId, "image");
 }
 
 export function transitionImageTask(

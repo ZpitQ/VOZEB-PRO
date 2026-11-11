@@ -97,7 +97,7 @@ export async function scheduleGenerationTask(type: GenerationTaskType, id: strin
     });
 }
 
-export async function rearmImageTaskForUser(input: { id: string; upstreamTaskId: string; channelId?: string; provider?: string; queryPath?: string; submittedAt: number }): Promise<GenerationTaskLease | null> {
+export async function rearmImageTaskForUser(input: { id: string; upstreamTaskId?: string; channelId?: string; provider?: string; queryPath?: string; submittedAt: number }): Promise<GenerationTaskLease | null> {
     const normalized = normalizePatch({
         executionPhase: "polling",
         upstreamTaskId: input.upstreamTaskId,
@@ -111,7 +111,8 @@ export async function rearmImageTaskForUser(input: { id: string; upstreamTaskId:
         await ensurePostgresSchema();
         return withPostgresTransaction(async (executor) => {
             // Read the recovery clock after any competing row lock has been released.
-            await executor.query("SELECT id FROM generation_tasks WHERE id = $1 AND task_type = 'image' FOR UPDATE", [input.id]);
+            const locked = await executor.query<Record<string, unknown>>("SELECT * FROM generation_tasks WHERE id = $1 AND task_type = 'image' FOR UPDATE", [input.id]);
+            if (!input.upstreamTaskId && (!locked.rows[0] || !canRecoverImageNativeResult(mapLease(locked.rows[0])))) return null;
             const result = await executor.query<Record<string, unknown>>(
                 `WITH recovery AS MATERIALIZED (
                     SELECT id, NULLIF(payload -> 'nativeResults', 'null'::jsonb) IS NOT NULL AS has_native,
@@ -119,14 +120,14 @@ export async function rearmImageTaskForUser(input: { id: string; upstreamTaskId:
                     FROM generation_tasks WHERE id = $1 AND task_type = 'image'
                  )
                  UPDATE generation_tasks AS task
-                 SET execution_phase = CASE WHEN recovery.has_native THEN 'persisting' ELSE 'polling' END,
+                 SET execution_phase = CASE WHEN recovery.has_native THEN 'persisting' WHEN $2::text IS NULL THEN 'result_ready' ELSE 'polling' END,
                      next_poll_at = recovery.checked_at,
                      upstream_task_id = CASE WHEN recovery.has_native THEN task.upstream_task_id ELSE COALESCE($2::text, task.upstream_task_id) END,
                      channel_id = CASE WHEN recovery.has_native THEN task.channel_id ELSE COALESCE($3::text, task.channel_id) END,
                      provider = CASE WHEN recovery.has_native THEN task.provider ELSE COALESCE($4::text, task.provider) END,
                      query_path = CASE WHEN recovery.has_native THEN task.query_path ELSE COALESCE($5::text, task.query_path) END,
                      submitted_at = CASE WHEN recovery.has_native THEN task.submitted_at ELSE COALESCE($6::timestamptz, task.submitted_at) END,
-                     last_upstream_status = CASE WHEN recovery.has_native THEN task.last_upstream_status ELSE 'user_recovery_requested' END
+                     last_upstream_status = CASE WHEN recovery.has_native THEN task.last_upstream_status WHEN $2::text IS NULL THEN 'native_acquisition_recovery_requested' ELSE 'user_recovery_requested' END
                  FROM recovery
                  WHERE task.id = recovery.id AND task.task_type = 'image'
                    AND task.status IN ('pending', 'running') AND task.expires_at > recovery.checked_at
@@ -142,7 +143,8 @@ export async function rearmImageTaskForUser(input: { id: string; upstreamTaskId:
         let result: GenerationTaskLease | null = null;
         const next = tasks.map((task) => {
             if (task.id !== input.id || !canRearmImageTaskForUser(task, now)) return task;
-            const updated = applyPatch(task, task.payload.nativeResults != null ? { executionPhase: "persisting", nextPollAt: now } : { ...normalized, nextPollAt: now });
+            if (!input.upstreamTaskId && !canRecoverImageNativeResult(task)) return task;
+            const updated = applyPatch(task, task.payload.nativeResults != null ? { executionPhase: "persisting", nextPollAt: now } : { ...normalized, executionPhase: input.upstreamTaskId ? "polling" : "result_ready", nextPollAt: now });
             result = toLease(updated);
             return updated;
         });
@@ -516,6 +518,22 @@ function canApplySchedulePatch(task: StoredGenerationTaskRecord, options: Genera
     if (options.unsubmittedReferenceRecovery && !canRecoverUnsubmittedImageReference(task)) return false;
     if (options.unsubmittedMaskRecovery && (!canRecoverUnsubmittedImageMask(task) || JSON.stringify(task.payload) !== JSON.stringify(options.unsubmittedMaskRecovery.payload))) return false;
     return options.cancellation === true || task.status !== "cancelled" || !CANCELLATION_PHASES.has(task.executionPhase || "created");
+}
+
+export function canRecoverImageNativeResult(task: Pick<StoredGenerationTaskRecord, "type" | "status" | "payload" | "executionPhase" | "upstreamTaskId"> | null | undefined) {
+    if (!task || task.type !== "image" || task.status !== "running" || task.executionPhase !== "needs_review" || task.upstreamTaskId) return false;
+    const payload = task.payload as Partial<ImageTask>;
+    const sealed = payload.nativeResults;
+    if (sealed) return !payload.upstream?.id && sealed.version === "image-task-native-results.v1" && sealed.upstreamTaskId === null && sealed.attemptNo === (payload.attemptNo || 1) && sealed.slots.some((slot) => slot.status === "stored");
+    const acquisition = payload.nativeAcquisition;
+    return Boolean(
+        !payload.upstream?.id &&
+        !payload.nativeResults &&
+        acquisition?.version === "image-task-native-acquisition.v1" &&
+        acquisition.upstreamTaskId === null &&
+        acquisition.attemptNo === (payload.attemptNo || 1) &&
+        acquisition.slots.some((slot) => slot.source?.url),
+    );
 }
 
 export function canRecoverUnsubmittedImageReference(task: StoredGenerationTaskRecord | null | undefined) {

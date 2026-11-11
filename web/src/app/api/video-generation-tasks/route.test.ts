@@ -152,7 +152,7 @@ describe("video generation candidate failover", () => {
 
         expect(response.status).toBe(429);
         expect(response.headers.get("retry-after")).toBe("9");
-        expect(mocks.generationCapacityRetryAfterSeconds).toHaveBeenCalledWith("user", "video", 30 * 60_000);
+        expect(mocks.generationCapacityRetryAfterSeconds).toHaveBeenCalledWith("user", "video");
         expect(mocks.fetchInternalApi).not.toHaveBeenCalled();
     });
 

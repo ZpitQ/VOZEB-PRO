@@ -9,7 +9,7 @@ import type { CreativeReferenceReview } from "@/lib/creative-runtime-contract";
 import { allowedEcommerceReferencePurposes } from "./ecommerce-reference-purpose";
 import { referenceReviewKind, referenceReviewQuestion, referenceSourceTuple, unsubmittedReferenceCheckpoint } from "./ecommerce-reference-recovery";
 import { listStoredGenerationTaskRecordsByRunIds } from "./generation-task-store";
-import { canContinueCreatedImageReference, canRecoverUnsubmittedImageMask, canRecoverUnsubmittedImageReference } from "./generation-task-scheduler";
+import { canContinueCreatedImageReference, canRecoverImageNativeResult, canRecoverUnsubmittedImageMask, canRecoverUnsubmittedImageReference } from "./generation-task-scheduler";
 import { imageProcessingRecoveryForRun } from "./image-processing-service";
 
 export async function publicAgentRunForRequest(run: AgentRun, request: Request) {
@@ -45,7 +45,7 @@ async function canCheckRunStatus(run: AgentRun) {
         if (!record) return false;
         const upstream = record.upstreamTaskId || (record.payload.upstream as { id?: string } | undefined)?.id;
         if (["pending", "running"].includes(record.status) && record.executionPhase === "needs_review") {
-            const recoverable = Boolean((record.status === "running" && (upstream || canRecoverUnsubmittedImageReference(record))) || canRecoverUnsubmittedImageMask(record));
+            const recoverable = Boolean((record.status === "running" && (upstream || canRecoverUnsubmittedImageReference(record) || canRecoverImageNativeResult(record))) || canRecoverUnsubmittedImageMask(record));
             needsRecovery ||= recoverable;
             return recoverable;
         }

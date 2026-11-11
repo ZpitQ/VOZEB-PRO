@@ -308,12 +308,13 @@ export async function pollOpenAiImageTask(config: ImageTaskConfig, taskId: strin
             }
             const payload = await parseImageQueryJson(response);
             const baseUrl = response.headers.get("x-vozeb-pro-upstream-url") || mediaBaseUrl || pollUrl;
+            payload.status = readImageTaskStatus(payload) || payload.status;
             const error = readImagePayloadError(payload);
-            if (error) throw new ImageUpstreamTerminalError(error);
+            if (readImagePayloadError({ status: payload.status })) throw new ImageUpstreamTerminalError(error);
+            if (error) throw new Error(error);
             const image = Array.isArray(payload.data) ? imageTaskResultFromDeclaredData(payload.data, baseUrl, config) : findImageResult(payload, baseUrl, config);
             if (image) return image;
-            payload.status = readImageTaskStatus(payload) || payload.status;
-            if (!isPendingImageStatus(payload.status)) throw new ImageUpstreamTerminalError("图片任务完成但没有返回图片");
+            if (!isPendingImageStatus(payload.status)) throw new ImageQueryContractError("图片任务完成但没有返回图片");
         }
         if (!singleStep) await delay(IMAGE_TASK_POLL_INTERVAL_MS);
     }

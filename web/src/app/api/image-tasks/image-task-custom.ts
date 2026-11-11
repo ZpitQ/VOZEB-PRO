@@ -28,6 +28,9 @@ import {
     withSystemPrompt,
     withImageOutputInstructions,
     ImageUpstreamTerminalError,
+    ImageQueryContractError,
+    parseImageQueryJson,
+    readImagePayloadError,
 } from "./image-task-support";
 
 export async function runCustomImageTask(task: ImageTask, origin: string, publicOrigin: string, cookie: string, singleStep = false) {
@@ -106,12 +109,14 @@ export async function pollCustomImageTask(task: ImageTask, taskId: string, media
                 lastError = await readFetchError(response, "自定义图片任务查询失败");
                 continue;
             }
-            const data = (await response.json().catch(() => null)) as ImageApiResponse | null;
-            if (!data || isProviderBusinessError(data)) throw new ImageUpstreamTerminalError(readProviderError(data) || "自定义图片任务查询失败");
+            const data = await parseImageQueryJson(response);
+            const status = readProviderString(data, config.advancedConfig?.statusField, STATUS_KEYS).toLowerCase();
+            const error = readImagePayloadError({ status });
+            if (error) throw new ImageUpstreamTerminalError(readProviderError(data) || error);
+            if (isProviderBusinessError(data)) throw new Error(readProviderError(data) || "自定义图片任务查询失败");
             const result = configuredImageResult(data, response.headers.get("x-vozeb-pro-upstream-url") || mediaBaseUrl || url, task);
             if (result) return result;
-            const status = readProviderString(data, config.advancedConfig?.statusField, STATUS_KEYS).toLowerCase();
-            if (!isPendingImageStatus(status)) throw new ImageUpstreamTerminalError(readProviderError(data) || "自定义图片任务完成但没有返回图片");
+            if (!isPendingImageStatus(status)) throw new ImageQueryContractError("自定义图片任务完成但没有返回图片");
             lastError = "";
             break;
         }

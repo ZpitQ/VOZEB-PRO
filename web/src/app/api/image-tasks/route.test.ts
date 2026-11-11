@@ -262,7 +262,7 @@ describe("image task route", () => {
 
         expect(response.status).toBe(429);
         expect(response.headers.get("retry-after")).toBe("8");
-        expect(mocks.generationCapacityRetryAfterSeconds).toHaveBeenCalledWith("user-one", "image", 10 * 60 * 1000);
+        expect(mocks.generationCapacityRetryAfterSeconds).toHaveBeenCalledWith("user-one", "image");
     });
 
     it("keeps ordinary image creation behind the configured concurrency limit", async () => {
