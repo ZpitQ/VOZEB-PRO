@@ -1,6 +1,6 @@
 import type { ImageProcessingInput, ImageProcessingOperation, ImageProcessingSize } from "./contracts.ts";
 
-export const IMAGE_PROCESSING_MEMORY_MODEL_VERSION = "image-processing-memory.s8.v1" as const;
+export const IMAGE_PROCESSING_MEMORY_MODEL_VERSION = "image-processing-memory.s8.v2" as const;
 
 export type ImageProcessingResourceRequest = ImageProcessingOperation & {
     inputs: readonly Pick<ImageProcessingInput, "assetId" | "assetVersion" | "expectedSha256">[];
@@ -13,7 +13,9 @@ type ImageProcessingResourceInputIdentity = {
     sha256: string;
 };
 
-export type EncodedImageProcessingInput = ImageProcessingResourceInputIdentity & { bytes: number } & ({ layout?: { format: string; depth: string; channels: number }; metadataRejected?: never } | { metadataRejected: true; layout?: never });
+export type EncodedImageProcessingInput = ImageProcessingResourceInputIdentity & { bytes: number } & (
+        { layout?: { format: string; depth: string; channels: number }; metadataSize?: ImageProcessingSize; metadataRejected?: never } | { metadataRejected: true; layout?: never; metadataSize?: never }
+    );
 
 export type DecodedImageProcessingInput = ImageProcessingResourceInputIdentity & ImageProcessingSize;
 
@@ -128,7 +130,7 @@ export function estimateImageProcessingMemory(request: ImageProcessingResourceRe
     if (request.operation === "prepare_reference") {
         if (request.options.generationInput) {
             if (nativeCoefficient(encoded[0]) !== 4 && !isMeasuredWebpSource(encoded[0])) return uncalibrated;
-            return calibrated(profile, 140 * MiB + 13 * decodedPixels(request, facts, 0, REFERENCE_PIXELS));
+            return calibrated(profile, 140 * MiB + 13 * inputPixels(request, facts, 0, REFERENCE_PIXELS));
         }
         const coefficient = isMeasuredWebpSource(encoded[0]) ? 8 : nativeCoefficient(encoded[0]);
         if (coefficient === undefined) return uncalibrated;
@@ -140,7 +142,7 @@ export function estimateImageProcessingMemory(request: ImageProcessingResourceRe
         let coefficient: number;
         if ("mode" in options) coefficient = options.mode === "scene_selection" ? (options.freezeEnhancementBaseline ? 20 : 12) : options.freezeEnhancementBaseline ? 29 : 12;
         else coefficient = options.freezeEnhancementBaseline ? 29 : 13;
-        return calibrated(profile, 140 * MiB + coefficient * decodedPixels(request, facts, 0, REFERENCE_PIXELS));
+        return calibrated(profile, 140 * MiB + coefficient * inputPixels(request, facts, 0, REFERENCE_PIXELS));
     }
 
     const options = request.options;
@@ -150,35 +152,39 @@ export function estimateImageProcessingMemory(request: ImageProcessingResourceRe
     const nativeBytes = natives.reduce((sum, input) => sum + input.encoded.bytes, 0);
     const readable = natives.filter((input) => !input.encoded.metadataRejected);
     if (options.mode === "ordinary") {
-        const pixels = readable.map((input) => decodedPixels(request, facts, input.inputIndex, ORDINARY_PIXELS));
+        const pixels = readable.map((input) => inputPixels(request, facts, input.inputIndex, ORDINARY_PIXELS));
         const outputPixels = pixels.reduce((sum, count) => sum + count, 0);
         const activePixels = Math.max(0, ...pixels);
         return calibrated(profile, 120 * MiB + nativeBytes + 4 * outputPixels + (options.transparentBackground ? 8 : 4) * activePixels);
     }
 
     const source = encoded[options.sourceInputIndex];
-    const sourcePixels = decodedPixels(request, facts, options.sourceInputIndex, NATIVE_PIXELS);
+    const sourcePixels = inputPixels(request, facts, options.sourceInputIndex, NATIVE_PIXELS);
     if (nativeCoefficient(source) !== 4 && !(options.mode === "scene_protection" && isMeasuredWebpSource(source) && sourcePixels <= REFERENCE_PIXELS)) return uncalibrated;
-    if (options.mode === "layers") return calibrated(profile, 120 * MiB + source.bytes + nativeBytes + (readable.length ? 20 : 12) * sourcePixels);
+    const nativePixels = Math.max(0, ...readable.map((input) => inputPixels(request, facts, input.inputIndex, NATIVE_PIXELS)));
+    if (options.mode === "layers") return calibrated(profile, 120 * MiB + source.bytes + nativeBytes + (readable.length ? 20 : 12) * Math.max(sourcePixels, nativePixels));
 
     const mask = encoded[options.maskInputIndex];
     if (nativeCoefficient(mask) !== 4) return uncalibrated;
     const encodedBytes = source.bytes + mask.bytes + nativeBytes;
     const encodedOutputs = 4 * sourcePixels * readable.length;
-    if (options.mode === "product_protection") return calibrated(profile, 120 * MiB + encodedBytes + (readable.length ? 17 : 12) * sourcePixels + encodedOutputs);
+    const contextPixels = Math.max(sourcePixels, inputPixels(request, facts, options.maskInputIndex, NATIVE_PIXELS));
+    if (options.mode === "product_protection") return calibrated(profile, 120 * MiB + encodedBytes + (readable.length ? 17 : 12) * Math.max(contextPixels, nativePixels) + encodedOutputs);
 
-    const nativePixels = Math.max(0, ...readable.map((input) => decodedPixels(request, facts, input.inputIndex, NATIVE_PIXELS)));
-    const rawBytes = readable.length ? Math.max(8 * sourcePixels + 4 * nativePixels, 12 * sourcePixels) : 8 * sourcePixels;
-    return calibrated(profile, 120 * MiB + encodedBytes + rawBytes + encodedOutputs + 4 * Math.max(sourcePixels, nativePixels));
+    const rawBytes = readable.length ? Math.max(8 * contextPixels + 4 * nativePixels, 12 * contextPixels) : 8 * contextPixels;
+    return calibrated(profile, 120 * MiB + encodedBytes + rawBytes + encodedOutputs + 4 * Math.max(contextPixels, nativePixels));
 }
 
 function sameIdentity(input: ImageProcessingResourceRequest["inputs"][number], inputIndex: number, fact: ImageProcessingResourceInputIdentity) {
     return fact.inputIndex === inputIndex && fact.assetId === input.assetId && fact.assetVersion === input.assetVersion && fact.sha256 === input.expectedSha256;
 }
 
-function decodedPixels(request: ImageProcessingResourceRequest, facts: ImageProcessingResourceFacts, inputIndex: number, limit: number) {
+function inputPixels(request: ImageProcessingResourceRequest, facts: ImageProcessingResourceFacts, inputIndex: number, limit: number) {
     const decoded = facts.decodedInputs.find((fact) => sameIdentity(request.inputs[inputIndex], inputIndex, fact));
-    return decoded ? Math.min(decoded.width * decoded.height, limit) : limit;
+    const encoded = facts.encodedInputs.find((fact) => sameIdentity(request.inputs[inputIndex], inputIndex, fact));
+    // Metadata prices these frozen bytes; only a full decode certifies intact pixels.
+    const size = decoded ?? encoded?.metadataSize;
+    return size ? Math.min(size.width * size.height, limit) : limit;
 }
 
 function sameSize(value: ImageProcessingSize, expected: ImageProcessingSize) {

@@ -1024,7 +1024,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                         TMPDIR: workerTemp,
                         TMP: workerTemp,
                         TEMP: workerTemp,
-                        ...resourceEnvironment,
+                        ...Object.fromEntries(Object.keys(resourceEnvironment).map((key) => [key, process.env[key]])),
                         VOZEB_PRO_WORKER_TOKEN: workerToken,
                         VOZEB_PRO_WORKER_API_ORIGIN: origin,
                         VOZEB_PRO_GENERATION_WORKER_ID: launcherWorkerId,
@@ -8645,6 +8645,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
         }
 
         it("keeps a local scene Run copy with an inline mask on its original protected result through the CPU Worker and Agent adoption", async () => {
+            vi.stubEnv("VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB", "1536");
             const route = await configureSceneRoute();
             const { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } = await import("./ecommerce-image-compiler");
             const { executeImageProcessing } = await import("@/lib/image-processing/operations");

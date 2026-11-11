@@ -115,7 +115,7 @@ export type ImageTask = GenerationTaskContext & {
                   externalStorageId?: string;
                   sha256: string;
                   bytes: number;
-              } & ({ layout: { format: string; depth: string; channels: number }; metadataRejected?: never } | { metadataRejected: true; layout?: never }))
+              } & ({ layout: { format: string; depth: string; channels: number }; metadataSize?: { width: number; height: number }; metadataRejected?: never } | { metadataRejected: true; layout?: never; metadataSize?: never }))
             | {
                   resultId: string;
                   resultIndex: number;

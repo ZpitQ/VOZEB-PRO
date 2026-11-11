@@ -4315,7 +4315,18 @@ function protectionInputDigest(run: Pick<AgentRun, "userId" | "id">, input: Extr
 function enqueueInputsIdentity(inputs: Pick<ImageProcessingEnqueueInputs, "facts" | "sources">) {
     return JSON.stringify([
         inputs.sources.map((source) => [source.inputIndex, source.scope, source.storageKey, source.storageProvider, source.externalStorageId]),
-        inputs.facts.encodedInputs.map((fact) => [fact.inputIndex, fact.assetId, fact.assetVersion, fact.sha256, fact.bytes, fact.layout?.format, fact.layout?.depth, fact.layout?.channels, fact.metadataRejected]),
+        inputs.facts.encodedInputs.map((fact) => [
+            fact.inputIndex,
+            fact.assetId,
+            fact.assetVersion,
+            fact.sha256,
+            fact.bytes,
+            fact.layout?.format,
+            fact.layout?.depth,
+            fact.layout?.channels,
+            fact.metadataRejected,
+            ...(fact.metadataSize ? [[fact.metadataSize.width, fact.metadataSize.height]] : []),
+        ]),
         inputs.facts.decodedInputs.map((fact) => [fact.inputIndex, fact.assetId, fact.assetVersion, fact.sha256, fact.width, fact.height]),
     ]);
 }
@@ -4487,7 +4498,7 @@ export async function collectReference(registration: LocalMediaRegistration, inp
         assetVersion: input.assetVersion,
         sha256,
         bytes,
-        ...(metadata.format && metadata.depth && metadata.channels ? { layout: { format: metadata.format, depth: metadata.depth, channels: metadata.channels } } : {}),
+        ...(metadata.format && metadata.depth && metadata.channels ? { layout: { format: metadata.format, depth: metadata.depth, channels: metadata.channels }, metadataSize: { width: metadata.width, height: metadata.height } } : {}),
     };
 }
 

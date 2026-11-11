@@ -51,7 +51,7 @@ const source64 = { ...decoded, ...size64 };
 const native64 = { inputIndex: 2, assetId: "native", assetVersion: "native-v1", sha256: hash, ...size64 };
 const protectedEncoded = [
     { ...encoded, bytes: 8348936, layout: { format: "jpeg", depth: "uchar", channels: 3 } },
-    { inputIndex: 1, assetId: "mask", assetVersion: "mask-v1", sha256: otherHash, bytes: 263882, layout: { format: "png", depth: "uchar", channels: 4 } },
+    { inputIndex: 1, assetId: "mask", assetVersion: "mask-v1", sha256: otherHash, bytes: 263882, layout: { format: "png", depth: "uchar", channels: 4 }, metadataSize: size64 },
     { inputIndex: 2, assetId: "native", assetVersion: "native-v1", sha256: hash, bytes: 8348936, layout: { format: "jpeg", depth: "uchar", channels: 3 } },
 ];
 const sceneTask = request(
@@ -98,11 +98,11 @@ function facts(decodedInputs = [], encodedInputs = [encoded]) {
 }
 
 function calibrated(profile, requiredMemoryBytes) {
-    return { modelVersion: "image-processing-memory.s8.v1", profile, status: "calibrated", requiredMemoryBytes };
+    return { modelVersion: "image-processing-memory.s8.v2", profile, status: "calibrated", requiredMemoryBytes };
 }
 
 function uncalibrated(profile) {
-    return { modelVersion: "image-processing-memory.s8.v1", profile, status: "uncalibrated" };
+    return { modelVersion: "image-processing-memory.s8.v2", profile, status: "uncalibrated" };
 }
 
 const sourceLayoutBudgets = [
@@ -309,6 +309,24 @@ describe("result operations missing their own facts", () => {
 
 describe("measured result workspaces", () => {
     it.each([
+        { label: "small scene", sourceSize: { width: 1900, height: 1900 }, maskSize: { width: 1900, height: 1900 }, nativeSize: { width: 1900, height: 1900 }, requiredMemoryBytes: 202375168 },
+        { label: "larger native", sourceSize: { width: 1900, height: 1900 }, maskSize: { width: 1900, height: 1900 }, nativeSize: { width: 8000, height: 8000 }, requiredMemoryBytes: 685768704 },
+        { label: "larger mask", sourceSize: { width: 1900, height: 1900 }, maskSize: { width: 8000, height: 8000 }, nativeSize: { width: 1900, height: 1900 }, requiredMemoryBytes: 1169162240 },
+    ])("uses each frozen metadata size when reserving a $label before full decode", ({ sourceSize, maskSize, nativeSize, requiredMemoryBytes }) => {
+        const metadataFacts = facts(
+            [],
+            [
+                { ...protectedEncoded[0], bytes: 1609923, metadataSize: sourceSize },
+                { ...protectedEncoded[1], bytes: 75934, metadataSize: maskSize },
+                { ...protectedEncoded[2], bytes: 2373075, metadataSize: nativeSize },
+            ],
+        );
+        const estimate = estimateImageProcessingMemory(request("process_result", { mode: "scene_protection", sourceInputIndex: 0, maskInputIndex: 1, results: protectedResults, protection: sceneProtection }, {}, protectedInputs), metadataFacts);
+        expect(estimate).toMatchObject({ profile: "scene_result", status: "calibrated", requiredMemoryBytes });
+        expect(metadataFacts.decodedInputs).toEqual([]);
+    });
+
+    it.each([
         { profile: "ordinary_result", transparentBackground: false, bytes: 73914625, requiredMemoryBytes: 520093696 },
         { profile: "ordinary_transparent_result", transparentBackground: true, bytes: 55600984, requiredMemoryBytes: 661651456 },
     ])("prices $profile using actual encoded bytes and its independent 40MP workspace", ({ profile, transparentBackground, bytes, requiredMemoryBytes }) => {
@@ -376,8 +394,8 @@ describe("measured result workspaces", () => {
         );
         const encodedInputs = [
             { ...encoded, bytes: 8348936, layout: { format: "jpeg", depth: "uchar", channels: 3 } },
-            { inputIndex: 1, assetId: "mask", assetVersion: "mask-v1", sha256: otherHash, bytes: 123341675, layout: { format: "png", depth: "uchar", channels: 4 } },
-            { inputIndex: 2, assetId: "native", assetVersion: "native-v1", sha256: hash, bytes: 12108693, layout: { format: "png", depth: "uchar", channels: 4 } },
+            { inputIndex: 1, assetId: "mask", assetVersion: "mask-v1", sha256: otherHash, bytes: 123341675, layout: { format: "png", depth: "uchar", channels: 4 }, metadataSize: size64 },
+            { inputIndex: 2, assetId: "native", assetVersion: "native-v1", sha256: hash, bytes: 12108693, layout: { format: "png", depth: "uchar", channels: 4 }, metadataSize: size64 },
         ];
         expect(estimateImageProcessingMemory(task, facts([source64], encodedInputs))).toEqual(calibrated("layers_result", 1549795328));
     });
