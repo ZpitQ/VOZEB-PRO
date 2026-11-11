@@ -596,6 +596,104 @@ describe("executeAgentRun backend settings", () => {
             expect(mocks.planEcommerceEdit).toHaveBeenCalledWith(expect.objectContaining({ canvasInput: expect.objectContaining({ baselineSize: { width: 384, height: 216 } }) }), expect.anything(), expect.anything());
         }
     });
+    async function runSelectedScene(options: { multipleModels?: boolean; unsupportedModel?: boolean; skill?: boolean; local?: boolean; complete?: boolean }) {
+        vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "internal");
+        const source = await sharp({ create: { width: 1200, height: 900, channels: 3, background: "#aaa" } })
+            .png()
+            .toBuffer();
+        await setPreparedSourceFixture(source);
+        const configured = structuredClone(ecommerceSettings()) as import("@/lib/auth/store").AuthSettings;
+        if (options.multipleModels) {
+            const first = configured.logicalModels.find((model) => model.id === "image-model")!;
+            const upstreamModel = options.unsupportedModel ? "unsupported-image-model" : "gpt-image-2.5-sunburst";
+            const second = { ...structuredClone(first), id: "image-model-two", name: "Second explicit image model", bindings: first.bindings.map((binding) => ({ ...binding, id: "image-model-two-binding", upstreamModel })) };
+            configured.logicalModels.push(second);
+            configured.systemChannels.find((channel) => channel.id === "image-channel")!.models.push(upstreamModel);
+        }
+        if (options.skill)
+            configured.agentSkills = [
+                {
+                    id: "audit-image-skill",
+                    name: "Audit style",
+                    description: "Audit selected image style",
+                    instructions: "AUDIT_REQUIRED_STYLE_CYAN_PAPER_CUTOUT",
+                    defaultConfig: { count: 2, quality: "high", size: "1024x768" },
+                    enabled: true,
+                    keywords: [],
+                    workspaces: ["image"],
+                },
+            ];
+        mocks.run = runFixture({
+            surface: "chat",
+            projectId: undefined,
+            prompt: "把画面改成冬日阳光，其他内容保持不变",
+            requestedModelIds: options.multipleModels ? ["image-model", "image-model-two"] : ["image-model"],
+            selectedSkillIds: options.skill ? ["audit-image-skill"] : [],
+            referencedAssetIds: ["asset-scene"],
+            generationPreferences: { mode: "image" },
+        });
+        mocks.getCreativeAssetsByIds.mockResolvedValue([{ ...creativeImageAsset("asset-scene", "scene.png", ""), serverUrl: "/api/reference-assets/scene.png", sourceRunId: "upload", width: 1200, height: 900 }]);
+        mocks.getAuthSettings.mockResolvedValue(configured);
+        mocks.analyzeEcommerceReferences.mockResolvedValue(ecommerceSceneAnalysis());
+        mocks.planEcommerceEdit.mockResolvedValue({
+            plan: { ...ecommerceScenePlan(), ...(options.local ? { protection: { scope: "local", protectedObjectIds: [], preserveOutsideMask: true, allowLightingChange: false } } : {}) },
+            modelRole: { logicalRole: "edit_planning", logicalModelId: "planner", channelId: "planner-channel", upstreamModel: "vendor/planner" },
+        });
+        mocks.fetchInternalApi.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (url.endsWith("/api/reference-assets/scene.png")) return new Response(source, { headers: { "content-type": "image/png" } });
+            if (init?.method === "POST" && url.endsWith("/api/image-tasks")) return Response.json({ task: { id: `scene-${JSON.parse(String(init.body)).context.clientRequestId}` } });
+            if (url.includes("/api/image-tasks/scene-"))
+                return Response.json({ task: options.complete ? { status: "success", result: { url: "https://cdn.example.com/scene.png" } } : { status: "running", needsReview: true, reviewReason: "Fixture ends at child task submission" } });
+            throw new Error("unexpected audit request: " + url);
+        });
+        await executeAndReview(mocks.run, "http://localhost", "session=test");
+        expect(mocks.planEcommerceEdit).toHaveBeenCalledOnce();
+        expect(mocks.run?.failure).toBeUndefined();
+    }
+
+    it("executes every explicitly selected model for a scene image reference", async () => {
+        await runSelectedScene({ multipleModels: true });
+        expect(mocks.run?.tasks.map((task) => task.model)).toEqual(["image-model", "image-model-two"]);
+    });
+
+    it("delivers a supported selected model while retaining an unsupported model failure", async () => {
+        await runSelectedScene({ multipleModels: true, unsupportedModel: true, complete: true });
+        expect(mocks.run?.tasks.map((task) => [task.model, task.status])).toEqual([
+            ["image-model", "completed"],
+            ["image-model-two", "failed"],
+        ]);
+        expect(mocks.run?.status).toBe("completed");
+    });
+
+    it("retains Skill count and quality while waiting for local scene selection", async () => {
+        await runSelectedScene({ skill: true, local: true });
+        expect(mocks.run?.tasks[0]).toMatchObject({ status: "needs_review", count: 2, quality: "high" });
+    });
+
+    it("validates each selected model with its own frozen plan before publishing", async () => {
+        await runSelectedScene({ multipleModels: true, complete: true });
+        expect(mocks.run?.tasks.map((task) => task.status)).toEqual(["completed", "completed"]);
+        expect(mocks.checkEcommerceTechnicalResult.mock.calls.map(([input]) => input.plan.modelRoles.generation).sort()).toEqual(["image-model", "image-model-two"]);
+    });
+
+    it("resumes all prepared selected models after interruption before task assembly", async () => {
+        await runSelectedScene({ multipleModels: true });
+        const prepared = structuredClone(mocks.run!);
+        mocks.run = { ...prepared, status: "running", tasks: [], ecommerceSnapshot: prepared.ecommerceGenerations![1].snapshot };
+        mocks.fetchInternalApi.mockClear();
+        await executeAgentRun(mocks.run, "http://localhost", "session=test");
+        expect(mocks.run?.tasks.map((task) => task.model)).toEqual(["image-model", "image-model-two"]);
+        expect(mocks.analyzeEcommerceReferences).toHaveBeenCalledOnce();
+    });
+
+    it("applies selected image Skill instructions and defaults to planning and generation", async () => {
+        await runSelectedScene({ skill: true });
+        expect(mocks.planEcommerceEdit.mock.calls[0][0].planningInput.selectedSkills[0].instructions).toBe("AUDIT_REQUIRED_STYLE_CYAN_PAPER_CUTOUT");
+        const generation = mocks.fetchInternalApi.mock.calls.filter(([url, init]) => init?.method === "POST" && String(url).endsWith("/api/image-tasks")).map(([, init]) => JSON.parse(String(init.body)));
+        expect(generation).toHaveLength(2);
+        expect(generation[0]).toMatchObject({ config: { quality: "high", size: "1024x768" }, prompt: expect.stringContaining("AUDIT_REQUIRED_STYLE_CYAN_PAPER_CUTOUT") });
+    });
+
     beforeEach(() => {
         vi.clearAllMocks();
         vi.stubEnv("ECOMMERCE_GENERATION_ROLLOUT", "off");

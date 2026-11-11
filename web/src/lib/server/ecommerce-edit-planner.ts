@@ -604,6 +604,7 @@ function editPlanningMessages(input: EcommerceEditPlanningRequest, analysis: Eco
             content: JSON.stringify(
                 {
                     userRequest: input.planningInput.userRequest,
+                    ...(input.planningInput.selectedSkills?.length ? { selectedSkills: input.planningInput.selectedSkills } : {}),
                     conversationContext: input.planningInput.conversationContext,
                     sources: input.sources,
                     visualAnalysis: plannerVisualAnalysis(analysis, input.referenceDecision),

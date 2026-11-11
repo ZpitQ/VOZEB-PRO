@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { independentAdvisoryReview, reviewContextDigest, reviewQualityDigest } from "./ecommerce-visual-review-identity";
+import { ecommerceReviewSnapshot, independentAdvisoryReview, reviewContextDigest, reviewQualityDigest } from "./ecommerce-visual-review-identity";
 import { randomUUID } from "node:crypto";
 import { relative, resolve } from "node:path";
 
@@ -150,7 +150,7 @@ export async function hydrateEcommerceTracesFromImageTasks(
                     const rebuilt = buildEcommerceGenerationTrace({
                         runId: run.id,
                         task: parent,
-                        snapshot,
+                        snapshot: ecommerceReviewSnapshot(run, parent.id),
                         imageTaskIds: ids,
                         generationStatus: "completed",
                         finalStatus: "completed",
@@ -193,7 +193,15 @@ function matchesCompletedReviewTrace(run: AgentRun, images: ImageTask[], trace: 
         return false;
     return isDeepStrictEqual(
         trace,
-        buildEcommerceGenerationTrace({ runId: run.id, task, snapshot, imageTaskIds: ids, generationStatus: "completed", finalStatus: "completed", recordedAt: run.timings?.reviewCompletedAt || snapshot.qualityCheck.checkedAt }),
+        buildEcommerceGenerationTrace({
+            runId: run.id,
+            task,
+            snapshot: ecommerceReviewSnapshot(run, task.id),
+            imageTaskIds: ids,
+            generationStatus: "completed",
+            finalStatus: "completed",
+            recordedAt: run.timings?.reviewCompletedAt || snapshot.qualityCheck.checkedAt,
+        }),
     );
 }
 

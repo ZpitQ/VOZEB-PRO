@@ -39,7 +39,7 @@ import { finishGenerationAttempt } from "./generation-attempt";
 import { GENERATION_TASK_RETENTION_MS } from "./generation-task-retention";
 import { enqueueImageEnhancement } from "./image-enhancement-enqueue";
 import { imageEnhancementExclusion } from "./image-enhancement-plan";
-import { canWaitForImageResultRun, fileImageResultRun, imageResultRunBinding, imageResultRunMatches, readImageResultRun, type ImageResultRun } from "./image-task-result-run";
+import { canWaitForImageResultRun, ecommerceRunForImage, fileImageResultRun, imageResultRunBinding, imageResultRunMatches, readImageResultRun, type ImageResultRun } from "./image-task-result-run";
 import { generationTaskNextPollAt, releaseGenerationTaskLease } from "./generation-task-scheduler";
 import {
     usesImageTaskResultProcessing,
@@ -129,6 +129,7 @@ export type CompletedImageResultTechnicalEvidence = CompletedResultTechnicalFact
 
 // Completed results keep their original receipt and files; active leases and execution epochs no longer authorize this read.
 export async function readCompletedImageTaskResult(run: AgentRun, observed: ImageTask, resultId: string): Promise<CompletedImageResultTechnicalEvidence | undefined> {
+    run = ecommerceRunForImage(run, observed);
     const localScene = observed.sceneProtection || observed.ecommerceExecution?.protection?.scope === "local" || (run.ecommerceSnapshot?.plan?.operation === "scene_edit" && run.ecommerceSnapshot.plan.protection?.scope === "local");
     const productResult =
         (resolveResultSize(observed.config.quality, "1:1") !== resolveResultSize("4k", "1:1") || !observed.enhancementDelivery) &&
@@ -176,7 +177,7 @@ export async function readCompletedImageTaskResult(run: AgentRun, observed: Imag
     const parent = records.find((record) => record.type === "agent" && record.id === run.id);
     if (!original || !stage || !parent) throw new ImageProcessingInputError("技术验收缺少原图片、Run或已完成结果阶段", 404);
     const image = original.payload as ImageTask;
-    const currentRun = parent.payload as AgentRun;
+    const currentRun = ecommerceRunForImage(parent.payload as AgentRun, image);
     const payload = stage.payload as ImageProcessingPayload;
     if (
         original.status !== "success" ||

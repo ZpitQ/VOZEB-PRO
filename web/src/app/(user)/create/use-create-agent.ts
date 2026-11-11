@@ -30,6 +30,7 @@ import { createConversationIdFromSearch, latestResumableAgentRun } from "./creat
 import { getCreateDraftAttachment, useCreateDraftAttachmentsStore } from "./use-create-draft-attachments-store";
 
 type PendingCreateSubmission = {
+    cancellation: { requested: boolean };
     clientRequestId: string;
     generation: number;
     conversationId?: string;
@@ -58,6 +59,7 @@ export function useCreateAgent() {
     const conversationGenerationRef = useRef(0);
     const activeConversationRef = useRef<string | undefined>(undefined);
     const submittingRef = useRef(false);
+    const pendingSubmissionRef = useRef<PendingCreateSubmission["cancellation"] | undefined>(undefined);
     const failedSubmissionsRef = useRef(new Map<string, PendingCreateSubmission>());
     const refreshRequestRef = useRef(0);
     const assetRefreshRequestRef = useRef(0);
@@ -78,14 +80,14 @@ export function useCreateAgent() {
     const [projectLinks, setProjectLinks] = useState<Record<string, MaterializedCreativeProject>>({});
     const [projectErrors, setProjectErrors] = useState<Record<string, string>>({});
     const [materializingProjectId, setMaterializingProjectId] = useState<string>();
-    const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
+    const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>(() => useCreateDraftAttachmentsStore.getState().attachments.map((item) => item.asset.id));
     const [uploading, setUploading] = useState(false);
     const draftAttachments = useCreateDraftAttachmentsStore((state) => state.attachments);
     const addDraftAttachments = useCreateDraftAttachmentsStore((state) => state.add);
     const removeDraftAttachments = useCreateDraftAttachmentsStore((state) => state.remove);
     const clearDraftAttachments = useCreateDraftAttachmentsStore((state) => state.clear);
     const allAssets = useMemo(() => [...assets, ...draftAttachments.map((item) => item.asset)], [assets, draftAttachments]);
-    const selectedAssetIdsWithDrafts = useMemo(() => Array.from(new Set([...selectedAssetIds, ...draftAttachments.map((item) => item.asset.id)])), [draftAttachments, selectedAssetIds]);
+    const selectedAssetIdsWithDrafts = selectedAssetIds;
 
     const stopWatching = useCallback(() => {
         streamRef.current?.();
@@ -142,7 +144,6 @@ export function useCreateAgent() {
         setHasOlderMessages(Boolean(nextMessages[0] && nextMessages[0].sequence > 1));
         if (assetRequestId === assetRefreshRequestRef.current) {
             setAssets(nextAssets);
-            setSelectedAssetIds([]);
         }
         setRunDetails(Object.fromEntries(runs.filter((run): run is CreativeAgentRun => Boolean(run && run.conversationId === id)).map((run) => [run.id, run])));
         const handoffs = nextMessages
@@ -182,12 +183,16 @@ export function useCreateAgent() {
         try {
             const older = await listCreativeMessages(id, firstSequence, MESSAGE_PAGE_SIZE);
             if (!isCurrentConversation(id, generation)) return;
+            const runIds = Array.from(new Set(older.flatMap((item) => (item.runId && !runDetails[item.runId] ? [item.runId] : []))));
+            const runs = await Promise.all(runIds.map(getCreativeAgentRun));
+            if (!isCurrentConversation(id, generation)) return;
+            setRunDetails((current) => ({ ...current, ...Object.fromEntries(runs.map((run) => [run.id, run])) }));
             setMessages((current) => uniqueMessages([...older, ...current]));
             setHasOlderMessages(Boolean(older[0] && older[0].sequence > 1));
         } finally {
             if (isCurrentConversation(id, generation)) setOlderMessagesLoading(false);
         }
-    }, [hasOlderMessages, isCurrentConversation, messages, olderMessagesLoading]);
+    }, [hasOlderMessages, isCurrentConversation, messages, olderMessagesLoading, runDetails]);
 
     const newConversation = useCallback(() => {
         stopWatching();
@@ -292,7 +297,9 @@ export function useCreateAgent() {
     const uploadAttachments = useCallback(
         async (files: File[]) => {
             if (!files.length) return [];
-            return addDraftAttachments(files, activeConversationRef.current || "");
+            const additions = addDraftAttachments(files, activeConversationRef.current || "");
+            setSelectedAssetIds((current) => [...current, ...additions.map((asset) => asset.id)]);
+            return additions;
         },
         [addDraftAttachments],
     );
@@ -314,7 +321,7 @@ export function useCreateAgent() {
                 if (isCurrentConversation(materializedConversationId, generation) && replacements.size) {
                     const uploadedAssets = Array.from(replacements.values());
                     setAssets((current) => [...current, ...uploadedAssets.filter((asset) => !current.some((item) => item.id === asset.id))]);
-                    setSelectedAssetIds((current) => Array.from(new Set([...current, ...uploadedAssets.map((asset) => asset.id)])));
+                    setSelectedAssetIds((current) => current.map((id) => replacements.get(id)?.id || id));
                     removeDraftAttachments(replacements.keys());
                 }
                 if (isCurrentConversation(materializedConversationId, generation)) setUploading(false);
@@ -411,6 +418,7 @@ export function useCreateAgent() {
 
     const executeSubmission = useCallback(
         async (snapshot: PendingCreateSubmission) => {
+            let acceptedRun: CreativeAgentRun | undefined;
             try {
                 const created = await createCreativeAgentRun({
                     clientRequestId: snapshot.clientRequestId,
@@ -423,11 +431,23 @@ export function useCreateAgent() {
                     modelIds: snapshot.modelIds,
                     preferences: snapshot.preferences,
                 });
-                const run = created.run;
+                acceptedRun = created.run;
+                let cancellationError: unknown;
+                if (snapshot.cancellation.requested) {
+                    try {
+                        acceptedRun = (await controlCreativeAgentRun(acceptedRun.id, "cancel", acceptedRun.conversationId)).run;
+                    } catch (error) {
+                        cancellationError = error;
+                    }
+                }
+                const run = acceptedRun;
                 void refreshConversations();
                 const belongsToSubmission = !snapshot.conversationId || snapshot.conversationId === run.conversationId;
                 const canClaimCurrentView = snapshot.generation === conversationGenerationRef.current && belongsToSubmission && (!activeConversationRef.current || activeConversationRef.current === run.conversationId);
-                if (!canClaimCurrentView) return true;
+                if (!canClaimCurrentView) {
+                    if (cancellationError) throw cancellationError;
+                    return true;
+                }
                 failedSubmissionsRef.current.delete(snapshot.temporaryAssistantId);
                 activeConversationRef.current = run.conversationId;
                 setConversationId(run.conversationId);
@@ -440,14 +460,18 @@ export function useCreateAgent() {
                     }),
                 );
                 watchRun(run, run.assistantMessageId, snapshot.generation);
+                if (cancellationError) throw cancellationError;
                 return true;
             } catch (error) {
+                if (acceptedRun) throw error;
                 if (!isCurrentConversation(snapshot.conversationId, snapshot.generation)) return false;
                 failedSubmissionsRef.current.set(snapshot.temporaryAssistantId, snapshot);
                 updateAssistant(snapshot.temporaryAssistantId, error instanceof Error ? error.message : "创作请求失败", "failed");
                 setSending(false);
                 submittingRef.current = false;
                 return false;
+            } finally {
+                if (pendingSubmissionRef.current === snapshot.cancellation) pendingSubmissionRef.current = undefined;
             }
         },
         [isCurrentConversation, refreshConversations, updateAssistant, watchRun],
@@ -459,6 +483,8 @@ export function useCreateAgent() {
             const content = (options?.publicPrompt || prompt).trim();
             if (!executionPrompt || !content || sending || submittingRef.current) return false;
             submittingRef.current = true;
+            const cancellation = { requested: false };
+            pendingSubmissionRef.current = cancellation;
             const generation = conversationGenerationRef.current;
             const submissionConversationId = activeConversationRef.current;
             stopWatching();
@@ -468,11 +494,20 @@ export function useCreateAgent() {
             try {
                 prepared = await materializeDraftAttachments(selectedIds, generation, submissionConversationId);
             } catch (error) {
+                if (pendingSubmissionRef.current === cancellation) pendingSubmissionRef.current = undefined;
                 if (generation === conversationGenerationRef.current) {
                     setSending(false);
                     submittingRef.current = false;
                 }
                 throw error;
+            }
+            if (cancellation.requested) {
+                if (isCurrentConversation(prepared.conversationId || submissionConversationId, generation)) {
+                    setSending(false);
+                    submittingRef.current = false;
+                }
+                if (pendingSubmissionRef.current === cancellation) pendingSubmissionRef.current = undefined;
+                return false;
             }
             const now = Date.now();
             const sequence = messages.reduce((max, item) => Math.max(max, item.sequence), 0) + 1;
@@ -483,6 +518,7 @@ export function useCreateAgent() {
             const assetIds = prepared.assetIds;
             const preferences = remapDraftAssetIds(options?.preferences, prepared.replacements);
             const snapshot: PendingCreateSubmission = {
+                cancellation,
                 clientRequestId: `create-${nanoid()}`,
                 generation,
                 conversationId: submittedConversationId,
@@ -524,6 +560,8 @@ export function useCreateAgent() {
             const snapshot = failedSubmissionsRef.current.get(assistantMessageId);
             if (!snapshot || sending || submittingRef.current || !isCurrentConversation(snapshot.conversationId, snapshot.generation)) return false;
             submittingRef.current = true;
+            snapshot.cancellation.requested = false;
+            pendingSubmissionRef.current = snapshot.cancellation;
             stopWatching();
             setSending(true);
             updateAssistant(assistantMessageId, "正在重新提交创作请求", "running");
@@ -533,6 +571,10 @@ export function useCreateAgent() {
     );
 
     const cancel = useCallback(async () => {
+        if (pendingSubmissionRef.current) {
+            pendingSubmissionRef.current.requested = true;
+            return;
+        }
         const expectedConversationId = activeConversationRef.current;
         if (!activeRunId || !expectedConversationId) return;
         await controlCreativeAgentRun(activeRunId, "cancel", expectedConversationId);
@@ -727,7 +769,7 @@ export function useCreateAgent() {
         materializingProjectId,
         materializeProject,
         selectedAssetIds: selectedAssetIdsWithDrafts,
-        selectedAssets: allAssets.filter((asset) => selectedAssetIdsWithDrafts.includes(asset.id)),
+        selectedAssets: selectedAssetIdsWithDrafts.flatMap((id) => allAssets.find((asset) => asset.id === id) || []),
         toggleAsset: (id: string) => setSelectedAssetIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id])),
         selectAsset: (id: string) => setSelectedAssetIds((current) => (current.includes(id) ? current : [...current, id])),
         uploading,

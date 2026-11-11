@@ -9,7 +9,7 @@ import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
 import { buildWhiteBackgroundProductMaskPixels, EcommerceProductSegmentationError } from "../image-processing/core";
 import { buildLocalEditMask } from "../image-processing/protection-masks";
 
-import { ecommerceCanvasSize, validateEcommerceDimensions, type EcommerceCanvasInput, type EcommerceDimensions, type EcommerceEditPlan } from "./ecommerce-edit-plan";
+import { ecommerceCanvasSize, ecommerceImagePreferences, validateEcommerceDimensions, type EcommerceCanvasInput, type EcommerceDimensions, type EcommerceEditPlan } from "./ecommerce-edit-plan";
 import { normalizeGeneratedImageBytes } from "./generated-image-normalizer";
 import { ECOMMERCE_IMAGE_MAX_INPUT_PIXELS } from "./ecommerce-vision-image";
 import type { EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
@@ -246,9 +246,9 @@ export function createEcommerceProductSceneTask(
     }));
     assertCompiledReferences(references, ecommerceExecution);
     const userPrompt = run.prompt.trim();
-    const preferences = run.generationPreferences?.image;
+    const preferences = ecommerceImagePreferences(plan, run.generationPreferences?.image);
     return {
-        id: "ecommerce-product-scene",
+        id: plan.taskId || "ecommerce-product-scene",
         referenceAssetId: product.id,
         referenceUrl: references[0].url,
         referenceType: "image",
@@ -317,9 +317,9 @@ export function createEcommerceLocalEditTask(
     ];
     assertCompiledReferences(references, ecommerceExecution);
     const userPrompt = run.prompt.trim();
-    const preferences = run.generationPreferences?.image;
+    const preferences = ecommerceImagePreferences(plan, run.generationPreferences?.image);
     return {
-        id: "ecommerce-local-edit",
+        id: plan.taskId || "ecommerce-local-edit",
         referenceAssetId: scene.id,
         referenceUrl: references[0].url,
         referenceType: "image",
@@ -374,9 +374,9 @@ export function createEcommerceSceneEditTask(
         })),
     ];
     assertCompiledReferences(references, ecommerceExecution);
-    const preferences = run.generationPreferences?.image;
+    const preferences = ecommerceImagePreferences(plan, run.generationPreferences?.image);
     return {
-        id: "ecommerce-scene-edit",
+        id: plan.taskId || "ecommerce-scene-edit",
         referenceAssetId: scene.id,
         referenceUrl: sceneUrl,
         referenceType: "image",

@@ -1,6 +1,8 @@
 import type { CreativeAsset, CreativeConversationContext, CreativeSurface } from "@/lib/creative-runtime-contract";
 import { typedReferenceAliases } from "@/lib/creative-asset-references";
 import type { AgentRun } from "./agent-run-store";
+import type { AgentRunSkillSnapshot } from "./agent-run-audit";
+
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import type { EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 import type { EcommerceQualityCheck, EcommerceResultTechnicalCheck } from "./ecommerce-quality-check";
@@ -14,6 +16,13 @@ import type { ImageProcessingRectangle } from "../image-processing/contracts";
 
 export const ECOMMERCE_GENERATION_SNAPSHOT_VERSION = "ecommerce-generation.v1" as const;
 
+export function ecommerceRunForTask(run: AgentRun, taskId: string): AgentRun {
+    if (!run.ecommerceGenerations) return run;
+    const generation = run.ecommerceGenerations.find((item) => item.task?.id === taskId);
+    if (!generation) throw new Error("任务未绑定本轮所选模型的执行快照");
+    return { ...run, ecommerceSnapshot: generation.snapshot };
+}
+
 export type EcommercePlanningAssetCandidate = {
     id: string;
     type: CreativeAsset["type"];
@@ -24,6 +33,7 @@ export type EcommercePlanningAssetCandidate = {
 };
 
 export type EcommercePlanningInput = {
+    selectedSkills?: AgentRunSkillSnapshot[];
     userRequest: string;
     conversationId: string;
     surface: CreativeSurface;
@@ -147,6 +157,7 @@ export function buildEcommercePlanningInput(
     run: Pick<AgentRun, "prompt" | "conversationId" | "surface" | "referencedAssetIds"> & Partial<Pick<AgentRun, "userId">>,
     assets: CreativeAsset[],
     conversationContext: Pick<CreativeConversationContext, "summary" | "recentMessages">,
+    selectedSkills: AgentRunSkillSnapshot[] = [],
 ): EcommercePlanningInput {
     const assetsById = new Map(assets.filter((asset) => asset.status === "ready" && asset.conversationId === run.conversationId && (!run.userId || asset.userId === run.userId)).map((asset) => [asset.id, asset]));
     const availableAssets = [...assetsById.values()];
@@ -154,6 +165,7 @@ export function buildEcommercePlanningInput(
     const orderedAssets = [...referenceIds.map((id) => assetsById.get(id)!), ...availableAssets.filter((asset) => !referenceIds.includes(asset.id))];
     const referenceAliases = [...typedReferenceAliases(availableAssets, referenceIds)].map(([assetId, alias]) => ({ assetId, alias }));
     return {
+        ...(selectedSkills.length ? { selectedSkills: structuredClone(selectedSkills) } : {}),
         userRequest: run.prompt,
         conversationId: run.conversationId,
         surface: run.surface,

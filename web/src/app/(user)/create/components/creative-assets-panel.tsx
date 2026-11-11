@@ -52,10 +52,16 @@ export function CreativeAssetsPanel({
     const [libraryPromptKeyword, setLibraryPromptKeyword] = useState("");
     const [preview, setPreview] = useState<PanelPreview>();
     const inFlightRef = useRef(new Set<string>());
+    const promptGenerationRef = useRef({ my: 0, library: 0 });
+    const resetPrompts = (kind: "my" | "library") => {
+        promptGenerationRef.current[kind] += 1;
+        (kind === "my" ? setMyPrompts : setLibraryPrompts)(resetPromptCollection);
+    };
     const mediaAssets = assets.filter((asset) => asset.status === "ready" && (asset.type === "image" || asset.type === "video"));
 
     const loadPromptPage = useCallback(async (kind: "my" | "library", page: number, category: string, keyword: string) => {
-        const requestKey = `${kind}:${category}:${keyword}:${page}`;
+        const generation = promptGenerationRef.current[kind];
+        const requestKey = `${kind}:${generation}:${category}:${keyword}:${page}`;
         if (inFlightRef.current.has(requestKey)) return;
         inFlightRef.current.add(requestKey);
         const setCollection = kind === "my" ? setMyPrompts : setLibraryPrompts;
@@ -63,6 +69,7 @@ export function CreativeAssetsPanel({
         try {
             const includeFacets = page === 1;
             const payload = kind === "my" ? await listMyPrompts({ page, category, keyword, includeFacets }) : await fetchPrompts({ page, category, keyword, includeFacets });
+            if (generation !== promptGenerationRef.current[kind]) return;
             setCollection((current) => ({
                 items: page === 1 ? payload.items : uniquePrompts([...current.items, ...payload.items]),
                 page,
@@ -73,6 +80,7 @@ export function CreativeAssetsPanel({
                 error: "",
             }));
         } catch (error) {
+            if (generation !== promptGenerationRef.current[kind]) return;
             setCollection((current) => ({ ...current, loading: false, loaded: true, error: error instanceof Error ? error.message : "提示词加载失败" }));
         } finally {
             inFlightRef.current.delete(requestKey);
@@ -118,11 +126,11 @@ export function CreativeAssetsPanel({
                                     keyword={myPromptKeyword}
                                     onSearch={(keyword) => {
                                         setMyPromptKeyword(keyword);
-                                        setMyPrompts(resetPromptCollection);
+                                        resetPrompts("my");
                                     }}
                                     onCategoryChange={(category) => {
                                         setMyPromptCategory(category);
-                                        setMyPrompts(resetPromptCollection);
+                                        resetPrompts("my");
                                     }}
                                     onPreview={setPreview}
                                     onUse={onUsePrompt}
@@ -141,11 +149,11 @@ export function CreativeAssetsPanel({
                                     keyword={libraryPromptKeyword}
                                     onSearch={(keyword) => {
                                         setLibraryPromptKeyword(keyword);
-                                        setLibraryPrompts(resetPromptCollection);
+                                        resetPrompts("library");
                                     }}
                                     onCategoryChange={(category) => {
                                         setLibraryPromptCategory(category);
-                                        setLibraryPrompts(resetPromptCollection);
+                                        resetPrompts("library");
                                     }}
                                     onPreview={setPreview}
                                     onUse={onUsePrompt}

@@ -6,9 +6,17 @@ import { originalImageSourceUrl } from "@/lib/media-image-url";
 import type { ImageTask } from "./image-task-store";
 import { isNativeGlobalSceneImageTaskResult, isNativeProductImageTaskResult, isNativeSceneImageTaskResult, usesImageTaskResultProcessing } from "./image-task-result-contract";
 import { compileStrictProductEdit } from "./ecommerce-product-regions";
+import { ecommerceRunForTask } from "./ecommerce-generation-snapshot";
 
 export type ImageResultRunBinding = { runId: string; agentTaskId: string; agentAttempt: number };
 export type ImageResultRun = Pick<StoredGenerationTaskRecord, "id" | "userId" | "status" | "expiresAt" | "conversationId" | "surface" | "projectId"> & { payload: AgentRun };
+
+export function ecommerceRunForImage(run: AgentRun, image: ImageTask): AgentRun {
+    if (!run.ecommerceGenerations) return run;
+    const task = run.tasks.find((item) => item.childTasks?.some((child) => child.id === image.id) || (image.referenceDispatch && image.clientRequestId === `${run.clientRequestId}:${item.id}:${item.attempts}:${image.referenceDispatch.copy}`));
+    if (!task) throw new Error("图片未绑定本轮所选模型的执行快照");
+    return { ...ecommerceRunForTask(run, task.id), tasks: [task] };
+}
 
 export async function readImageResultRun(runId: string | undefined, executor?: QueryExecutor, lock = false): Promise<ImageResultRun | undefined> {
     if (!runId) return;

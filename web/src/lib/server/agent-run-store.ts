@@ -19,7 +19,7 @@ import { AGENT_REQUEST_SCHEMA } from "./agent-prompt-json";
 import { normalizeAgentRunCanvasSnapshot, selectedCanvasNodeIds } from "./agent-run-canvas-snapshot";
 import { getDramaProject } from "./drama-project-store";
 import { getCanvasProject } from "./canvas-project-store";
-import { ECOMMERCE_GENERATION_SNAPSHOT_VERSION, type EcommerceGenerationSnapshotRecord } from "./ecommerce-generation-snapshot";
+import { ECOMMERCE_GENERATION_SNAPSHOT_VERSION, ecommerceRunForTask, type EcommerceGenerationSnapshotRecord } from "./ecommerce-generation-snapshot";
 import { toSafeGenerationErrorMessage } from "./generation-errors";
 import { getEnhancementJob } from "./database/image-enhancement-job-repository";
 import type { ImageTask } from "./image-task-store";
@@ -119,6 +119,7 @@ export type AgentRun = {
     plannerStreamFallbackReason?: string;
     plannerAudit?: AgentRunPlannerAudit;
     ecommerceSnapshot?: EcommerceGenerationSnapshotRecord;
+    ecommerceGenerations?: Array<{ snapshot: EcommerceGenerationSnapshotRecord; task?: AgentRunTask }>;
     cancellation?: AgentRunCancellation;
     failure?: string;
     failureStage?: AgentRunFailureStage;
@@ -267,12 +268,14 @@ export async function selectCurrentSceneBaseline(conversationId: string, explici
         const parentRun = await getAgentRun(selected.sourceRunId);
         if (!parentRun || parentRun.userId !== userId || parentRun.conversationId !== conversationId || parentRun.surface !== "chat" || parentRun.status !== "completed") return null;
         if (!parentRun.assetIds.includes(selected.id) || selected.metadata.provenance === "ai_enhanced") return publishedEnhancementBaseline(selected, parentRun);
-        if (parentRun.ecommerceSnapshot) return validBaselineQuality(parentRun, true) && (await hasEcommerceResultLineage(selected, parentRun)) ? baselineWithEvidence(selected, parentRun) : null;
+        const baselineRun = ecommerceBaselineRun(parentRun, selected);
+        if (!baselineRun) return null;
+        if (baselineRun.ecommerceSnapshot) return validBaselineQuality(baselineRun, true) && (await hasEcommerceResultLineage(selected, baselineRun)) ? baselineWithEvidence(selected, baselineRun) : null;
         return (await savedNativeResult(selected, parentRun)) ? baselineWithEvidence(selected, parentRun, selected.id) : null;
     }
 
     const runs = (await listAgentRuns({ userId, conversationId, surface: "chat", statuses: ["completed"], limit: 100 }))
-        .filter((run) => run.status === "completed" && run.userId === userId && run.conversationId === conversationId && validBaselineQuality(run))
+        .filter((run) => run.status === "completed" && run.userId === userId && run.conversationId === conversationId)
         .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id));
     const ids = [...new Set(runs.flatMap((run) => [...run.assetIds].reverse()))];
     if (!ids.length) return null;
@@ -280,11 +283,27 @@ export async function selectCurrentSceneBaseline(conversationId: string, explici
     for (const run of runs) {
         for (const id of [...run.assetIds].reverse()) {
             const asset = byId.get(id);
-            if (asset?.sourceRunId === run.id && asset.userId === userId && asset.conversationId === conversationId && asset.type === "image" && asset.status === "ready" && (await hasEcommerceResultLineage(asset, run)))
-                return baselineWithEvidence(asset, run);
+            const baselineRun = asset && ecommerceBaselineRun(run, asset);
+            if (
+                baselineRun &&
+                validBaselineQuality(baselineRun) &&
+                asset?.sourceRunId === run.id &&
+                asset.userId === userId &&
+                asset.conversationId === conversationId &&
+                asset.type === "image" &&
+                asset.status === "ready" &&
+                (await hasEcommerceResultLineage(asset, baselineRun))
+            )
+                return baselineWithEvidence(asset, baselineRun);
         }
     }
     return null;
+}
+
+function ecommerceBaselineRun(run: AgentRun, asset: CreativeAsset): AgentRun | undefined {
+    if (!run.ecommerceGenerations) return run;
+    const task = run.tasks.find((task) => task.assetIds?.includes(asset.id) || (asset.sourceTaskId && task.taskIds?.includes(asset.sourceTaskId)));
+    return task ? ecommerceRunForTask(run, task.id) : undefined;
 }
 
 function validBaselineQuality(run: AgentRun, explicit = false) {
@@ -439,7 +458,9 @@ async function publishedEnhancementBaseline(asset: CreativeAsset, run: AgentRun)
         )
             return null;
     }
-    if (run.ecommerceSnapshot) return validBaselineQuality(run, true) && (await hasEcommerceResultLineage(parent, run, original.task)) ? baselineWithEvidence(asset, run) : null;
+    const baselineRun = ecommerceBaselineRun(run, parent);
+    if (!baselineRun) return null;
+    if (baselineRun.ecommerceSnapshot) return validBaselineQuality(baselineRun, true) && (await hasEcommerceResultLineage(parent, baselineRun, original.task)) ? baselineWithEvidence(asset, baselineRun) : null;
     return baselineWithEvidence(asset, run, parent.id);
 }
 
@@ -565,6 +586,7 @@ export async function updateAgentRunById(
             | "plannerStreamFallbackReason"
             | "plannerAudit"
             | "ecommerceSnapshot"
+            | "ecommerceGenerations"
             | "cancellation"
             | "failure"
             | "failureStage"
@@ -596,6 +618,10 @@ export async function updateAgentRunById(
             )
                 return null;
             const next = { ...current, ...patch, status: patch.status || current.status };
+            if (patch.ecommerceSnapshot && next.ecommerceGenerations) {
+                const snapshot = patch.ecommerceSnapshot;
+                next.ecommerceGenerations = next.ecommerceGenerations.map((generation) => (generation.snapshot.modelRoles?.generation === snapshot.modelRoles?.generation ? { ...generation, snapshot } : generation));
+            }
             return {
                 run: next,
                 event,

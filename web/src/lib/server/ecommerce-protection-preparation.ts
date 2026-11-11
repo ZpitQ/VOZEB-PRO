@@ -1,6 +1,7 @@
 import { normalizeQuality, resolveEcommerceCanvasRequestSize } from "@/lib/image-generation-size";
 import { parseImageDimensions } from "@/lib/image-size";
 import type { AgentRun, AgentRunTask } from "./agent-run-store";
+import { ecommerceImagePreferences } from "./ecommerce-edit-plan";
 import type { ImageProcessingProtectionOptions } from "../image-processing/contracts";
 import {
     compileConfirmedSceneExecution,
@@ -31,7 +32,7 @@ export async function prepareEcommerceProtectionTask(run: AgentRun, executionId:
     const sourceAssetId = plan.source.currentSceneBaselineId || plan.source.productAnchorId;
     const reference = checkpoint.assets.find((item) => item.asset.id === sourceAssetId);
     if (!reference?.contentSha256 || reference.asset.width === undefined || reference.asset.height === undefined) throw new Error("商品保护缺少已冻结的参考原件身份或尺寸");
-    const parentTaskId = plan.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene";
+    const parentTaskId = plan.taskId || (plan.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene");
     let regions: ProductProtectionRegions | undefined;
     let options: ImageProcessingProtectionOptions;
     if (plan.operation === "local_edit") {
@@ -48,7 +49,7 @@ export async function prepareEcommerceProtectionTask(run: AgentRun, executionId:
         const previous = snapshot.processing?.protection;
         let generationInput = previous?.generationInput;
         if (!previous && ecommerceExecution.mask && route.imageEdit?.protocol === "sub2api") {
-            const quality = (run.generationPreferences?.image?.quality || defaults.imageQuality).trim();
+            const quality = (ecommerceImagePreferences(plan, run.generationPreferences?.image).quality || defaults.imageQuality).trim();
             const bounds = parseImageDimensions(resolveEcommerceCanvasRequestSize(ecommerceExecution.canvas, normalizeQuality(quality), defaults.imageSize) || "");
             if (bounds) generationInput = { bounds, quality };
         }

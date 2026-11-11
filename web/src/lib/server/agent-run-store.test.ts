@@ -30,9 +30,38 @@ vi.mock("./canvas-project-store", () => ({ getCanvasProject: mocks.getCanvasProj
 vi.mock("./database/image-enhancement-job-repository", () => ({ getEnhancementJob: mocks.getEnhancementJob }));
 
 import { createAgentRun, createEditBranch, selectCurrentSceneBaseline, setAgentRunStatus, updateAgentRunById, updateAgentRunTaskById } from "./agent-run-store";
+import { publicAgentRun } from "./agent-run-public";
 
 describe("ecommerce result continuity store", () => {
     beforeEach(() => vi.clearAllMocks());
+
+    it("continues editing a delivered model result when another selected model failed", async () => {
+        const snapshot = { ...passedSnapshot(), mode: "active", qualityPolicy: "disabled", technicalCheck: { status: "passed", checks: [], hardFailures: [] } };
+        const failed = { ...snapshot, technicalCheck: { ...snapshot.technicalCheck, status: "failed" } };
+        const run = {
+            ...canvasRun(),
+            surface: "chat",
+            status: "completed",
+            assetIds: ["delivered-image"],
+            tasks: [
+                { id: "failed", assetIds: [] },
+                { id: "delivered", assetIds: ["delivered-image"] },
+            ],
+            ecommerceSnapshot: failed,
+            ecommerceGenerations: [
+                { snapshot: failed, task: { id: "failed" } },
+                { snapshot, task: { id: "delivered" } },
+            ],
+        } as unknown as AgentRun;
+        const result = { id: "delivered-image", userId: "user", conversationId: "conversation", type: "image", status: "ready", sourceRunId: run.id, parentAssetId: "product", metadata: { ecommerceContinuity: { productAnchorId: "product" } } };
+        const sources = [productAsset("product"), result];
+        expect(publicAgentRun(run).assetIds).toEqual(["delivered-image"]);
+        mocks.queryStoredGenerationTasks.mockResolvedValue([run]);
+        mocks.getStoredGenerationTask.mockResolvedValue(run);
+        mocks.getCreativeAssetsByIds.mockImplementation(async (ids: string[]) => sources.filter((asset) => ids.includes(asset.id)));
+        await expect(selectCurrentSceneBaseline("conversation", result.id, "user")).resolves.toMatchObject({ id: result.id });
+        await expect(selectCurrentSceneBaseline("conversation", undefined, "user")).resolves.toMatchObject({ id: result.id });
+    });
 
     it.each(["disabled", "advisory"])("inherits delivered %s results without requiring visual approval", async (qualityPolicy) => {
         const run = {
