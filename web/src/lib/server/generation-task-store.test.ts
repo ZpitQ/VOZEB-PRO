@@ -301,19 +301,19 @@ describe("mutateStoredGenerationTask", () => {
             },
         ];
 
-        await expect(generationCapacityRetryAfterSeconds("user", "image", 60_000)).resolves.toBeGreaterThanOrEqual(3);
-        await expect(generationCapacityRetryAfterSeconds("other", "image", 60_000)).resolves.toBeUndefined();
+        await expect(generationCapacityRetryAfterSeconds("user", "image")).resolves.toBeGreaterThanOrEqual(3);
+        await expect(generationCapacityRetryAfterSeconds("other", "image")).resolves.toBeUndefined();
     });
 
     it("uses one scoped PostgreSQL aggregate for capacity retry timing", async () => {
         vi.mocked(getDatabaseProvider).mockReturnValue("postgres");
         vi.mocked(postgresQuery).mockResolvedValueOnce({ rows: [{ retry_after_seconds: 6 }], command: "SELECT", rowCount: 1, oid: 0, fields: [] });
 
-        await expect(generationCapacityRetryAfterSeconds("user", "video", 60_000)).resolves.toBe(6);
+        await expect(generationCapacityRetryAfterSeconds("user", "video")).resolves.toBe(6);
         const [statement, params] = vi.mocked(postgresQuery).mock.calls[0];
         expect(String(statement)).toContain("MIN(CASE");
         expect(String(statement)).toContain("user_id = $1 AND task_type = $2");
-        expect(params).toEqual(["user", "video", expect.any(Date), expect.any(Array)]);
+        expect(params).toEqual(["user", "video", expect.any(Array)]);
     });
 
     it("restores a safe review reason for a legacy uncertain submission", async () => {

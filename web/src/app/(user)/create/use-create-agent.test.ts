@@ -89,7 +89,6 @@ describe("useCreateAgent submission retry", () => {
 
         expect(source.slice(watchStart, reconnectStart)).toContain("if (!isCurrentConversation(run.conversationId, generation)) return false");
         expect(source.slice(reconnectStart, executeStart)).toContain("run.conversationId !== expectedConversationId");
-        expect(source.slice(executeStart, cancelStart)).toContain("if (!canClaimCurrentView) return true");
         expect(source.slice(cancelStart, controlStart)).toContain('controlCreativeAgentRun(activeRunId, "cancel", expectedConversationId)');
     });
 

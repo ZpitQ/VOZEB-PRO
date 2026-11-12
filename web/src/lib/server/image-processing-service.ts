@@ -16,9 +16,10 @@ import { EnhancementProcessingConflict } from "./image-enhancement-processing-st
 import type { ImageEnhancementJob } from "./database/image-enhancement-job-repository";
 import type { EcommerceVisualReviewCheckpoint, EcommerceVisualReviewSource } from "./ecommerce-generation-snapshot";
 import type { PreparedEcommerceQualityView } from "./ecommerce-quality-check";
-import type { EcommerceGenerationTrace } from "./ecommerce-generation-trace";
-import { independentAdvisoryReview, reviewContextDigest, reviewDigest, reviewQualityDigest, reviewRegionTuple, reviewSourceTuple } from "./ecommerce-visual-review-identity";
-import { fileImageResultRun, imageResultRunMatches, nativeGlobalSceneResultTaskMatches, nativeProductResultTaskMatches, readImageResultRun, type ImageResultRun, type ImageResultRunBinding } from "./image-task-result-run";
+import { buildEcommerceGenerationTrace, type EcommerceGenerationTrace } from "./ecommerce-generation-trace";
+import { ecommerceReviewSnapshot, independentAdvisoryReview, reviewContextDigest, reviewDigest, reviewQualityDigest, reviewRegionTuple, reviewSourceTuple } from "./ecommerce-visual-review-identity";
+import { ecommerceRunForImage, fileImageResultRun, imageResultRunMatches, nativeGlobalSceneResultTaskMatches, nativeProductResultTaskMatches, readImageResultRun, type ImageResultRun, type ImageResultRunBinding } from "./image-task-result-run";
+import { ecommerceImagePreferences } from "./ecommerce-edit-plan";
 import { createHash, randomUUID } from "node:crypto";
 import { normalizeQuality, resolveResultSize, resolveEcommerceCanvasRequestSize, parseImageDimensions } from "@/lib/image-generation-size";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -3516,6 +3517,7 @@ export async function readCompletedEcommerceSceneProtection(run: AgentRun, compl
 }
 
 export async function readCompletedEcommerceGlobalScene(run: AgentRun, image: ImageTask, context: SceneProtectionReadContext) {
+    run = ecommerceRunForImage(run, image);
     const snapshot = run.ecommerceSnapshot;
     const plan = snapshot?.plan;
     const checkpoint = snapshot?.referenceCheckpoint;
@@ -3654,7 +3656,7 @@ async function readCompletedEcommerceLocalProductProtection(run: AgentRun, conte
         run,
         {
             runId: run.id,
-            parentTaskId: "ecommerce-local-edit",
+            parentTaskId: plan.taskId || "ecommerce-local-edit",
             operation: "build_protection",
             algorithmVersion: STRICT_PRODUCT_COMPILER_VERSION,
             inputs: [{ assetId: reference.asset.id, assetVersion: reference.assetVersion, expectedSha256: reference.contentSha256 }],
@@ -3672,7 +3674,7 @@ async function readCompletedEcommerceLocalProductProtection(run: AgentRun, conte
         stage.executionPhase !== "completed" ||
         stage.userId !== run.userId ||
         stage.runId !== run.id ||
-        stage.parentTaskId !== "ecommerce-local-edit" ||
+        stage.parentTaskId !== (plan.taskId || "ecommerce-local-edit") ||
         (!context?.completedResult && stage.expiresAt <= now) ||
         stage.payload.operation !== "build_protection" ||
         stage.payload.version !== "image-processing.v1" ||
@@ -3792,7 +3794,7 @@ export async function readCompletedEcommerceProductProtection(run: AgentRun, con
         run,
         {
             runId: run.id,
-            parentTaskId: "ecommerce-product-scene",
+            parentTaskId: plan.taskId || "ecommerce-product-scene",
             operation: "build_protection",
             algorithmVersion: STRICT_PRODUCT_COMPILER_VERSION,
             inputs: [{ assetId: reference.asset.id, assetVersion: reference.assetVersion, expectedSha256: reference.contentSha256 }],
@@ -3814,7 +3816,7 @@ export async function readCompletedEcommerceProductProtection(run: AgentRun, con
         stage.executionPhase !== "completed" ||
         stage.userId !== run.userId ||
         stage.runId !== run.id ||
-        stage.parentTaskId !== "ecommerce-product-scene" ||
+        stage.parentTaskId !== (plan.taskId || "ecommerce-product-scene") ||
         (!context?.completedResult && stage.expiresAt <= now) ||
         stage.payload.operation !== "build_protection" ||
         stage.payload.version !== "image-processing.v1" ||
@@ -3935,7 +3937,7 @@ function assertGenerationReferenceRequest(run: AgentRun, input: Extract<ImagePro
     const profile = route && resolveEcommerceImageProviderProfile(route);
     const generation = input.options.generationInput;
     const execution = plan && profile && compileEcommerceImageRequest(plan, profile);
-    const expectedParent = plan?.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene";
+    const expectedParent = plan?.taskId || (plan?.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene");
     const previous = snapshot?.processing?.generationReferences?.find((item) => item.parentTaskId === input.parentTaskId && item.assetId === input.inputs[0].assetId);
     if (
         !snapshot ||
@@ -3972,10 +3974,10 @@ export async function prepareEcommerceGenerationReferences(run: AgentRun, execut
     const snapshot = run.ecommerceSnapshot!;
     if (execution.modelSnapshot.imageEdit?.protocol !== "sub2api") return true;
     const previous = snapshot.processing?.generationReferences?.[0]?.generationInput || execution.generationInput;
-    const quality = previous?.quality || (run.generationPreferences?.image?.quality || defaults.imageQuality).trim();
+    const quality = previous?.quality || (ecommerceImagePreferences(snapshot.plan!, run.generationPreferences?.image).quality || defaults.imageQuality).trim();
     const bounds = previous?.bounds || parseImageDimensions(resolveEcommerceCanvasRequestSize(execution.canvas, normalizeQuality(quality), defaults.imageSize) || "");
     if (!bounds) return true;
-    const parentTaskId = snapshot.plan?.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene";
+    const parentTaskId = snapshot.plan?.taskId || (snapshot.plan?.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene");
     for (const role of execution.referenceRoles.slice(1)) {
         const reference = snapshot.referenceCheckpoint!.assets.find((item) => item.asset.id === role.assetId)!;
         if (reference.asset.width! <= bounds.width && reference.asset.height! <= bounds.height) continue;
@@ -4015,9 +4017,11 @@ function assertGenerationInputArtifacts(artifacts: StoredImageProcessingArtifact
 export async function readEcommerceGenerationInput(image: ImageTask, quality: string | undefined, requestSize: string | undefined) {
     const primaryInput = image.ecommerceExecution?.generationInput;
     if (!image.ecommerceExecution || !image.runId) throw new ImageProcessingInputError("生成输入副本缺少冻结执行身份", 409);
-    const run = await getStoredGenerationTask<AgentRun>("agent", image.runId);
+    const storedRun = await getStoredGenerationTask<AgentRun>("agent", image.runId);
     const original = await getStoredGenerationTask<ImageTask>("image", image.id);
-    if (!run || run.userId !== image.userId || run.status !== "running" || run.cancellation || !original || image.references.length !== original.references.length) throw new ImageProcessingInputError("生成输入副本与当前图片任务或父任务不一致", 409);
+    if (!storedRun || storedRun.userId !== image.userId || storedRun.status !== "running" || storedRun.cancellation || !original || image.references.length !== original.references.length)
+        throw new ImageProcessingInputError("生成输入副本与当前图片任务或父任务不一致", 409);
+    const run = ecommerceRunForImage(storedRun, image);
     // The runtime verifies source hashes before replacing only these transport fields.
     const sourceImage = {
         ...image,
@@ -4164,7 +4168,8 @@ export async function readEcommerceGenerationInput(image: ImageTask, quality: st
         references[index] = reference(image.references[index], artifact);
         referenceBytes[index] = artifact.bytes;
     }
-    const currentRun = await getStoredGenerationTask<AgentRun>("agent", run.id);
+    const storedCurrentRun = await getStoredGenerationTask<AgentRun>("agent", run.id);
+    const currentRun = storedCurrentRun && ecommerceRunForImage(storedCurrentRun, image);
     const currentImage = await getStoredGenerationTask<ImageTask>("image", image.id);
     if (!currentRun || generationReferencePlanDigest(currentRun) !== generationReferencePlanDigest(run) || !currentImage || imageTaskResultSourceIdentityDigest(currentImage) !== imageTaskResultSourceIdentityDigest(original))
         throw new ImageProcessingInputError("生成输入读取期间原任务或计划已变化", 409);
@@ -4599,6 +4604,7 @@ export async function readNativeImageResultEvidence(run: ImageResultRun | undefi
 
 async function readNativeGlobalSceneResultEvidence(run: ImageResultRun | undefined, image: ImageTask, payload?: AgentImageProcessingPayload, storage?: QueryExecutor | StoredGenerationTaskRecord[], extraKeys: string[] = []) {
     if (!run || run.id !== image.runId || run.userId !== image.userId || run.payload.id !== run.id || run.payload.userId !== run.userId) throw new ImageProcessingInputError("原生全局场景结果缺少原Run身份", 409);
+    run = { ...run, payload: ecommerceRunForImage(run.payload, image) };
     const executor = storage && !Array.isArray(storage) ? storage : undefined;
     const originalImage = Array.isArray(storage) ? storage.find((item) => item.type === "image" && item.id === image.id) : await getStoredGenerationTaskRecord("image", image.id, executor);
     if (
@@ -4639,6 +4645,7 @@ async function readNativeGlobalSceneResultEvidence(run: ImageResultRun | undefin
 
 async function readNativeProductResultEvidence(run: ImageResultRun | undefined, image: ImageTask, payload?: AgentImageProcessingPayload, storage?: QueryExecutor | StoredGenerationTaskRecord[], extraKeys: string[] = []) {
     if (!run || run.id !== image.runId || run.userId !== image.userId || run.payload.id !== run.id || run.payload.userId !== run.userId) throw new ImageProcessingInputError("原生商品结果缺少原Run身份", 409);
+    run = { ...run, payload: ecommerceRunForImage(run.payload, image) };
     const processing = run.payload.ecommerceSnapshot?.processing;
     const prepareId = processing?.prepareReferences.find((item) => item.assetId === image.productProtection?.sourceAssetId)?.jobId;
     const localProduct = image.productProtection?.maskProvider === "local-edit-target.v1";
@@ -4705,6 +4712,7 @@ async function readNativeProductResultEvidence(run: ImageResultRun | undefined, 
 }
 
 export function assertNativeProductResultSource(run: AgentRun, image: ImageTask, evidence: Awaited<ReturnType<typeof readCompletedEcommerceProductProtection>>) {
+    run = ecommerceRunForImage(run, image);
     const tasks = run.tasks.filter((task) => task.childTasks?.some((child) => child.id === image.id));
     const task = tasks[0];
     const checkpoint = run.ecommerceSnapshot?.referenceCheckpoint;
@@ -4732,6 +4740,7 @@ export function assertNativeProductResultSource(run: AgentRun, image: ImageTask,
 export async function readNativeSceneResultEvidence(run: ImageResultRun | undefined, image: ImageTask | undefined, payload?: AgentImageProcessingPayload, storage?: QueryExecutor | StoredGenerationTaskRecord[], extraKeys: string[] = []) {
     if (!image || !isNativeSceneImageTaskResult(image)) return;
     if (!run || run.id !== image.runId || run.userId !== image.userId || run.payload.id !== run.id || run.payload.userId !== run.userId) throw new ImageProcessingInputError("原生场景结果缺少原Run身份", 409);
+    run = { ...run, payload: ecommerceRunForImage(run.payload, image) };
     const receipt = run.payload.ecommerceSnapshot?.processing?.sceneSelection;
     const buildId = run.payload.ecommerceSnapshot?.processing?.protection?.jobId;
     if (!receipt || !buildId) throw new ImageProcessingInputError("原生场景结果缺少原prepare/build证据", 409);
@@ -5262,7 +5271,7 @@ export async function loadEcommerceReviewViews(run: AgentRun): Promise<PreparedE
     return views;
 }
 
-export async function projectEcommerceReviewTrace(observed: AgentRun, claim: EcommerceReviewClaim, qualityDigest: string, trace: EcommerceGenerationTrace, expectedCurrentContextDigest?: string) {
+export async function projectEcommerceReviewTrace(observed: AgentRun, claim: EcommerceReviewClaim, qualityDigest: string, expectedCurrentContextDigest?: string) {
     return mutateVisualReviewTasks(
         observed.id,
         async (records, _executor, now) => {
@@ -5283,8 +5292,14 @@ export async function projectEcommerceReviewTrace(observed: AgentRun, claim: Eco
                 (!unavailable && currentContext !== checkpoint.contextDigest)
             )
                 throw new ImageProcessingInputError("视觉复核投影身份已变化", 409);
-            const ids = run.tasks[0].taskIds || (run.tasks[0].taskId ? [run.tasks[0].taskId] : []);
-            return { tasks: records.map((item) => (item.type === "image" && ids.includes(item.id) ? { ...item, payload: { ...item.payload, ecommerceTrace: trace }, updatedAt: now } : item)), result: undefined };
+            const traces = new Map<string, EcommerceGenerationTrace>();
+            for (const task of run.tasks.filter((task) => task.status === "completed" && task.ecommerceExecution)) {
+                const ids = task.taskIds || (task.taskId ? [task.taskId] : []);
+                const snapshot = ecommerceReviewSnapshot(run, task.id);
+                const trace = buildEcommerceGenerationTrace({ runId: run.id, task, snapshot, imageTaskIds: ids, generationStatus: "completed", finalStatus: "completed", recordedAt: run.timings?.reviewCompletedAt });
+                for (const id of ids) traces.set(id, trace);
+            }
+            return { tasks: records.map((item) => (item.type === "image" && traces.has(item.id) ? { ...item, payload: { ...item.payload, ecommerceTrace: traces.get(item.id)! }, updatedAt: now } : item)), result: undefined };
         },
         claim,
     );

@@ -37,11 +37,11 @@ export async function runGenerationTaskRecoveryBatch(input: { origin: string; pu
     try {
         const persistence = leases.filter(needsPersistence);
         const queries = leases.filter((lease) => !needsPersistence(lease));
-        const results = [
-            ...(await runWithConcurrency(queries, 20, (lease) => processGenerationTaskLease(lease, workerId, input.origin, input.publicOrigin || input.origin, input.cookie || "", input.userRequested === true))),
-            ...(await runWithConcurrency(persistence, 4, (lease) => processGenerationTaskLease(lease, workerId, input.origin, input.publicOrigin || input.origin, input.cookie || "", input.userRequested === true))),
-        ];
-        return summarize(results);
+        const [queryResults, persistenceResults] = await Promise.all([
+            runWithConcurrency(queries, 20, (lease) => processGenerationTaskLease(lease, workerId, input.origin, input.publicOrigin || input.origin, input.cookie || "", input.userRequested === true)),
+            runWithConcurrency(persistence, 4, (lease) => processGenerationTaskLease(lease, workerId, input.origin, input.publicOrigin || input.origin, input.cookie || "", input.userRequested === true)),
+        ]);
+        return summarize([...queryResults, ...persistenceResults]);
     } finally {
         clearInterval(heartbeat);
     }
@@ -665,22 +665,22 @@ async function processImageLease(lease: GenerationTaskLease, workerId: string, o
 
 async function persistImageLease(task: ImageTask, lease: GenerationTaskLease, workerId: string, origin: string, cookie: string, userRequested: boolean): Promise<RecoveryResult> {
     if (usesImageTaskResultProcessing(task) && (!lease.executionId || task.executionId !== lease.executionId)) return "deferred";
-    if (task.nativeResults) {
-        if (!lease.executionId) return "deferred";
-        const outcome = await ensureImageTaskResultProcessing({ taskId: lease.id, workerId, executionId: lease.executionId });
-        if (outcome.state === "waiting") return "pending";
-        if (outcome.state === "waiting_for_run" || outcome.state === "ownership_lost") return "deferred";
-        const consumed = await consumeCompletedImageTaskResultProcessing({ taskId: lease.id, workerId, executionId: lease.executionId });
-        return consumed.state === "completed" ? "completed" : "deferred";
-    }
     const resultUrl = typeof lease.resultPayload?.url === "string" ? lease.resultPayload.url.trim() : "";
-    if (!resultUrl) {
+    if (!resultUrl && !task.nativeAcquisition && !task.nativeResults) {
         await markImageTaskFailed(task, "图片任务已完成但没有返回图片地址");
         await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "result_url_missing" }, { executionId: lease.executionId });
         return "failed";
     }
     await scheduleGenerationTask("image", task.id, { executionPhase: "persisting", nextPollAt: lease.nextPollAt });
     try {
+        if (task.nativeResults) {
+            if (!lease.executionId) return "deferred";
+            const outcome = await ensureImageTaskResultProcessing({ taskId: lease.id, workerId, executionId: lease.executionId });
+            if (outcome.state === "waiting") return "pending";
+            if (outcome.state === "waiting_for_run" || outcome.state === "ownership_lost") return "deferred";
+            const consumed = await consumeCompletedImageTaskResultProcessing({ taskId: lease.id, workerId, executionId: lease.executionId });
+            return consumed.state === "completed" ? "completed" : "deferred";
+        }
         const completed = await persistImageTaskResult(task, origin, resultUrl, cookie, cookie ? "" : task.userId);
         if (completed?.status === "error") {
             await releaseGenerationTaskLease("image", task.id, workerId, { executionPhase: "completed", nextPollAt: undefined, lastUpstreamStatus: "transparent_output_invalid" }, { executionId: lease.executionId });
@@ -694,7 +694,8 @@ async function persistImageLease(task: ImageTask, lease: GenerationTaskLease, wo
         const count = errorCount(lease.lastUpstreamStatus) + 1;
         const now = Date.now();
         const persistenceStartedAt = persistenceRecoveryStartedAt(lease, now);
-        if (persistenceWindowExpired(lease, task.config, "image", now, userRequested)) {
+        const latest = await getImageTask(task.id);
+        if ((userRequested && (latest?.nativeAcquisition || latest?.nativeResults)) || persistenceWindowExpired(lease, task.config, "image", now, userRequested)) {
             await releaseGenerationTaskLease(
                 "image",
                 task.id,
@@ -703,7 +704,10 @@ async function persistImageLease(task: ImageTask, lease: GenerationTaskLease, wo
                     executionPhase: "needs_review",
                     nextPollAt: undefined,
                     lastUpstreamStatus: "persist_window_elapsed",
-                    resultPayload: reviewPayload({ ...lease, resultPayload: { ...lease.resultPayload, persistenceStartedAt } }, persistenceWindowReviewReason("图片")),
+                    resultPayload: reviewPayload(
+                        { ...lease, resultPayload: { ...lease.resultPayload, persistenceStartedAt } },
+                        latest?.nativeAcquisition ? "图片原件暂时无法读取，请再次点击“检查状态”继续原结果保存" : persistenceWindowReviewReason("图片"),
+                    ),
                 },
                 { executionId: lease.executionId },
             );

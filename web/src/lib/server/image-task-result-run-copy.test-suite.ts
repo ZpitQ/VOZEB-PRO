@@ -2072,6 +2072,27 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
             step: Extract<Awaited<ReturnType<typeof runtime.queryImageTaskUpstreamStep>>, { state: "result_ready" }>;
         };
 
+        it("reads a selected model result from its own persisted protection snapshot", async () => {
+            await withNativeScenePrefix(async (fixture) => {
+                const snapshot = fixture.dispatched.ecommerceSnapshot!;
+                const other = { ...snapshot, modelRoles: { ...snapshot.modelRoles!, generation: "other-model" }, processing: { version: snapshot.processing!.version, prepareReferences: [] } };
+                const otherTask = { ...fixture.task, id: "other-task", model: "other-model", taskId: undefined, taskIds: [], childTasks: [] };
+                await runs.updateAgentRunById(fixture.dispatched.id, {
+                    tasks: [otherTask, fixture.task],
+                    ecommerceGenerations: [
+                        { snapshot: other, task: otherTask },
+                        { snapshot, task: fixture.task },
+                    ],
+                    ecommerceSnapshot: other,
+                });
+                const { readImageResultRun } = await import("./image-task-result-run");
+                const parent = await readImageResultRun(fixture.dispatched.id);
+                assert.ok(parent);
+                const evidence = await service.readNativeSceneResultEvidence(parent, fixture.sealed);
+                expect(evidence?.sceneProtection).toStrictEqual(fixture.task.sceneProtection);
+            });
+        }, 120_000);
+
         async function withNativeScenePrefix(action: (fixture: NativeScenePrefix) => Promise<void>) {
             const route = await configureNativeScenePlanning();
             const conversation = await creative.createConversationForUser(userId, { surface: "chat", title: "Native prepared scene Run copies" });

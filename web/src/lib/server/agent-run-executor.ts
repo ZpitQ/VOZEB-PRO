@@ -23,11 +23,11 @@ import { createEcommerceSceneEditTask, ecommerceCanvasInputFromRequest, ecommerc
 import { prepareEcommerceReferences, verifyPreparedEcommerceReferenceSource, type PreparedEcommerceReference } from "./ecommerce-reference-preparation";
 import { prepareEcommerceProtectionTask, prepareEcommerceSceneProtectionTask } from "./ecommerce-protection-preparation";
 import { planEcommerceEdit, resolveLocalEditTarget, unsupportedEcommerceProductEditMessage } from "./ecommerce-edit-planner";
-import { ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_VERSION, resolveEcommerceCanvasConstraint } from "./ecommerce-edit-plan";
+import { ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_VERSION, ecommerceImagePreferences, resolveEcommerceCanvasConstraint } from "./ecommerce-edit-plan";
 import { classifyReferenceRoles, resolveDualBaseline, resolveSourcesFromEcommerceReferenceDecision, toLegacyEcommerceVisualAnalysis, type EcommerceSources } from "./ecommerce-reference-roles";
 import { analyzeEcommerceReferences, EcommerceVisualAnalysisError, type EcommerceVisualAnalysis, type EcommerceVisualAnalysisV4 } from "./ecommerce-visual-analysis";
 import { ecommerceReferenceReviewMessage, resolveEcommerceReferenceDecision } from "./ecommerce-reference-purpose";
-import { compileEcommerceImageCandidates, type EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
+import { compileEcommerceImageCandidates, compileEcommerceImageRequest, resolveEcommerceImageProviderProfile, type EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
 import { resolveEcommerceRoleCandidates, type EcommerceRoleCandidate } from "./ecommerce-model-routing";
 import { validateAgentPlanRequestedModels } from "./agent-run-validation";
 import { createEcommerceReferenceCheckpoint, referenceSourcesLoaded, REFERENCE_CHECKPOINT_REASONS, EcommerceReferenceSourceChangedError, EcommerceReferenceSourceReadError, type EcommerceReferenceCheckpoint } from "./ecommerce-reference-recovery";
@@ -63,6 +63,11 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
         if (!claimed) return;
         const frozenPlan = claimed.ecommerceSnapshot;
         if (frozenPlan?.processing?.waitingFor) return;
+        if (claimed.ecommerceGenerations && claimed.ecommerceGenerations.some((generation) => !generation.task || !claimed.tasks.some((task) => task.id === generation.task!.id))) {
+            failureStage = "task_execution";
+            await prepareEcommerceGenerations(claimed, executionId, origin, cookie, await getAuthSettings());
+            return;
+        }
         if (frozenPlan?.processing?.sceneSelection && claimed.tasks.every((task) => !task.sceneProtection)) {
             failureStage = "task_execution";
             const task = await prepareEcommerceSceneProtectionTask(claimed, executionId, origin, cookie);
@@ -78,7 +83,8 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 ))
             )
                 return;
-            await executeTasks(claimed.id, origin, cookie, executionId, await getAuthSettings());
+            const prepared = await getAgentRun(claimed.id);
+            if (prepared) await executeEcommerceTasks(prepared, task, executionId, origin, cookie, await getAuthSettings());
             return;
         }
         if (!claimed.tasks.length && frozenPlan?.mode === "active" && frozenPlan.plan && !frozenPlan.fallback && (frozenPlan.plan.operation === "product_to_scene" || frozenPlan.plan.operation === "local_edit")) {
@@ -167,7 +173,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
         }
         if (referenceContinuation || (ecommerceOrchestrationEnabled && ecommerceGenerationEnabled("internal", claimed, Boolean(continuityResult), requestedModelCapabilities, hasExplicitImageReference))) {
             let planningAssets = referenceContinuation ? referenceContinuation.assets.map((item) => item.asset) : [...ecommerceAssets];
-            let planningInput = referenceContinuation ? structuredClone(referenceContinuation.planningInput) : buildEcommercePlanningInput(claimed, planningAssets, conversationContext);
+            let planningInput = referenceContinuation ? structuredClone(referenceContinuation.planningInput) : buildEcommercePlanningInput(claimed, planningAssets, conversationContext, buildAgentRunPlannerAudit({ mode: "model", skills }).skills);
             let referenceCheckpoint: EcommerceReferenceCheckpoint | undefined = referenceContinuation;
             const processing = claimed.ecommerceSnapshot?.processing;
             let snapshotInput = ecommerceSnapshotInput(planningInput);
@@ -201,6 +207,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             ) => {
                 if (referenceCheckpoint && (REFERENCE_CHECKPOINT_REASONS.has(reason) || reason === "reference_source_changed"))
                     referenceCheckpoint = { ...referenceCheckpoint, state: "needs_review", reviewId: randomUUID(), ...(branchContinuity ? { continuity: branchContinuity } : {}) };
+                const preferences = ecommerceImagePreferences(planningInput, claimed.generationPreferences?.image);
                 const reviewTask = {
                     id: planningEvidence.plan?.operation === "scene_edit" ? "ecommerce-scene-edit" : localEdit ? "ecommerce-local-edit" : "ecommerce-product-scene",
                     title: planningEvidence.plan?.operation === "scene_edit" ? "场景修改" : localEdit ? "商品场景局部修改" : "商品场景图",
@@ -209,9 +216,9 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                     ...(ecommerceExecution ? { ecommerceExecution } : {}),
                     optimizedPrompt: claimed.prompt,
                     prompt: ecommerceExecution?.prompt || claimed.prompt,
-                    count: Math.max(1, claimed.generationPreferences?.image?.count || 1),
-                    ...(claimed.generationPreferences?.image?.size ? { ratio: claimed.generationPreferences.image.size } : {}),
-                    ...(claimed.generationPreferences?.image?.quality ? { quality: claimed.generationPreferences.image.quality } : {}),
+                    count: preferences.count,
+                    ...(preferences.size ? { ratio: preferences.size } : {}),
+                    ...(preferences.quality ? { quality: preferences.quality } : {}),
                     dependencies: [],
                     status: "needs_review" as const,
                     attempts: 0,
@@ -456,7 +463,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 if (!preparedBaseline) throw new EcommerceReferenceSourceChangedError();
                 baseline = preparedBaseline;
                 const baselineSize = baseline.sourceSize;
-                canvasInput = ecommerceCanvasInputFromRequest(claimed.prompt, claimed.generationPreferences?.image?.size, baselineSize);
+                canvasInput = ecommerceCanvasInputFromRequest(claimed.prompt, ecommerceImagePreferences(planningInput, claimed.generationPreferences?.image).size, baselineSize);
             } catch (error) {
                 const sourceChanged = error instanceof EcommerceReferenceSourceChangedError;
                 const sourceUnavailable = error instanceof EcommerceReferenceSourceReadError;
@@ -492,7 +499,12 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             );
             const planningCompletedAt = Date.now();
             const canvas = resolveEcommerceCanvasConstraint({ ...canvasInput, operation: planning.plan.operation });
-            planning.plan = { ...planning.plan, planVersion: purposeDecision ? ECOMMERCE_EDIT_PLAN_V6_VERSION : ECOMMERCE_EDIT_PLAN_VERSION, ...(canvas ? { canvas } : {}) };
+            planning.plan = {
+                ...planning.plan,
+                planVersion: purposeDecision ? ECOMMERCE_EDIT_PLAN_V6_VERSION : ECOMMERCE_EDIT_PLAN_VERSION,
+                ...(canvas ? { canvas } : {}),
+                ...(planningInput.selectedSkills?.length ? { selectedSkills: planningInput.selectedSkills } : {}),
+            };
             if (!(await canContinue(run.id, executionId))) return;
             const editPlanningRouteSnapshot = executedEcommerceRouteSnapshot(editPlanningCandidates, planning.modelRole);
             if (!purposeDecision && planning.plan.operation === "scene_edit" && planning.plan.source.sceneReferenceIds.length) {
@@ -583,7 +595,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             );
             if (!planned) return;
             failureStage = "task_execution";
-            if (task) await executeTasks(run.id, origin, cookie, executionId, settings);
+            if (task) await executeEcommerceTasks(planned, task, executionId, origin, cookie, settings);
             else await executeEcommerceProtection(planned, executionId, origin, cookie, settings);
             return;
         }
@@ -780,8 +792,79 @@ async function executeEcommerceProtection(run: AgentRun, executionId: string, or
     if (!analysis) throw new Error("已保存的商品保护计划缺少视觉事实");
     const task = await prepareEcommerceProtectionTask(run, executionId, toLegacyEcommerceVisualAnalysis(analysis, run.ecommerceSnapshot?.plan?.source.currentSceneBaselineId), settings.generationDefaults);
     if (!task) return;
-    if (!(await updateAgentRunById(run.id, { tasks: [task] }, { type: "ecommerce.progress", data: { stage: "generating_image", text: publicEcommerceProgress("generating_image") } }, ["running"], executionId))) return;
-    await executeTasks(run.id, origin, cookie, executionId, settings);
+    const prepared = await updateAgentRunById(run.id, { tasks: [task] }, { type: "ecommerce.progress", data: { stage: "generating_image", text: publicEcommerceProgress("generating_image") } }, ["running"], executionId);
+    if (prepared) await executeEcommerceTasks(prepared, task, executionId, origin, cookie, settings);
+}
+
+async function executeEcommerceTasks(run: AgentRun, task: import("./agent-run-store").AgentRunTask, executionId: string, origin: string, cookie: string, settings: Awaited<ReturnType<typeof getAuthSettings>>) {
+    if ((run.requestedModelIds?.length || 0) <= 1) return executeTasks(run.id, origin, cookie, executionId, settings);
+    const snapshot = run.ecommerceSnapshot!;
+    const candidates = resolveEcommerceRoleCandidates({ ...settings, ecommerceModelRoles: { image_generation: run.requestedModelIds! } }, "image_generation", "image");
+    const generations: NonNullable<AgentRun["ecommerceGenerations"]> = run.requestedModelIds!.map((model) => {
+        if (model === task.model) return { snapshot, task };
+        const plan = { ...snapshot.plan!, taskId: `${task.id}:${model}`, modelRoles: { ...snapshot.plan!.modelRoles, generation: model } };
+        const modelCandidates = candidates.filter((candidate) => candidate.logicalModelId === model);
+        const compiled = compileEcommerceImageCandidates(plan, modelCandidates);
+        const unsupported = !compiled || compiled.execution.state !== "ready";
+        const processing = snapshot.processing;
+        return {
+            snapshot: {
+                ...snapshot,
+                plan,
+                compilerVersion: compiled?.execution.compilerVersion || snapshot.compilerVersion,
+                modelRoles: { ...snapshot.modelRoles, generation: model },
+                modelRouteSnapshots: { ...snapshot.modelRouteSnapshots, image_generation: compiled?.candidate.snapshot || modelCandidates[0]?.snapshot },
+                processing: processing && { version: processing.version, prepareReferences: processing.prepareReferences, ...(processing.sceneSelection ? { sceneSelection: { ...processing.sceneSelection, parentTaskId: plan.taskId } } : {}) },
+            },
+            ...(unsupported
+                ? { task: { ...task, id: plan.taskId, model, ecommerceExecution: compiled?.execution, status: "failed" as const, error: `所选图片模型 ${model} 不支持本轮编辑所需的执行方式`, taskId: undefined, taskIds: [], childTasks: [], assetIds: [] } }
+                : {}),
+        };
+    });
+    const prepared = await updateAgentRunById(run.id, { ecommerceGenerations: generations }, undefined, ["running"], executionId);
+    if (prepared) await prepareEcommerceGenerations(prepared, executionId, origin, cookie, settings);
+}
+
+async function prepareEcommerceGenerations(run: AgentRun, executionId: string, origin: string, cookie: string, settings: Awaited<ReturnType<typeof getAuthSettings>>) {
+    const generations = run.ecommerceGenerations!;
+    const index = generations.findIndex((generation) => !generation.task);
+    if (index < 0) {
+        const ready = await updateAgentRunById(run.id, { tasks: generations.map((generation) => generation.task!), ecommerceSnapshot: generations.find((generation) => generation.task!.status !== "failed")!.snapshot }, undefined, ["running"], executionId);
+        if (ready) await executeTasks(run.id, origin, cookie, executionId, settings);
+        return;
+    }
+    const generation = generations[index];
+    const profile = resolveEcommerceImageProviderProfile(generation.snapshot.modelRouteSnapshots!.image_generation!);
+    if (!profile) throw new Error("已保存的图片模型不支持本轮编辑");
+    const execution = compileEcommerceImageRequest(generation.snapshot.plan!, profile);
+    if (execution.state !== "ready") throw new Error("已保存的图片模型不支持本轮编辑");
+    if (run.ecommerceSnapshot!.plan!.taskId !== generation.snapshot.plan!.taskId) {
+        const snapshot = generation.snapshot;
+        const plan = snapshot.plan!;
+        const primary = generations.find((item) => item.task)!.task!;
+        const tasks = snapshot.processing?.sceneSelection ? [{ ...primary, id: plan.taskId!, model: plan.modelRoles.generation, prompt: execution.prompt, ecommerceExecution: execution, sceneProtection: undefined, status: "needs_review" as const }] : [];
+        const active = await updateAgentRunById(run.id, { tasks, ecommerceSnapshot: snapshot }, undefined, ["running"], executionId);
+        if (!active) return;
+        run = active;
+    }
+    const snapshot = run.ecommerceSnapshot!;
+    const plan = snapshot.plan!;
+    let task: import("./agent-run-store").AgentRunTask | undefined;
+    if (snapshot.processing?.sceneSelection) task = await prepareEcommerceSceneProtectionTask(run, executionId, origin, cookie);
+    else if (plan.operation === "scene_edit") {
+        task = createEcommerceSceneEditTask(
+            run,
+            plan,
+            snapshot.referenceCheckpoint!.assets.map((reference) => reference.asset),
+            execution,
+        );
+    } else {
+        task = await prepareEcommerceProtectionTask(run, executionId, toLegacyEcommerceVisualAnalysis(snapshot.visualAnalysis!, plan.source.currentSceneBaselineId), settings.generationDefaults);
+    }
+    if (!task) return;
+    const next = generations.map((item, position) => (position === index ? { snapshot, task } : item));
+    const saved = await updateAgentRunById(run.id, { ecommerceGenerations: next }, undefined, ["running"], executionId);
+    if (saved) await prepareEcommerceGenerations(saved, executionId, origin, cookie, settings);
 }
 
 function executedEcommerceRouteSnapshot(candidates: EcommerceRoleCandidate[], actual: { logicalRole: string; logicalModelId: string; channelId: string; upstreamModel: string }) {

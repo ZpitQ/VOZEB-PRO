@@ -229,7 +229,7 @@ export async function POST(request: Request) {
         concurrencyRequestId,
     );
     if (response) return response;
-    const retryAfter = await generationCapacityRetryAfterSeconds(user.id, "video", 30 * 60_000);
+    const retryAfter = await generationCapacityRetryAfterSeconds(user.id, "video");
     return NextResponse.json({ error: "当前用户视频任务已达到并发上限" }, { status: 429, ...(retryAfter ? { headers: { "Retry-After": String(retryAfter) } } : {}) });
 }
 

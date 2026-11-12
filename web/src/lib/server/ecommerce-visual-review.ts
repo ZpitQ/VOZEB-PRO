@@ -8,14 +8,13 @@ import { getCreativeAssetsByIds } from "./creative-runtime-store";
 import { getImageTask, type ImageTask } from "./image-task-store";
 import type { GenerationTaskLease } from "./generation-task-scheduler";
 import type { EcommerceVisualReviewCheckpoint, EcommerceVisualReviewSource } from "./ecommerce-generation-snapshot";
-import { ECOMMERCE_REVIEW_PREPARATION_VERSION, reviewContextDigest, reviewDigest, reviewMediaTuple, reviewQualityDigest, reviewSourceTuple } from "./ecommerce-visual-review-identity";
+import { ECOMMERCE_REVIEW_PREPARATION_VERSION, ecommerceReviewTasks, ecommerceReviewTechnicalCheck, reviewContextDigest, reviewDigest, reviewMediaTuple, reviewQualityDigest, reviewSourceTuple } from "./ecommerce-visual-review-identity";
 import { enqueueEcommerceReviewPreparation, freezeEcommerceReviewSource, loadEcommerceReviewViews, projectEcommerceReviewTrace, type EcommerceReviewClaim } from "./image-processing-service";
 import { imageTaskResultReferenceLocation } from "./image-task-result-contract";
 import { writeReferenceMediaDataUrl } from "./reference-asset-store";
 import { checkEcommerceResultWithFallback, ecommerceResultDeliveryGate, qualityImageBytes, unavailableEcommerceQualityCheck, type EcommerceQualityCheck, type EcommerceQualityCheckRequest } from "./ecommerce-quality-check";
 import { resolveEcommerceRoleCandidates, routeEcommerceRole, type EcommerceRoleCandidate, type EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 import { StructuredTextSubmissionRejectedError } from "./text-planning-runtime";
-import { buildEcommerceGenerationTrace } from "./ecommerce-generation-trace";
 
 class ReviewOwnershipLostError extends Error {}
 
@@ -31,13 +30,15 @@ function unavailableSubmission(checkpoint: EcommerceVisualReviewCheckpoint, reas
 async function reviewInputs(run: AgentRun, origin: string, cookie: string) {
     const snapshot = run.ecommerceSnapshot;
     const plan = snapshot?.plan;
-    const task = run.tasks.length === 1 ? run.tasks[0] : undefined;
+    const tasks = ecommerceReviewTasks(run);
+    const task = tasks[0];
     if (!plan || snapshot?.technicalCheck?.status !== "passed" || !task?.ecommerceExecution || task.status !== "completed") throw new Error("已交付视觉复核证据缺失");
-    const ids = task.taskIds || (task.taskId ? [task.taskId] : []);
+    const ids = tasks.flatMap((item) => item.taskIds || (item.taskId ? [item.taskId] : []));
     const images: ImageTask[] = [];
     for (const id of ids) {
         const image = await getImageTask(id);
-        if (!image || image.userId !== run.userId || image.runId !== run.id || ![run.id, task.id].includes(image.parentTaskId || "") || image.status !== "success") throw new Error("已交付图片身份不符");
+        const parentTask = tasks.find((item) => item.taskIds?.includes(id) || item.taskId === id)!;
+        if (!image || image.userId !== run.userId || image.runId !== run.id || ![run.id, parentTask.id].includes(image.parentTaskId || "") || image.status !== "success") throw new Error("已交付图片身份不符");
         images.push(image);
     }
     const baselineId = plan.operation === "product_to_scene" ? plan.source.productAnchorId : plan.source.currentSceneBaselineId || plan.source.productAnchorId;
@@ -109,7 +110,7 @@ export async function processIndependentEcommerceReview(observed: AgentRun, orig
     let active = observed;
     let currentContextDigest: string | undefined;
     const update = async (checkpoint: EcommerceVisualReviewCheckpoint, patch: Partial<AgentRun> = {}, terminal = false) => {
-        const gate = terminal ? ecommerceResultDeliveryGate(active.ecommerceSnapshot!.technicalCheck!, patch.ecommerceSnapshot!.qualityCheck) : undefined;
+        const gate = terminal ? ecommerceResultDeliveryGate(ecommerceReviewTechnicalCheck(active), patch.ecommerceSnapshot!.qualityCheck) : undefined;
         const updated = await updateAgentRunById(
             active.id,
             { ...patch, ecommerceSnapshot: { ...active.ecommerceSnapshot!, ...(patch.ecommerceSnapshot || {}), visualReview: checkpoint } },
@@ -143,11 +144,8 @@ export async function processIndependentEcommerceReview(observed: AgentRun, orig
             },
             true,
         );
-        const task = completed.tasks[0];
-        const ids = task.taskIds || (task.taskId ? [task.taskId] : []);
-        const trace = buildEcommerceGenerationTrace({ runId: completed.id, task, snapshot: completed.ecommerceSnapshot!, imageTaskIds: ids, generationStatus: "completed", finalStatus: "completed", recordedAt: completed.timings!.reviewCompletedAt });
         try {
-            await projectEcommerceReviewTrace(completed, claim, reviewQualityDigest(quality), trace, currentContextDigest);
+            await projectEcommerceReviewTrace(completed, claim, reviewQualityDigest(quality), currentContextDigest);
             // Reconciliation uses an expected trace CAS and can restore interrupted projections from the authoritative parent.
             // Eager log writes are performed by the same reconciliation path, never by an unfenced late reviewer.
         } catch (error) {
@@ -197,7 +195,7 @@ export async function processIndependentEcommerceReview(observed: AgentRun, orig
         const settings = await getAuthSettings();
         const candidates = qualityCandidates(settings, active.ecommerceSnapshot?.modelRouteSnapshots?.quality_check);
         if (!candidates.length) return await settle(unavailableEcommerceQualityCheck("结果验收模型快照不可用", fallbackRole), { state: "failed", reason: "quality_route_unavailable" });
-        const quality = await checkEcommerceResultWithFallback(inputs.input, candidates, active.ecommerceSnapshot!.technicalCheck, {
+        const quality = await checkEcommerceResultWithFallback(inputs.input, candidates, ecommerceReviewTechnicalCheck(active), {
             views,
             onBeforeRequest: async (candidate, submission) => {
                 checkpoint = { ...active.ecommerceSnapshot!.visualReview!, submission: { state: "started", modelRole: { ...candidate.snapshot }, ...submission, startedAt: Date.now() } };

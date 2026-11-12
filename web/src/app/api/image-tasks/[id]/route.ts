@@ -11,7 +11,7 @@ import { generationModelId } from "@/lib/server/generation-channel";
 import { refundImageTask } from "@/lib/server/image-task-refund";
 import { getStoredGenerationTaskRecord } from "@/lib/server/generation-task-store";
 import { recoverGenerationTaskFromUpstream } from "@/lib/server/generation-task-user-recovery";
-import { canRecoverUnsubmittedImageMask, canRecoverUnsubmittedImageReference, scheduleGenerationTask } from "@/lib/server/generation-task-scheduler";
+import { canRecoverImageNativeResult, canRecoverUnsubmittedImageMask, canRecoverUnsubmittedImageReference, scheduleGenerationTask } from "@/lib/server/generation-task-scheduler";
 import { assertEcommerceImageExecutionSnapshot } from "@/lib/server/ecommerce-image-task-orchestration";
 import { getAuthSettings } from "@/lib/auth/store";
 import { publicImageResultEnhancement } from "@/lib/image-enhancement-contract";
@@ -86,10 +86,11 @@ export async function POST(request: Request, context: RouteContext) {
 
     const schedule = await getStoredGenerationTaskRecord("image", task.id);
     const upstreamTaskId = task.upstream?.id || schedule?.upstreamTaskId;
+    const nativeRecovery = canRecoverImageNativeResult(schedule);
     const referenceRecovery = !upstreamTaskId && canRecoverUnsubmittedImageReference(schedule);
     const maskRecovery = !upstreamTaskId && canRecoverUnsubmittedImageMask(schedule);
     if (task.status !== "running" && !maskRecovery) return NextResponse.json({ error: "当前图片任务无法继续检查" }, { status: 409 });
-    if (!upstreamTaskId && !referenceRecovery && !maskRecovery) return NextResponse.json({ error: "原任务没有保存上游任务 ID，无法安全追回结果" }, { status: 409 });
+    if (!upstreamTaskId && !nativeRecovery && !referenceRecovery && !maskRecovery) return NextResponse.json({ error: "原任务没有保存上游任务 ID，无法安全追回结果" }, { status: 409 });
     if (maskRecovery && task.config.apiSource === "system") {
         try {
             assertEcommerceImageExecutionSnapshot(await getAuthSettings(), task.ecommerceExecution, task.config);
@@ -99,25 +100,26 @@ export async function POST(request: Request, context: RouteContext) {
     }
 
     const recoveryContext = { origin: resolveInternalOrigin(new URL(request.url).origin), publicOrigin: requestPublicOrigin(request), cookie: request.headers.get("cookie") || "" };
-    const rearmed = upstreamTaskId
-        ? await recoverGenerationTaskFromUpstream({
-              type: "image",
-              id: task.id,
-              upstreamTaskId,
-              channelId: task.config.channelId,
-              provider: task.config.advancedConfig?.protocol || task.config.apiFormat,
-              queryPath: task.upstream?.explicitPollUrl || schedule?.queryPath || task.config.advancedConfig?.queryPath,
-              submittedAt: schedule?.submittedAt || task.createdAt,
-              ...recoveryContext,
-          })
-        : await scheduleGenerationTask(
-              "image",
-              task.id,
-              { executionPhase: "created", nextPollAt: Date.now(), lastUpstreamStatus: maskRecovery ? "scene_mask_recovery_requested" : "reference_recovery_requested" },
-              maskRecovery ? { unsubmittedMaskRecovery: schedule! } : { unsubmittedReferenceRecovery: true },
-          );
+    const rearmed =
+        upstreamTaskId || nativeRecovery
+            ? await recoverGenerationTaskFromUpstream({
+                  type: "image",
+                  id: task.id,
+                  upstreamTaskId,
+                  channelId: task.config.channelId,
+                  provider: task.config.advancedConfig?.protocol || task.config.apiFormat,
+                  queryPath: task.upstream?.explicitPollUrl || schedule?.queryPath || task.config.advancedConfig?.queryPath,
+                  submittedAt: schedule?.submittedAt || task.createdAt,
+                  ...recoveryContext,
+              })
+            : await scheduleGenerationTask(
+                  "image",
+                  task.id,
+                  { executionPhase: "created", nextPollAt: Date.now(), lastUpstreamStatus: maskRecovery ? "scene_mask_recovery_requested" : "reference_recovery_requested" },
+                  maskRecovery ? { unsubmittedMaskRecovery: schedule! } : { unsubmittedReferenceRecovery: true },
+              );
     if (!rearmed) return NextResponse.json({ error: "图片任务状态已变化，请刷新后重试" }, { status: 409 });
-    if (!upstreamTaskId) await runGenerationTaskRecoveryBatch({ ...recoveryContext, limit: 1, taskIds: [task.id], userRequested: true });
+    if (!upstreamTaskId && !nativeRecovery) await runGenerationTaskRecoveryBatch({ ...recoveryContext, limit: 1, taskIds: [task.id], userRequested: true });
     const latest = await getImageTask(task.id);
     const latestSchedule = await getStoredGenerationTaskRecord("image", task.id);
     if (!latest) return NextResponse.json({ error: "图片任务不存在或已过期" }, { status: 404 });

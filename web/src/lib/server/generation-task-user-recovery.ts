@@ -5,18 +5,18 @@ import type { GenerationTaskType } from "@/lib/server/generation-task-types";
 
 type RecoverableGenerationTaskType = Exclude<GenerationTaskType, "agent">;
 
-export async function recoverGenerationTaskFromUpstream(input: {
-    type: RecoverableGenerationTaskType;
-    id: string;
-    upstreamTaskId: string;
-    channelId?: string;
-    provider?: string;
-    queryPath?: string;
-    submittedAt: number;
-    origin: string;
-    publicOrigin?: string;
-    cookie?: string;
-}) {
+export async function recoverGenerationTaskFromUpstream(
+    input: {
+        id: string;
+        channelId?: string;
+        provider?: string;
+        queryPath?: string;
+        submittedAt: number;
+        origin: string;
+        publicOrigin?: string;
+        cookie?: string;
+    } & ({ type: "image"; upstreamTaskId?: string } | { type: Exclude<RecoverableGenerationTaskType, "image">; upstreamTaskId: string }),
+) {
     const rearmed =
         input.type === "image"
             ? await rearmImageTaskForUser(input)

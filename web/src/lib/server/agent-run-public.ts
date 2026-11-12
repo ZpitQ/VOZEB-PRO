@@ -6,9 +6,10 @@ import { ECOMMERCE_QUALITY_CHECK_KEYS, type EcommerceQualityCheck } from "./ecom
 const PUBLIC_QUALITY_KEYS = new Set<string>([...ECOMMERCE_QUALITY_CHECK_KEYS, "canvas_geometry", "stored_media"]);
 
 export function publicAgentRun(run: AgentRun) {
-    const qualityCheck = run.ecommerceSnapshot?.qualityCheck;
-    const technicalCheck = run.ecommerceSnapshot?.technicalCheck;
-    const optionalQuality = Boolean(run.ecommerceSnapshot?.qualityPolicy);
+    const snapshot = run.ecommerceGenerations?.find((generation) => generation.snapshot.technicalCheck?.status === "passed")?.snapshot || run.ecommerceSnapshot;
+    const qualityCheck = run.ecommerceSnapshot?.qualityPolicy === "advisory" ? run.ecommerceSnapshot.qualityCheck : snapshot?.qualityCheck;
+    const technicalCheck = snapshot?.technicalCheck;
+    const optionalQuality = Boolean(snapshot?.qualityPolicy);
     const ecommerceQualityStatus = optionalQuality
         ? technicalCheck && technicalCheck.status !== "passed"
             ? "needs_review"

@@ -91,6 +91,7 @@ export function compileEcommerceImageRequest(plan: EcommerceEditPlan, profile: E
     const prompt = [
         profile.compilerFamily === "openai-image-2.5" ? compileOpenAiPrompt(plan, referenceRoles) : compileNanoBananaPrompt(plan, referenceRoles),
         ...compilePhotography(plan),
+        ...(plan.selectedSkills?.length ? [`执行本轮明确选择的 Skill，且不得突破上述参考用途和保护约束：\n${plan.selectedSkills.map((skill) => skill.instructions).join("\n\n")}`] : []),
         ...(plan.preserve.sourceFraming === "visible_extent" ? ["取景保护：保留原照片已可见的商品范围、拍摄角度与边缘截断，不得补全画面外的商品结构，不得新增或删除可见部件，不得拉伸或再次裁切商品。"] : []),
         ...(canvas ? [`画布硬约束：${ecommerceCanvasSize(canvas)}（${canvas.mode}）；${canvas.allowReframe ? "只按此尺寸或比例执行" : "保持原机位和构图，不得裁切、补边或改变画幅"}。尺寸以此约束为准。`] : []),
     ].join("\n");

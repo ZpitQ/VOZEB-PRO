@@ -207,12 +207,19 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
         await rm(directory, { recursive: true, force: true });
     });
 
-    async function prepareDeliveryFixture(requestId: string, advisory: boolean) {
+    async function prepareDeliveryFixture(requestId: string, advisory: boolean, multipleModels = false) {
+        if (multipleModels) {
+            const first = boundary.settings.logicalModels.find((model) => model.id === "image-model")!;
+            boundary.settings.logicalModels.push({ ...structuredClone(first), id: "image-model-two", name: "Second image model", bindings: first.bindings.map((binding) => ({ ...binding, id: "second-binding", upstreamModel: "gpt-image-2.5-sunburst" })) });
+            boundary.settings.systemChannels.find((channel) => channel.id === "image-channel")!.models.push("gpt-image-2.5-sunburst");
+        }
         const conversation = await createCreativeConversation("batch-user", { surface: "chat" });
         const { uploadAssetForUser } = await import("./creative-runtime-service");
         const source = await uploadAssetForUser("batch-user", conversation.id, new File([new Uint8Array(Buffer.from(baseline.slice(baseline.indexOf(",") + 1), "base64"))], "scene.png", { type: "image/png" }));
         assert.ok(source.serverUrl);
-        const initial = (await createAgentRun("batch-user", { clientRequestId: requestId, conversationId: conversation.id, surface: "chat", prompt: "调整光线", assetIds: [source.id], skillIds: [], modelIds: [] })).run;
+        const initial = (
+            await createAgentRun("batch-user", { clientRequestId: requestId, conversationId: conversation.id, surface: "chat", prompt: "调整光线", assetIds: [source.id], skillIds: [], modelIds: multipleModels ? ["image-model", "image-model-two"] : [] })
+        ).run;
         const plan: EcommerceEditPlan = {
             planVersion: "ecommerce-edit.v5",
             operation: "scene_edit",
@@ -235,7 +242,7 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
         boundary.create.mockImplementation(provider.runOpenAiImageTask);
         boundary.submit.mockImplementation(async (_config, _url, init) => {
             expect(init.method).toBe("POST");
-            return Response.json({ id: "original-upstream", status: "pending" });
+            return Response.json({ id: multipleModels ? "original-upstream-" + _config.model : "original-upstream", status: "pending" });
         });
         boundary.structured.mockImplementation(async (request: Parameters<typeof import("./text-planning-runtime").requestStructuredText>[0]) => {
             const content = request.messages.find((message) => message.role === "user")!.content;
@@ -280,7 +287,10 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
             if (url.endsWith("/api/image-tasks") && init?.method === "POST") {
                 const body = JSON.parse(String(init.body));
                 const { prepareEcommerceImageTask } = await import("./ecommerce-image-task-orchestration");
-                const { reviewReason, ...prepared } = prepareEcommerceImageTask({ ...body, compatibleConfigs: [{ ...body.config, ...toSystemGenerationChannel(routeEcommerceRole(boundary.settings, "image_generation")!) }] });
+                const { reviewReason, ...prepared } = prepareEcommerceImageTask({
+                    ...body,
+                    compatibleConfigs: [{ ...body.config, ...toSystemGenerationChannel(routeEcommerceRole(boundary.settings, "image_generation", body.ecommerceExecution.modelSnapshot)!) }],
+                });
                 expect(reviewReason).toBe("");
                 const child = await createImageTask({ ...body, ...body.context, userId: "batch-user", username: "fixture-user", displayName: "Fixture User", ...prepared });
                 childIds.push(child.id);
@@ -322,6 +332,73 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
         expect(await getStoredGenerationTaskRecord("image_processing", child.id)).toMatchObject({ status: "success", executionPhase: "completed", runId: initial.id, parentTaskId: initial.id, resultPayload: { manifest: prepared.manifest } });
         return { conversation, initial, prepared, referenceChild: child, reviewResponse };
     }
+
+    it.each([false, true])(
+        "reviews both delivered models and retains full-parent ownership (sibling changed: %s)",
+        async (changeSibling) => {
+            nativeResults = [{ dataUrl: baseline }];
+            const { initial, reviewResponse } = await prepareDeliveryFixture(`multi-advisory-${changeSibling}`, true, true);
+            const { runGenerationTaskRecoveryBatch } = await import("./generation-task-recovery-service");
+            const scheduler = await import("./generation-task-scheduler");
+            const input = { origin: "http://fixture.local", cookie: "session=fixture", workerId: "fixture-multi-delivery", taskIds: [initial.id], limit: 1 };
+            await runGenerationTaskRecoveryBatch(input);
+            await scheduler.scheduleGenerationTask("agent", initial.id, { nextPollAt: Date.now() });
+            await runGenerationTaskRecoveryBatch(input);
+            await scheduler.scheduleGenerationTask("agent", initial.id, { nextPollAt: Date.now() });
+            await runGenerationTaskRecoveryBatch(input);
+            const delivered = (await getAgentRun(initial.id))!;
+            expect(delivered.tasks.map((task) => task.status)).toEqual(["completed", "completed"]);
+            const resultIds = delivered.tasks.map((task) => task.taskIds![0] + ":1");
+            const originalTransport = boundary.request.getMockImplementation()!;
+            let modelArguments = "";
+            boundary.structured.mockImplementation(async (request) => {
+                modelArguments = (await reviewResponse(request)).arguments;
+                assert.ok(textPlanningActual.module);
+                return textPlanningActual.module.requestStructuredText(request);
+            });
+            const prepared = await prepareAdvisoryReview(delivered.id, { origin: "http://fixture.local", cookie: "session=fixture", directory });
+            expect(prepared.ecommerceSnapshot?.visualReview?.sources.filter((source) => source.source.startsWith("result:")).map((source) => source.original.resultId)).toEqual(resultIds);
+            expect(prepared.ecommerceSnapshot?.visualReview?.views).toHaveLength(6);
+            const entered = Promise.withResolvers<void>();
+            const release = Promise.withResolvers<void>();
+            boundary.request.mockImplementation(async (url: string, init?: RequestInit) => {
+                if (!url.includes("/api/ai/system/")) return originalTransport(url, init);
+                entered.resolve();
+                if (changeSibling) await release.promise;
+                return Response.json({ choices: [{ message: { tool_calls: [{ type: "function", function: { name: "check_ecommerce_results", arguments: modelArguments } }] } }] });
+            });
+            const pending = recoverAdvisoryReview(delivered.id);
+            if (changeSibling) {
+                await entered.promise;
+                const held = (await getAgentRun(delivered.id))!;
+                await updateAgentRunById(held.id, { tasks: [held.tasks[0], { ...held.tasks[1], title: "Changed sibling" }] }, undefined, ["completed"], held.executionId);
+                release.resolve();
+            }
+            await pending;
+            const reviewed = (await getAgentRun(delivered.id))!;
+            if (changeSibling) {
+                expect(reviewed.reviewed).toBe(false);
+                expect(reviewed.tasks[1].title).toBe("Changed sibling");
+                expect(reviewed.ecommerceSnapshot?.qualityCheck).toBeUndefined();
+                return;
+            }
+            expect(reviewed.reviewStatus).toBe("review_completed");
+            expect(reviewed.ecommerceSnapshot?.qualityCheck?.canvasEvidence?.map((item) => item.resultId)).toEqual(resultIds);
+            expect(publicAgentRun(reviewed).assetIds).toHaveLength(2);
+            expect(publicAgentRun({ ...reviewed, ecommerceSnapshot: { ...reviewed.ecommerceGenerations![1].snapshot, qualityCheck: { ...reviewed.ecommerceSnapshot!.qualityCheck!, status: "blocked", publicStatus: "needs_review" } } })).toMatchObject({
+                ecommerceQualityStatus: "needs_adjustment",
+                assetIds: reviewed.assetIds,
+            });
+            const images = await Promise.all(reviewed.tasks.map((task) => getImageTask(task.taskIds![0])));
+            const traces = images.map((image) => image!.ecommerceTrace!);
+            expect(traces.map((trace) => trace.agentTaskId)).toEqual(reviewed.tasks.map((task) => task.id));
+            expect(traces.map((trace) => trace.stages.find((stage) => stage.key === "image_generation")?.model?.logicalModelId)).toEqual(["image-model", "image-model-two"]);
+            expect(traces.map((trace) => trace.imageTaskIds)).toEqual(reviewed.tasks.map((task) => task.taskIds));
+            const logs = (await listGenerationLogs({ userId: "batch-user", includeEcommerceTrace: true })).items;
+            expect(images.map((image) => logs.find((log) => log.taskId === image!.id)?.ecommerceTrace)).toEqual(traces);
+        },
+        120_000,
+    );
 
     function useFailedNativeCapture() {
         const transport = boundary.request.getMockImplementation()!;

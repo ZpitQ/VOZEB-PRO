@@ -21,7 +21,7 @@ import { agentRunCompletionReply, agentRunFailureMessage, resultSummary } from "
 import { getCreativeAssetsByIds } from "@/lib/server/creative-runtime-store";
 import { toSafeGenerationErrorMessage } from "@/lib/server/generation-errors";
 import { processIndependentEcommerceReview } from "./ecommerce-visual-review";
-import { independentAdvisoryReview } from "./ecommerce-visual-review-identity";
+import { ecommerceReviewTasks, independentAdvisoryReview } from "./ecommerce-visual-review-identity";
 import type { GenerationTaskLease } from "./generation-task-scheduler";
 import { scheduleGenerationTask } from "@/lib/server/generation-task-scheduler";
 import { getStoredGenerationTaskRecord, linkStoredGenerationTask } from "@/lib/server/generation-task-store";
@@ -37,6 +37,7 @@ import { checkEcommerceResultWithFallback, checkEcommerceTechnicalResult, ecomme
 import { buildEcommerceGenerationTrace } from "./ecommerce-generation-trace";
 import { ecommerceCheckpointMessage, hasUnresolvedEcommerceCheckpoint } from "./agent-run-checkpoint";
 import { readCompletedImageTaskResult } from "./image-task-result-processing";
+import { ecommerceRunForTask } from "./ecommerce-generation-snapshot";
 
 export { planToOps, taskResultOps } from "./agent-run-canvas-ops";
 export { acceptsMediaReference, mergeTaskReferences, requestedTextLimit, reviewCorrection, taskImageUrls, taskReferences, taskResultItems, textConstraintInstruction } from "./agent-run-execution-helpers";
@@ -573,7 +574,19 @@ function shouldBlockOnReview(run: AgentRun) {
 
 export async function processAgentRunReview(run: AgentRun, origin: string, cookie: string, lease?: GenerationTaskLease) {
     if (independentAdvisoryReview(run) && !run.reviewed) {
-        if (!lease) return { status: "ownership_lost" as const, attempts: run.reviewAttempts || 0 };
+        if (!lease?.workerId || !lease.executionId) return { status: "ownership_lost" as const, attempts: run.reviewAttempts || 0 };
+        if (run.ecommerceGenerations) {
+            const task = ecommerceReviewTasks(run)[0]!;
+            if (run.ecommerceSnapshot?.modelRoles?.generation !== task.model) {
+                const current = await updateAgentRunById(run.id, { ecommerceSnapshot: ecommerceRunForTask(run, task.id).ecommerceSnapshot }, undefined, ["completed"], lease.executionId, run.tasks, {
+                    attempts: run.reviewAttempts || 0,
+                    reviewed: false,
+                    claim: { workerId: lease.workerId, executionId: lease.executionId },
+                });
+                if (!current) return { status: "ownership_lost" as const, attempts: run.reviewAttempts || 0 };
+                run = current;
+            }
+        }
         return processIndependentEcommerceReview(run, origin, cookie, lease);
     }
     if (run.status !== "completed" || run.reviewed) return { status: "completed" as const, attempts: run.reviewAttempts || 0 };
@@ -773,7 +786,7 @@ async function runTaskWithRetryInternal(runId: string, task: AgentRunTask, origi
         await patchTask(runId, task.id, {}, "task.validated", executionId);
         const publicationRun = qualityGate ? await getAgentRun(runId) : activeRun;
         if (!publicationRun || publicationRun.status !== "running" || publicationRun.executionId !== executionId) return;
-        const registeredAssetIds = dispatched.assetIds ?? (await registerAgentTaskAssets(publicationRun, { ...executableTask, attempts: attempt, result }, result, dispatched.sourceTaskIds)).map((asset) => asset.id);
+        const registeredAssetIds = dispatched.assetIds ?? (await registerAgentTaskAssets(ecommerceRunForTask(publicationRun, task.id), { ...executableTask, attempts: attempt, result }, result, dispatched.sourceTaskIds)).map((asset) => asset.id);
         await patchTask(
             runId,
             task.id,
@@ -826,7 +839,7 @@ async function runTaskWithRetryInternal(runId: string, task: AgentRunTask, origi
                     buildEcommerceGenerationTrace({
                         runId,
                         task: latestTask,
-                        snapshot: latest.ecommerceSnapshot,
+                        snapshot: ecommerceRunForTask(latest, task.id).ecommerceSnapshot!,
                         imageTaskIds,
                         generationStatus: "failed",
                         finalStatus: "failed",
@@ -861,6 +874,7 @@ async function checkAndRecordEcommerceResult(
     executionId: string,
     phase: "technical" | "visual" | "legacy",
 ) {
+    run = ecommerceRunForTask(run, task.id);
     const allowedStatuses = phase === "visual" ? ["completed" as const] : ["running" as const];
     const expectedExecutionId = phase === "visual" ? undefined : executionId;
     const current =

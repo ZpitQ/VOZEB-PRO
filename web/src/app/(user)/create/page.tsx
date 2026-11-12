@@ -13,7 +13,7 @@ import { reconcileCreativeGenerationPreferences } from "@/lib/creative-model-cap
 import { cn } from "@/lib/utils";
 import { useCreativeAgentModels } from "@/hooks/use-creative-agent-options";
 import { listAgentSkills, type AgentSkillSummary } from "@/services/api/agent-skills";
-import type { CreativeAgentRun } from "@/services/api/creative";
+import { getCreativeAgentRun, type CreativeAgentRun } from "@/services/api/creative";
 import { optimizePrompt } from "@/services/api/prompt-optimization";
 import { usePublicSessionStore } from "@/stores/use-public-session-store";
 import type { PublicGalleryItem } from "@/services/api/work-governance";
@@ -44,7 +44,7 @@ export default function CreatePage() {
     const screens = Grid.useBreakpoint();
     const inputRef = useRef<TextAreaRef>(null);
     const attachmentInputRef = useRef<HTMLInputElement>(null);
-    const initialConversationRestoredRef = useRef(false);
+    const navigationConversationRef = useRef<string | undefined>(undefined);
     const initialPromptRestoredRef = useRef(false);
     const conversationScrollRef = useRef<HTMLElement>(null);
     const composerHostRef = useRef<HTMLDivElement>(null);
@@ -104,15 +104,21 @@ export default function CreatePage() {
     }, []);
 
     useEffect(() => {
-        if (initialConversationRestoredRef.current) return;
-        initialConversationRestoredRef.current = true;
-        const conversationId = createConversationIdFromSearch(window.location.search);
-        if (!conversationId) return;
-        void openAgentConversation(conversationId).catch((error) => {
-            message.error(error instanceof Error ? error.message : "恢复对话失败");
-            router.replace("/create");
-        });
-    }, [message, openAgentConversation, router]);
+        const restore = () => {
+            const conversationId = createConversationIdFromSearch(window.location.search);
+            navigationConversationRef.current = conversationId;
+            promptRevisionRef.current += 1;
+            if (!conversationId) return newAgentConversation();
+            void openAgentConversation(conversationId).catch((error) => {
+                if (navigationConversationRef.current !== conversationId) return;
+                message.error(error instanceof Error ? error.message : "恢复对话失败");
+                router.replace("/create");
+            });
+        };
+        restore();
+        window.addEventListener("popstate", restore);
+        return () => window.removeEventListener("popstate", restore);
+    }, [message, newAgentConversation, openAgentConversation, router]);
 
     useEffect(() => {
         if (initialPromptRestoredRef.current) return;
@@ -126,7 +132,7 @@ export default function CreatePage() {
     }, [message, router, updatePrompt]);
 
     useEffect(() => {
-        if (!agent.conversationId || createConversationIdFromSearch(window.location.search) === agent.conversationId) return;
+        if (!agent.conversationId || navigationConversationRef.current === agent.conversationId || createConversationIdFromSearch(window.location.search) === agent.conversationId) return;
         router.replace(createConversationHref(agent.conversationId), { scroll: false });
     }, [agent.conversationId, router]);
 
@@ -166,6 +172,8 @@ export default function CreatePage() {
     }, [agent.conversationId, agent.conversationLoading, agent.messages.length]);
 
     const openConversation = (id: string) => {
+        navigationConversationRef.current = id;
+        promptRevisionRef.current += 1;
         router.push(createConversationHref(id));
         void openAgentConversation(id).catch((error) => {
             message.error(error instanceof Error ? error.message : "打开对话失败");
@@ -174,6 +182,8 @@ export default function CreatePage() {
     };
 
     const newConversation = () => {
+        navigationConversationRef.current = undefined;
+        promptRevisionRef.current += 1;
         newAgentConversation();
         router.replace("/create");
     };
@@ -188,7 +198,7 @@ export default function CreatePage() {
             message.warning("请选择至少一个模型，或重新开启智能规划");
             return;
         }
-        promptRevisionRef.current += 1;
+        const revision = ++promptRevisionRef.current;
         try {
             const preferences = { ...generationPreferences, mode: "image" as const };
             const assetIds = agent.selectedAssets.filter((asset) => asset.type === "image").map((asset) => asset.id);
@@ -201,8 +211,10 @@ export default function CreatePage() {
                     ...(Object.keys(preferences).length ? { preferences } : {}),
                 })
             ) {
-                updatePrompt("");
-                setSelectedSkillId(undefined);
+                if (promptRevisionRef.current === revision) {
+                    updatePrompt("");
+                    setSelectedSkillId(undefined);
+                }
             }
         } catch (error) {
             message.error(error instanceof Error ? error.message : "素材上传失败");
@@ -211,6 +223,7 @@ export default function CreatePage() {
 
     const retryRound = async (assistantMessage: CreativeMessage, run?: CreativeAgentRun) => {
         try {
+            if (!run && assistantMessage.runId) run = await getCreativeAgentRun(assistantMessage.runId);
             if (!run) return await agent.retrySubmission(assistantMessage.id);
             const retryableTasks = run.tasks.filter((task) => task.status === "failed" || task.status === "needs_review");
             if (retryableTasks.length) {
@@ -315,6 +328,7 @@ export default function CreatePage() {
     };
 
     const selectSkill = (skill: AgentSkillSummary) => {
+        promptRevisionRef.current += 1;
         setSelectedSkillId(skill.id);
         window.requestAnimationFrame(() => inputRef.current?.focus());
     };
@@ -447,7 +461,10 @@ export default function CreatePage() {
             }}
             onRemoveAttachment={removeAttachment}
             onSelectSkill={selectSkill}
-            onRemoveSkill={() => setSelectedSkillId(undefined)}
+            onRemoveSkill={() => {
+                promptRevisionRef.current += 1;
+                setSelectedSkillId(undefined);
+            }}
             onToggleModel={toggleModel}
             onClearModels={() => {
                 setSelectedModelIds([]);
@@ -616,7 +633,7 @@ export default function CreatePage() {
                                 onToggleAsset={toggleReferencedAsset}
                                 hasOlder={agent.hasOlderMessages}
                                 olderLoading={agent.olderMessagesLoading}
-                                onLoadOlder={() => void agent.loadOlderMessages()}
+                                onLoadOlder={() => void agent.loadOlderMessages().catch((error) => message.error(error instanceof Error ? error.message : "读取历史消息失败"))}
                                 followLatest={!awayFromLatest}
                             />
                         ) : (

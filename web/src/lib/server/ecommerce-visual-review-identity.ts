@@ -3,7 +3,7 @@ import type { AgentRun, AgentRunTask } from "./agent-run-store";
 import type { EcommerceEditPlan, EcommerceCanvasConstraint, EcommerceDimensions, EcommerceManualRegion } from "./ecommerce-edit-plan";
 import type { EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
 import type { EcommerceQualityCheck, EcommerceQualityCheckItem, EcommerceCanvasQualityEvidence, EcommerceResultTechnicalCheck } from "./ecommerce-quality-check";
-import type { EcommerceVisualReviewSource } from "./ecommerce-generation-snapshot";
+import { ecommerceRunForTask, type EcommerceVisualReviewSource } from "./ecommerce-generation-snapshot";
 import type { ImageTask, StoredImageTaskMediaResult } from "./image-task-store";
 import type { SceneEditProtectionEvidence } from "./ecommerce-product-regions";
 import { taskResultItems } from "./agent-run-execution-helpers";
@@ -12,6 +12,28 @@ export const ECOMMERCE_REVIEW_PREPARATION_VERSION = "ecommerce-review-preparatio
 
 export function independentAdvisoryReview(run: AgentRun) {
     return run.status === "completed" && run.ecommerceSnapshot?.qualityPolicy === "advisory" && ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(run.ecommerceSnapshot.plan?.planVersion || "");
+}
+
+export function ecommerceReviewTasks(run: AgentRun) {
+    return run.tasks.filter((task) => task.status === "completed" && task.ecommerceExecution);
+}
+
+export function ecommerceReviewSnapshot(run: AgentRun, taskId: string) {
+    return { ...ecommerceRunForTask(run, taskId).ecommerceSnapshot!, qualityCheck: run.ecommerceSnapshot!.qualityCheck };
+}
+
+export function ecommerceReviewTechnicalCheck(run: AgentRun): EcommerceResultTechnicalCheck {
+    const checks = ecommerceReviewTasks(run).map((task) => ecommerceRunForTask(run, task.id).ecommerceSnapshot?.technicalCheck);
+    const completed = checks.filter((check): check is EcommerceResultTechnicalCheck => check?.status === "passed");
+    if (!completed.length || completed.length !== checks.length) throw new Error("已交付图片的技术检查证据缺失");
+    return {
+        ...completed[0],
+        checks: completed.flatMap((check) => check.checks),
+        hardFailures: completed.flatMap((check) => check.hardFailures),
+        canvasEvidence: completed.flatMap((check) => check.canvasEvidence),
+        sceneProtectionEvidence: completed.flatMap((check) => check.sceneProtectionEvidence),
+        checkedAt: Math.max(...completed.map((check) => check.checkedAt)),
+    };
 }
 
 export function reviewDigest(tuple: readonly unknown[]) {
@@ -261,10 +283,9 @@ function taskTuple(task: AgentRunTask) {
 
 export function reviewContextDigest(run: AgentRun, images: readonly ImageTask[]) {
     const snapshot = run.ecommerceSnapshot;
-    if (!snapshot?.plan || !snapshot.technicalCheck || run.tasks.length !== 1) throw new Error("已交付视觉复核上下文不完整");
+    if (!snapshot?.plan || !snapshot.technicalCheck || !run.tasks.length) throw new Error("已交付视觉复核上下文不完整");
     const plan = snapshot.plan;
-    const task = run.tasks[0];
-    const ids = task.taskIds || (task.taskId ? [task.taskId] : []);
+    const ids = ecommerceReviewTasks(run).flatMap((task) => task.taskIds || (task.taskId ? [task.taskId] : []));
     const orderedImages = ids.map((id) => {
         const image = images.find((item) => item.id === id);
         if (!image) throw new Error("已交付图片身份缺失");
@@ -277,7 +298,19 @@ export function reviewContextDigest(run: AgentRun, images: readonly ImageTask[])
         run.conversationId,
         planTuple(plan),
         snapshot.referenceCheckpoint?.assets.map((item) => [item.asset.id, item.assetVersion, item.contentSha256]) || [],
-        taskTuple(run.tasks[0]),
+        run.tasks.length === 1
+            ? taskTuple(run.tasks[0])
+            : run.tasks.map((task) => {
+                  const current = ecommerceRunForTask(run, task.id).ecommerceSnapshot!;
+                  const route = current.modelRouteSnapshots?.image_generation;
+                  return [
+                      taskTuple(task),
+                      planTuple(current.plan!),
+                      current.compilerVersion,
+                      [route?.logicalRole, route?.capability, route?.logicalModelId, route?.channelId, route?.upstreamModel, route?.apiFormat],
+                      current.technicalCheck ? technicalTuple(current.technicalCheck) : null,
+                  ];
+              }),
         technicalTuple(snapshot.technicalCheck),
         orderedImages.map((image) => [
             image.id,

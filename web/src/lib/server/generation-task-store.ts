@@ -708,14 +708,14 @@ export async function linkStoredGenerationTask(type: GenerationTaskType, id: str
     );
 }
 
-export async function countActiveStoredGenerationTasks(userId: string, type: GenerationTaskType, staleMs: number, excludeTaskId?: string) {
-    const activeAfter = Date.now() - staleMs;
+export async function countActiveStoredGenerationTasks(userId: string, type: GenerationTaskType, excludeTaskId?: string) {
+    // Worker heartbeats renew leases without updating the task's updatedAt.
     const concurrencyClassFilter = type === "image" ? " AND COALESCE(payload->>'concurrencyClass', '') <> 'canvas-layer'" : "";
     if (getDatabaseProvider() === "postgres") {
         await ensurePostgresSchema();
         const result = await postgresQuery<{ total: string | number }>(
-            `SELECT count(*) AS total FROM generation_tasks WHERE user_id = $1 AND task_type = $2 AND status IN ('pending', 'running') AND execution_phase = ANY($4::text[]) AND updated_at >= $3 AND expires_at > now()${excludeTaskId ? " AND id <> $5" : ""}${concurrencyClassFilter}`,
-            [userId, type, new Date(activeAfter), ACTIVE_CONCURRENCY_PHASES, ...(excludeTaskId ? [excludeTaskId] : [])],
+            `SELECT count(*) AS total FROM generation_tasks WHERE user_id = $1 AND task_type = $2 AND status IN ('pending', 'running') AND execution_phase = ANY($3::text[]) AND expires_at > now()${excludeTaskId ? " AND id <> $4" : ""}${concurrencyClassFilter}`,
+            [userId, type, ACTIVE_CONCURRENCY_PHASES, ...(excludeTaskId ? [excludeTaskId] : [])],
         );
         return Number(result.rows[0]?.total || 0);
     }
@@ -728,14 +728,12 @@ export async function countActiveStoredGenerationTasks(userId: string, type: Gen
             countsTowardGenerationConcurrency(task) &&
             ["pending", "running"].includes(task.status) &&
             isActiveConcurrencyPhase(task.executionPhase) &&
-            task.updatedAt >= activeAfter &&
             task.expiresAt > Date.now(),
     ).length;
 }
 
-export async function generationCapacityRetryAfterSeconds(userId: string, type: GenerationTaskType, staleMs: number, excludeTaskId?: string) {
+export async function generationCapacityRetryAfterSeconds(userId: string, type: GenerationTaskType, excludeTaskId?: string) {
     const now = Date.now();
-    const activeAfter = now - staleMs;
     const concurrencyClassFilter = type === "image" ? " AND COALESCE(payload->>'concurrencyClass', '') <> 'canvas-layer'" : "";
     if (getDatabaseProvider() === "postgres") {
         await ensurePostgresSchema();
@@ -749,8 +747,8 @@ export async function generationCapacityRetryAfterSeconds(userId: string, type: 
              ))))::integer END AS retry_after_seconds
              FROM generation_tasks
              WHERE user_id = $1 AND task_type = $2 AND status IN ('pending', 'running')
-               AND execution_phase = ANY($4::text[]) AND updated_at >= $3 AND expires_at > now()${excludeTaskId ? " AND id <> $5" : ""}${concurrencyClassFilter}`,
-            [userId, type, new Date(activeAfter), ACTIVE_CONCURRENCY_PHASES, ...(excludeTaskId ? [excludeTaskId] : [])],
+               AND execution_phase = ANY($3::text[]) AND expires_at > now()${excludeTaskId ? " AND id <> $4" : ""}${concurrencyClassFilter}`,
+            [userId, type, ACTIVE_CONCURRENCY_PHASES, ...(excludeTaskId ? [excludeTaskId] : [])],
         );
         const seconds = Number(result.rows[0]?.retry_after_seconds);
         return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : undefined;
@@ -758,20 +756,13 @@ export async function generationCapacityRetryAfterSeconds(userId: string, type: 
     const retryAt = (await readFileTasks())
         .filter(
             (task) =>
-                task.id !== excludeTaskId &&
-                task.userId === userId &&
-                task.type === type &&
-                countsTowardGenerationConcurrency(task) &&
-                ["pending", "running"].includes(task.status) &&
-                isActiveConcurrencyPhase(task.executionPhase) &&
-                task.updatedAt >= activeAfter &&
-                task.expiresAt > now,
+                task.id !== excludeTaskId && task.userId === userId && task.type === type && countsTowardGenerationConcurrency(task) && ["pending", "running"].includes(task.status) && isActiveConcurrencyPhase(task.executionPhase) && task.expiresAt > now,
         )
         .reduce((earliest, task) => Math.min(earliest, task.leaseUntil && task.leaseUntil > now ? task.leaseUntil : task.nextPollAt && task.nextPollAt > now ? task.nextPollAt : now), Number.POSITIVE_INFINITY);
     return Number.isFinite(retryAt) ? Math.max(1, Math.ceil((retryAt - now) / 1000)) : undefined;
 }
 
-export async function withGenerationConcurrencyLimit<T>(userId: string, type: GenerationTaskType, staleMs: number, limit: number, handler: () => Promise<T>, excludeTaskId?: string, requestId?: string): Promise<T | null> {
+export async function withGenerationConcurrencyLimit<T>(userId: string, type: GenerationTaskType, reservationTtlMs: number, limit: number, handler: () => Promise<T>, excludeTaskId?: string, requestId?: string): Promise<T | null> {
     if (getDatabaseProvider() === "postgres") {
         await ensurePostgresSchema();
         const reservationId = requestId?.trim() || `reservation:${crypto.randomUUID()}`;
@@ -782,7 +773,7 @@ export async function withGenerationConcurrencyLimit<T>(userId: string, type: Ge
             if (duplicate.rows.length) return false;
             const result = await client.query<{ total: string | number }>(
                 `SELECT
-                    (SELECT count(*) FROM generation_tasks WHERE user_id = $1 AND task_type = $2 AND status IN ('pending', 'running') AND execution_phase = ANY($4::text[]) AND updated_at >= $3 AND expires_at > now()${excludeTaskId ? " AND id <> $5" : ""}${type === "image" ? " AND COALESCE(payload->>'concurrencyClass', '') <> 'canvas-layer'" : ""})
+                    (SELECT count(*) FROM generation_tasks WHERE user_id = $1 AND task_type = $2 AND status IN ('pending', 'running') AND execution_phase = ANY($3::text[]) AND expires_at > now()${excludeTaskId ? " AND id <> $4" : ""}${type === "image" ? " AND COALESCE(payload->>'concurrencyClass', '') <> 'canvas-layer'" : ""})
                     +
                     (SELECT count(*) FROM generation_concurrency_reservations AS reservation
                      WHERE reservation.user_id = $1 AND reservation.task_type = $2 AND reservation.expires_at > now()
@@ -790,12 +781,12 @@ export async function withGenerationConcurrencyLimit<T>(userId: string, type: Ge
                            SELECT 1 FROM generation_tasks AS task
                            WHERE task.user_id = reservation.user_id AND task.task_type = reservation.task_type
                              AND task.client_request_id = reservation.request_id AND task.status IN ('pending', 'running')
-                             AND task.execution_phase = ANY($4::text[]) AND task.updated_at >= $3 AND task.expires_at > now()
+                             AND task.execution_phase = ANY($3::text[]) AND task.expires_at > now()
                        )) AS total`,
-                [userId, type, new Date(Date.now() - staleMs), ACTIVE_CONCURRENCY_PHASES, ...(excludeTaskId ? [excludeTaskId] : [])],
+                [userId, type, ACTIVE_CONCURRENCY_PHASES, ...(excludeTaskId ? [excludeTaskId] : [])],
             );
             if (Number(result.rows[0]?.total || 0) >= limit) return false;
-            await client.query("INSERT INTO generation_concurrency_reservations (user_id, task_type, request_id, expires_at) VALUES ($1, $2, $3, $4)", [userId, type, reservationId, new Date(Date.now() + staleMs)]);
+            await client.query("INSERT INTO generation_concurrency_reservations (user_id, task_type, request_id, expires_at) VALUES ($1, $2, $3, $4)", [userId, type, reservationId, new Date(Date.now() + reservationTtlMs)]);
             return true;
         });
         if (!admitted) return null;
@@ -816,7 +807,7 @@ export async function withGenerationConcurrencyLimit<T>(userId: string, type: Ge
     concurrencyQueues.set(key, queued);
     await previous;
     try {
-        return (await countActiveStoredGenerationTasks(userId, type, staleMs, excludeTaskId)) >= limit ? null : handler();
+        return (await countActiveStoredGenerationTasks(userId, type, excludeTaskId)) >= limit ? null : await handler();
     } finally {
         release();
         if (concurrencyQueues.get(key) === queued) concurrencyQueues.delete(key);

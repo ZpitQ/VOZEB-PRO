@@ -1,3 +1,5 @@
+import { resolveAgentTaskCount } from "./agent-run-validation";
+
 export const ECOMMERCE_EDIT_PLAN_VERSION = "ecommerce-edit.v5" as const;
 export const ECOMMERCE_EDIT_PLAN_V6_VERSION = "ecommerce-edit.v6" as const;
 export const ECOMMERCE_REFERENCE_PURPOSE_VALUES = ["edit_target", "product_identity", "style", "lighting", "composition"] as const;
@@ -209,6 +211,8 @@ export type EcommerceManualRegion = {
 };
 
 export type EcommerceEditPlan = {
+    taskId?: string;
+    selectedSkills?: import("./agent-run-audit").AgentRunSkillSnapshot[];
     planVersion: typeof ECOMMERCE_EDIT_PLAN_V6_VERSION | typeof ECOMMERCE_EDIT_PLAN_VERSION | "ecommerce-edit.v4" | "ecommerce-edit.v3" | "ecommerce-edit.v2" | "ecommerce-edit.v1";
     photography?: EcommercePhotographyPlan;
     visibleStructure?: EcommerceVisibleStructure[];
@@ -247,6 +251,15 @@ export type EcommerceEditPlan = {
     };
 };
 
+export function ecommerceImagePreferences(plan: Pick<EcommerceEditPlan, "selectedSkills">, preferences?: { count?: number; quality?: string; size?: string }) {
+    const defaults = Object.assign({}, ...(plan.selectedSkills || []).map((skill) => skill.defaultConfig)) as Record<string, string | number | boolean>;
+    return {
+        ...preferences,
+        count: resolveAgentTaskCount("image", preferences?.count, defaults.count, undefined),
+        quality: preferences?.quality || (typeof defaults.quality === "string" ? defaults.quality : undefined),
+        size: preferences?.size || (typeof defaults.size === "string" ? defaults.size : undefined),
+    };
+}
 export type EcommerceEditPlanPublicSummary = {
     operation: EcommerceOperation;
     strategy: EcommerceStrategy;

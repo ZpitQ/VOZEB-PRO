@@ -333,7 +333,7 @@ export async function POST(request: Request) {
         throw error;
     }
     if (response) return response;
-    const retryAfter = await generationCapacityRetryAfterSeconds(currentUser.id, "image", 10 * 60 * 1000);
+    const retryAfter = await generationCapacityRetryAfterSeconds(currentUser.id, "image");
     return NextResponse.json({ error: "当前用户生图任务已达到并发上限，请稍后再试" }, { status: 429, ...(retryAfter ? { headers: { "Retry-After": String(retryAfter) } } : {}) });
 }
 
