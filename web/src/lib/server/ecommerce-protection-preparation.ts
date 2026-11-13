@@ -19,6 +19,27 @@ import { buildSceneProductProtectionRegions, STRICT_PRODUCT_COMPILER_VERSION, ty
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
 import { verifyPreparedEcommerceReferenceSource } from "./ecommerce-reference-preparation";
 
+export async function prepareEcommerceFullImageTask(run: AgentRun, executionId: string, defaults: { imageQuality: string; imageSize: string }): Promise<AgentRunTask | undefined> {
+    const snapshot = run.ecommerceSnapshot;
+    const plan = snapshot?.plan;
+    const checkpoint = snapshot?.referenceCheckpoint;
+    const route = snapshot?.modelRouteSnapshots?.image_generation;
+    if (!snapshot || !plan || plan.planVersion !== "ecommerce-edit.v7" || plan.strategy !== "full_image" || !checkpoint || !route) throw new Error("整图生成缺少已持久化的计划、参考或模型路由");
+    const profile = resolveEcommerceImageProviderProfile(route);
+    if (!profile) throw new Error("已保存的生图模型不支持电商编译器");
+    const execution = compileEcommerceImageRequest(plan, profile);
+    if (execution.state !== "ready" || execution.compilerVersion !== snapshot.compilerVersion) throw new Error("已保存的生图计划与编译器快照不一致");
+    if (!(await prepareEcommerceGenerationReferences(run, executionId, execution, defaults))) return;
+    const task = createEcommerceSceneEditTask(
+        run,
+        plan,
+        checkpoint.assets.map((item) => item.asset),
+        execution,
+    );
+    const generation = snapshot.processing?.generationReferences?.[0]?.generationInput;
+    return generation ? { ...task, quality: generation.quality, ratio: `${generation.bounds.width}x${generation.bounds.height}` } : task;
+}
+
 export async function prepareEcommerceProtectionTask(run: AgentRun, executionId: string, analysis: EcommerceVisualAnalysis, defaults: { imageQuality: string; imageSize: string }): Promise<AgentRunTask | undefined> {
     const snapshot = run.ecommerceSnapshot;
     const plan = snapshot?.plan;

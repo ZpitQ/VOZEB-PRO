@@ -8,7 +8,7 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 import type { EcommerceCanvasConstraint, EcommercePhotographyPlan, EcommerceVisibleStructure } from "../src/lib/server/ecommerce-edit-plan";
 import type { EcommerceCanvasQualityEvidence, EcommerceQualityCheck } from "../src/lib/server/ecommerce-quality-check";
 import type { SceneEditProtectionEvidence } from "../src/lib/server/ecommerce-product-regions";
-import type { CreativeAgentRun, CreativeSceneSelection } from "../src/services/api/creative";
+import type { CreativeAgentRun } from "../src/services/api/creative";
 import type { CreativeReferenceRecovery, CreativeReferenceReview } from "../src/lib/creative-runtime-contract";
 import type { AdminGenerationTask } from "../src/lib/admin-generation-operations";
 
@@ -257,7 +257,7 @@ test("reference-confirm:真实用途歧义刷新后确认同一轮并复用有�
     await expectNoHorizontalOverflow(page);
 });
 
-test("reference-retry:真实分析服务失败刷新后重新分析原Run并完成v4v6路径", async ({ page, request }) => {
+test("reference-retry:真实分析服务失败刷新后重新分析原Run并完成整图生成", async ({ page, request }) => {
     const control = (enabled: boolean) => request.post(`${E2E_PROTOCOL_ORIGIN}/__ecommerce-analysis-failure`, { data: { enabled } });
     expect((await control(true)).ok()).toBe(true);
     try {
@@ -433,7 +433,7 @@ async function installReferenceReviewFixture(page: Page, kind: CreativeReference
     });
     await page.route(/\/api\/agent\/runs\/r3-run$/, (route) => route.fulfill({ json: { code: 0, data: { run } } }));
     await page.route(/\/api\/agent\/runs\/r3-run\/events(?:\?.*)?$/, (route) => route.fulfill({ contentType: "text/event-stream", body: `event: run.snapshot\ndata: ${JSON.stringify(run)}\n\n` }));
-    await page.route(/\/api\/agent\/runs\/r3-run\/resume$/, async (route) => {
+    await page.route(/\/api\/agent\/runs\/r3-run\/(?:resume|retry)$/, async (route) => {
         controls.push(route.request().postDataJSON());
         requestReceived.resolve();
         await gate.promise;
@@ -466,114 +466,56 @@ for (const goldenCase of [cases[0]]) {
         });
 
         const state = await protocolFixtureState(request);
-        expect(state.requests.some((item) => item.path.endsWith("/images/edits") && item.contentType.includes("multipart/form-data"))).toBe(true);
+        const requestImage = state.requests.find((item) => item.path.endsWith("/images/edits"));
+        expect(requestImage).toMatchObject({ hasMask: false, imageInputs: [{ sha256: goldenCase.fixtureSha256 }] });
     });
 }
 
 for (const golden of regressions.filter((item) => item.caseId === "conflicting-canvas")) {
-    test(`${golden.caseId}:真实等待态确认原任务并回读独立保护证据`, async ({ page, request }, testInfo) => {
-        test.skip(testInfo.project.name !== "chromium", "真实服务端链路在桌面执行；布局矩阵另有DTO测试");
+    test(`${golden.caseId}:修改场景直接整图生成且不要求选区`, async ({ page, request }) => {
         await page.goto("/create", { waitUntil: "domcontentloaded" });
         await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
-        if (golden.residualSize) {
-            const trigger = page.getByRole("button", { name: /生成参数：/ });
-            await trigger.click();
-            await page.getByRole("button", { name: `选择图片比例 ${golden.residualSize}`, exact: true }).click();
-            await trigger.click();
-        }
         const source = await deterministicScene(golden.source!);
         await page.locator('input[type="file"][multiple]').setInputFiles({ name: `${golden.caseId}.png`, mimeType: "image/png", buffer: source });
         const created = await submitPrompt(page, golden.userRequest, { reusePage: true });
-        pausedRunForCleanup = created;
-        const waiting = await waitForRun(request, created.runId, "paused");
-        const selection = waiting.ecommerceSceneSelection!;
-        expect(selection).toMatchObject({ action: "confirm_scene_selection", width: golden.source!.width, height: golden.source!.height });
-        expectPublicWhitelist(waiting);
-        const taskId = waiting.tasks?.[0].id;
-        expect((await protocolFixtureState(request)).requests.some((item) => item.path.endsWith("/images/edits"))).toBe(false);
-        const stale = await request.post(`/api/agent/runs/${created.runId}/resume`, {
-            data: { conversationId: `${created.conversationId}-other`, sceneSelection: { baselineAssetId: selection.baselineAssetId, region: { x: 1, y: 1, width: 2, height: 2 } } },
-        });
-        expect(stale.status()).toBe(409);
-        await page.reload({ waitUntil: "domcontentloaded" });
-        await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
-        const image = page.getByRole("img", { name: "选择修改位置的原图", exact: true });
-        await expect(image).toBeVisible();
-        await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).complete && (element as HTMLImageElement).naturalWidth > 0 && (element as HTMLImageElement).naturalHeight > 0)).toBe(true);
-        const box = await image.boundingBox();
-        if (!box) throw new Error("Real selection image has no geometry");
-        await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
-        await page.mouse.down();
-        await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.8);
-        await page.mouse.up();
-        const resumeResponse = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/agent/runs/${created.runId}/resume`);
-        await page.getByRole("button", { name: "确认修改位置", exact: true }).click();
-        const resumed = await resumeResponse;
-        expect(resumed.ok(), await resumed.text()).toBe(true);
-        const body = resumed.request().postDataJSON() as { conversationId: string; sceneSelection: CreativeSceneSelection };
-        expect(body).toMatchObject({ conversationId: created.conversationId, sceneSelection: { baselineAssetId: selection.baselineAssetId } });
-        const resumedRun = ((await resumed.json()) as { data: { run: PublicRun } }).data.run;
-        expect(resumedRun).toMatchObject({ id: created.runId, tasks: [{ id: taskId }] });
-        expectPublicWhitelist(resumedRun);
         const completed = await waitForRun(request, created.runId, "completed");
-        pausedRunForCleanup = undefined;
-        expect(completed.tasks?.[0].id).toBe(taskId);
+        expect(completed.ecommerceSceneSelection).toBeUndefined();
+        await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
+        await expectProductResult(page);
         const trace = await expectAdminTrace(request, created.runId, "passed");
         expectLatestTraceVersions(trace);
-        const plan = traceStage(trace, "edit_planning").output;
-        expect(plan).toMatchObject({
-            operation: "scene_edit",
-            canvas: { mode: "exact", source: "user_text", size: { width: golden.source!.width, height: golden.source!.height } },
-            protection: { scope: "local", preserveOutsideMask: true, allowLightingChange: false },
-        });
-        expect(trace.imageTaskIds).toHaveLength(1);
-        const evidence = traceStage(trace, "quality_check").output.sceneProtectionEvidence?.[0].evidence;
-        expect(evidence).toMatchObject({
-            sourceAssetId: selection.baselineAssetId,
-            sourceSize: { width: golden.source!.width, height: golden.source!.height },
-            nativeSize: { width: golden.source!.width, height: golden.source!.height },
-            targetRegion: body.sceneSelection.region,
-            compositeOutsideChangedPixels: 0,
-        });
-        if (!evidence?.maskUrl || !evidence.nativeUrl || !evidence.compositeUrl) throw new Error("Real local edit lacks full mask/native/composite evidence");
-        const proof = await Promise.all(
-            [selection.url, evidence.maskUrl, evidence.nativeUrl, evidence.compositeUrl].map(async (url) => {
-                const response = await request.get(url);
-                expect(response.ok()).toBe(true);
-                return response.body();
-            }),
-        );
-        const decoded = await Promise.all(proof.map((bytes) => sharp(bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true })));
-        for (const image of decoded) {
-            expect(image.info).toMatchObject({ width: golden.source!.width, height: golden.source!.height, channels: 4 });
-            expect(image.data.length).toBe(golden.source!.width * golden.source!.height * 4);
-        }
-        const diff = Buffer.alloc(decoded[0].data.length);
-        let outsideChanges = 0;
-        for (let offset = 0; offset < diff.length; offset += 4) {
-            const changed = !decoded[0].data.subarray(offset, offset + 4).equals(decoded[3].data.subarray(offset, offset + 4));
-            if (changed && decoded[1].data[offset + 3] !== 0) outsideChanges++;
-            if (changed) {
-                diff[offset] = 255;
-                diff[offset + 3] = 255;
-            }
-        }
-        expect(outsideChanges).toBe(0);
-        for (const [index, label] of ["source", "mask", "native", "composite"].entries()) await testInfo.attach(`${golden.caseId}-${label}.png`, { body: proof[index], contentType: "image/png" });
-        await testInfo.attach(`${golden.caseId}-diff.png`, {
-            body: await sharp(diff, { raw: { width: golden.source!.width, height: golden.source!.height, channels: 4 } })
-                .png()
-                .toBuffer(),
-            contentType: "image/png",
-        });
-        expect((await protocolFixtureState(request)).requests.filter((item) => item.method === "POST" && item.path.endsWith("/images/edits"))).toHaveLength(1);
-        const duplicate = await request.post(`/api/agent/runs/${created.runId}/resume`, { data: body });
-        expect(duplicate.status()).toBe(409);
+        expect(traceStage(trace, "edit_planning").output.protection).toMatchObject({ scope: "global", preserveOutsideMask: false });
+        const creates = (await protocolFixtureState(request)).requests.filter((item) => item.method === "POST" && item.path.endsWith("/images/edits"));
+        expect(creates).toHaveLength(1);
+        expect(creates[0]).toMatchObject({ hasMask: false, imageInputs: [{ sha256: createHash("sha256").update(source).digest("hex") }] });
         await page.reload({ waitUntil: "domcontentloaded" });
         await expectProductResult(page);
-        expectPublicWhitelist(completed);
     });
 }
+
+test("nano-full-image:完整商品参考通过真实HTTP直接生成且不带蒙版", async ({ page, request }) => {
+    const settings = e2eSettingsPatch();
+    const upstream = "nano-banana-2";
+    for (const channel of settings.systemChannels) {
+        channel.models = [...channel.models, upstream];
+        channel.advancedConfig.modelCapabilities = { ...channel.advancedConfig.modelCapabilities, [upstream]: "image" };
+        channel.advancedConfig.modelConfigs = { ...channel.advancedConfig.modelConfigs, [upstream]: channel.advancedConfig.modelConfigs["gpt-image-2.5-flare"] };
+    }
+    settings.logicalModels = settings.logicalModels.map((model) => (model.id === "e2e-ecommerce-image" ? { ...model, bindings: model.bindings.map((binding) => ({ ...binding, upstreamModel: upstream })) } : model));
+    settings.modelPointCosts[upstream] = 0;
+    expect((await request.patch("/api/admin/settings", { data: settings })).ok()).toBe(true);
+    const golden = cases[0];
+    const created = await submitProductScene(page, golden);
+    const run = await waitForRun(request, created.runId, "completed");
+    expect(run.assetIds).toHaveLength(1);
+    await expectProductResult(page);
+    const state = await protocolFixtureState(request);
+    const images = state.requests.filter((item) => item.method === "POST" && item.path.endsWith("/images/edits"));
+    expect(images).toHaveLength(1);
+    expect(images[0]).toMatchObject({ model: upstream, hasMask: false, imageInputs: [{ sha256: golden.fixtureSha256 }] });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expectProductResult(page);
+});
 
 for (const golden of regressions.filter((item) => item.scenario === "quality_unavailable")) {
     test(`${golden.caseId}:真实生成先交付再提供可选视觉建议`, async ({ page, request }, testInfo) => {
@@ -591,148 +533,6 @@ for (const golden of regressions.filter((item) => item.scenario === "quality_una
         expectPublicWhitelist(run);
     });
 }
-
-test("unsupported-mask:真实协议能力门禁保留原任务且不整图重绘", async ({ page, request }, testInfo) => {
-    test.skip(testInfo.project.name !== "chromium", "真实协议否定对照在桌面执行");
-    const golden = regressions.find((item) => item.caseId === "unsupported-mask")!;
-    const settings = e2eSettingsPatch();
-    const model = "nano-banana-2";
-    const channelId = "e2e-maskless-gemini";
-    const logicalModelId = "e2e-maskless-image";
-    const operation = { capability: "image", source: "manual", protocol: "compatible", apiFormat: "gemini", createPath: `/models/${model}:generateContent`, supportsReferenceImage: true };
-    const configured = await request.patch("/api/admin/settings", {
-        data: {
-            ...settings,
-            systemChannels: [
-                ...settings.systemChannels,
-                {
-                    ...settings.systemChannels[0],
-                    id: channelId,
-                    name: "E2E 无独立蒙版协议",
-                    apiFormat: "gemini",
-                    models: [model],
-                    advancedConfig: {
-                        ...settings.systemChannels[0].advancedConfig,
-                        protocol: "compatible",
-                        authMode: "custom-header",
-                        authHeader: "x-goog-api-key",
-                        authPrefix: "",
-                        modelCatalogPaths: ["/v1beta/models"],
-                        modelCapabilities: { [model]: "image" },
-                        modelConfigs: { [model]: operation },
-                        operationConfigs: { image: operation },
-                    },
-                },
-            ],
-            logicalModels: [...settings.logicalModels, { id: logicalModelId, name: "E2E 无独立蒙版图片", capability: "image", enabled: true, bindings: [{ id: "e2e-maskless-binding", channelId, upstreamModel: model, enabled: true, priority: 1 }] }],
-            ecommerceModelRoles: { ...settings.ecommerceModelRoles, image_generation: [logicalModelId] },
-            modelPointCosts: { ...settings.modelPointCosts, [model]: 0, [logicalModelId]: 0 },
-        },
-    });
-    expect(configured.ok(), await configured.text()).toBe(true);
-    try {
-        await page.goto("/create", { waitUntil: "domcontentloaded" });
-        await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
-        await page.locator('input[type="file"][multiple]').setInputFiles({ name: "unsupported-mask-scene.png", mimeType: "image/png", buffer: await deterministicScene(golden.source!) });
-        const created = await submitPrompt(page, golden.userRequest, { reusePage: true });
-        pausedRunForCleanup = created;
-        const paused = await waitForRun(request, created.runId, "paused");
-        expect(paused.tasks).toMatchObject([{ status: "needs_review" }]);
-        expect(paused.ecommerceSceneSelection).toBeUndefined();
-        expectPublicWhitelist(paused);
-        const detail = await request.get("/api/admin/generation-operations?type=agent");
-        expect(detail.ok(), await detail.text()).toBe(true);
-        const internal = ((await detail.json()).data.items as Array<{ id: string; status: string; model: string; error?: string; childTasks?: unknown[] }>).find((item) => item.id === created.runId);
-        expect(internal).toMatchObject({ id: created.runId, status: "paused", model: logicalModelId, error: "当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。" });
-        const creates = (state: Awaited<ReturnType<typeof protocolFixtureState>>) => state.requests.filter((item) => item.method === "POST" && (/\/images\//.test(item.path) || /:generateContent$/.test(item.path))).length;
-        expect(creates(await protocolFixtureState(request))).toBe(0);
-        const rejected = await request.post(`/api/agent/runs/${created.runId}/resume`, { data: { conversationId: created.conversationId, sceneSelection: { baselineAssetId: "invalid-selection", region: { x: 1, y: 1, width: 2, height: 2 } } } });
-        expect(rejected.status()).toBe(409);
-        const restoration = page
-            .waitForEvent("framenavigated", (frame) => frame === page.mainFrame())
-            .then(() => page.waitForRequest((request) => request.method() === "GET" && new URL(request.url()).pathname === `/api/agent/runs/${created.runId}`))
-            .then((request) => request.response());
-        await page.reload({ waitUntil: "domcontentloaded" });
-        const restoredResponse = await restoration;
-        expect(restoredResponse).not.toBeNull();
-        expect(restoredResponse!.ok(), await restoredResponse!.text()).toBe(true);
-        expect(((await restoredResponse!.json()) as { data: { run: PublicRun } }).data.run).toMatchObject({ id: created.runId, conversationId: created.conversationId, status: "paused" });
-        await expect(page.getByText("当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。", { exact: true })).toBeVisible();
-        await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
-        await expect(page.getByTestId("creative-media-result")).toHaveCount(0);
-        const restored = await waitForRun(request, created.runId, "paused");
-        expect(restored.tasks?.[0].id).toBe(paused.tasks?.[0].id);
-        expect(creates(await protocolFixtureState(request))).toBe(0);
-    } finally {
-        const restored = await request.patch("/api/admin/settings", { data: settings });
-        expect(restored.ok(), await restored.text()).toBe(true);
-    }
-});
-
-test("custom-mask-preflight:不可信自定义蒙版协议提前复核且原因刷新保留", async ({ page, request }, testInfo) => {
-    test.skip(testInfo.project.name !== "chromium", "真实协议否定对照在桌面执行");
-    const golden = regressions.find((item) => item.caseId === "landscape-prop-add")!;
-    const settings = e2eSettingsPatch();
-    const model = MODEL_ROUTES.image_generation.upstreamModel;
-    const reason = "当前渠道尚未配置可用的独立蒙版编辑方式，请联系管理员。";
-    // The shared protocol contract rejects untrusted custom masks before asking for a selection.
-    const configured = await request.patch("/api/admin/settings", {
-        data: {
-            ...settings,
-            systemChannels: settings.systemChannels.map((channel) => ({
-                ...channel,
-                advancedConfig: {
-                    ...channel.advancedConfig,
-                    modelConfigs: { ...channel.advancedConfig.modelConfigs, [model]: { ...(channel.advancedConfig.modelConfigs[model] as Record<string, unknown>), protocol: "custom" } },
-                },
-            })),
-        },
-    });
-    expect(configured.ok(), await configured.text()).toBe(true);
-    try {
-        await page.goto("/create", { waitUntil: "domcontentloaded" });
-        await expect(page.locator(".creative-composer")).toHaveAttribute("data-ready", "true", { timeout: 45_000 });
-        await page.locator('input[type="file"][multiple]').setInputFiles({ name: "child-review-scene.png", mimeType: "image/png", buffer: await deterministicScene(golden.source!) });
-        const created = await submitPrompt(page, golden.userRequest, { reusePage: true });
-        pausedRunForCleanup = created;
-        const paused = await waitForRun(request, created.runId, "paused");
-        const taskId = paused.tasks?.[0].id;
-        expect(taskId).toBeDefined();
-        expect(paused.tasks).toEqual([expect.objectContaining({ id: taskId, status: "needs_review", error: reason })]);
-        expect(paused.ecommerceSceneSelection).toBeUndefined();
-        expectPublicWhitelist(paused);
-        const children = async () => {
-            const response = await request.get("/api/admin/generation-operations?type=image");
-            expect(response.ok(), await response.text()).toBe(true);
-            return ((await response.json()).data.items as AdminGenerationTask[]).filter((task) => task.runId === created.runId);
-        };
-        expect(await children()).toHaveLength(0);
-        const rejected = await request.post(`/api/agent/runs/${created.runId}/resume`, { data: { conversationId: created.conversationId, sceneSelection: { baselineAssetId: "invalid-selection", region: { x: 1, y: 1, width: 2, height: 2 } } } });
-        expect(rejected.status()).toBe(409);
-        await expect(page.getByText(reason, { exact: true })).toBeVisible();
-        const assertPersistedReason = async () => {
-            const messages = await request.get(`/api/creative/conversations/${created.conversationId}/messages`);
-            expect(messages.ok(), await messages.text()).toBe(true);
-            const assistant = ((await messages.json()).data.messages as Array<{ runId?: string; role: string; content: string }>).find((message) => message.runId === created.runId && message.role === "assistant");
-            expect(assistant?.content).toBe(reason);
-            await expect(page.getByText(/上游创建状态待确认|上游创建结果待确认/)).toHaveCount(0);
-            expect((await protocolFixtureState(request)).requests.filter((item) => item.method === "POST" && (/\/images\//.test(item.path) || /:generateContent$/.test(item.path)))).toHaveLength(0);
-            expect(await children()).toHaveLength(0);
-        };
-        await assertPersistedReason();
-        await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
-        await expect(page.getByTestId("creative-media-result")).toHaveCount(0);
-        await page.reload({ waitUntil: "domcontentloaded" });
-        await expect(page.getByText(reason, { exact: true })).toBeVisible();
-        await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
-        await expect(page.getByTestId("creative-media-result")).toHaveCount(0);
-        expect((await waitForRun(request, created.runId, "paused")).tasks).toEqual(paused.tasks);
-        await assertPersistedReason();
-    } finally {
-        const restored = await request.patch("/api/admin/settings", { data: settings });
-        expect(restored.ok(), await restored.text()).toBe(true);
-    }
-});
 
 async function deterministicScene(size: { width: number; height: number }) {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size.width}" height="${size.height}"><rect width="100%" height="100%" fill="#d8d3c9"/><rect x="900" y="900" width="1600" height="1000" fill="#805b3e"/><path d="M900 1233H2500M900 1566H2500" stroke="#402d20" stroke-width="12"/></svg>`;
@@ -806,12 +606,7 @@ function expectPublicWhitelist(run: PublicRun) {
         expect(["ready", "running", "needs_review", "completed", "failed", "cancelled"]).toContain(publicTask.status);
     }
     if (value.ecommerceSceneSelection) {
-        const selection = expectPublicObject(value.ecommerceSceneSelection, { action: "confirm_scene_selection", baselineAssetId: string, url: string, width: number, height: number }, ["action", "baselineAssetId", "url", "width", "height"]);
-        expect(selection.url).toMatch(/^\/api\/(reference-assets|generation-log-assets)\//);
-        for (const key of ["width", "height"]) {
-            expect(Number.isSafeInteger(selection[key])).toBe(true);
-            expect(selection[key]).toBeGreaterThan(0);
-        }
+        expectPublicObject(value.ecommerceSceneSelection, { action: "regenerate_full_image" }, ["action"]);
     }
     if (value.ecommerceReferenceReview) {
         const review = expectPublicObject(value.ecommerceReferenceReview, { version: "ecommerce-reference-review.v1", reviewId: string, kind: string, question: string, assets: array, inheritedEditTarget: object }, [
@@ -888,8 +683,8 @@ function expectPublicObject(value: unknown, shape: Record<string, unknown>, requ
 
 function expectLatestTraceVersions(trace: EcommerceTrace) {
     expect(traceStage(trace, "visual_analysis").output.analysisVersion).toBe("ecommerce-visual-analysis.v4");
-    expect(traceStage(trace, "edit_planning").output).toMatchObject({ planVersion: "ecommerce-edit.v6", visibleStructure: expect.any(Array) });
-    expect(traceStage(trace, "image_generation").output.compilerVersion).toBe("ecommerce-openai-image-2.5.v4");
+    expect(traceStage(trace, "edit_planning").output).toMatchObject({ planVersion: "ecommerce-edit.v7", visibleStructure: expect.any(Array) });
+    expect(traceStage(trace, "image_generation").output.compilerVersion).toBe("ecommerce-openai-image-2.5.v5");
     expect(traceStage(trace, "image_generation").output.photography).toEqual(traceStage(trace, "edit_planning").output.photography);
     expect(traceStage(trace, "quality_check").output.version).toBe("ecommerce-quality.v2");
 }
@@ -959,8 +754,8 @@ test("large-reference:四千八百万像素参考图完成真实创作并刷新�
     await expect(page.getByTestId("creative-reference-review")).toHaveCount(0);
 });
 
-test("large-product-reference:四千二百多万像素商品完成原尺寸保护并刷新恢复", async ({ page, request }, testInfo) => {
-    test.skip(testInfo.project.name !== "chromium", "大商品原尺寸保护回归只在桌面 Chromium 执行");
+test("large-product-reference:四千二百多万像素商品整图生成并刷新恢复", async ({ page, request }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "大商品参考回归只在桌面 Chromium 执行");
     const goldenCase = cases[5];
     const userRequest = goldenCase.userRequest;
     const product = {
@@ -1021,12 +816,9 @@ test("large-product-reference:四千二百多万像素商品完成原尺寸保�
         expectLatestTraceVersions(trace);
         expect(trace.imageTaskIds).toHaveLength(1);
         expect(traceStage(trace, "edit_planning").output).toMatchObject({ operation: "product_to_scene", canvas: { mode: "ratio", source: "baseline", size: { width: 7997, height: 5334 } } });
-        expect(traceStage(trace, "image_generation").output).toMatchObject({
-            mask: { mode: "independent", required: true },
-            protection: { sourceSize: { width: 7997, height: 5334 }, productCore: [{ x: 2400, y: 1200, width: 3200, height: 2800 }], maskProvider: "white-background-flood-fill.v1", maskTrust: "trusted" },
-        });
+        expect(traceStage(trace, "image_generation").output.mask).toBeUndefined();
+        expect(traceStage(trace, "image_generation").output.protection).toBeUndefined();
         expect((await protocolFixtureState(request)).requests.filter((item) => item.method === "POST" && item.path.endsWith("/images/edits"))).toHaveLength(1);
-        await testInfo.attach("large-product-protection.json", { body: JSON.stringify(traceStage(trace, "image_generation").output.protection, null, 2), contentType: "application/json" });
         const assetsResponse = await request.get(`/api/creative/conversations/${run.conversationId}/assets`);
         expect(assetsResponse.ok()).toBe(true);
         const assetsPayload: { data: { assets: Array<{ id: string; sourceRunId?: string; serverUrl?: string; width?: number; height?: number }> } } = await assetsResponse.json();
@@ -1249,198 +1041,23 @@ test("移动端可完成一句话商品场景生成且没有横向溢出", async
     await expectNoHorizontalOverflow(page, `ecommerce product generation ${testInfo.project.name}`);
 });
 
-test("paused-observer:暂停进度保留同一订阅且确认后继续原任务", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== "chromium", "真实 React effect 与受控 HTTP/SSE 边界回归");
-    await page.addInitScript(() => {
-        const sources: ControlledEventSource[] = [];
-        class ControlledEventSource extends EventTarget {
-            closed = false;
-            onerror: (() => void) | null = null;
-            onopen: (() => void) | null = null;
-            constructor(readonly url: string) {
-                super();
-                sources.push(this);
-            }
-            close() {
-                this.closed = true;
-            }
-            emit(type: string, data: unknown) {
-                if (!this.closed) this.dispatchEvent(new MessageEvent(type, { data: JSON.stringify(data) }));
-            }
-        }
-        Object.assign(window, { __ecommerceRunEvents: { sources } });
-        Object.defineProperty(window, "EventSource", { value: ControlledEventSource });
-    });
-    const fixture = await mockPublicEcommerceRound(page, "selection", true);
-    const selection = fixture.run.ecommerceSceneSelection!;
-    fixture.run.status = "running";
-    fixture.run.tasks[0].status = "running";
-    delete fixture.run.ecommerceSceneSelection;
-    await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
-    const observer = () => page.evaluate(() => (window as unknown as RunEventWindow).__ecommerceRunEvents.sources.map(({ url, closed }) => ({ url, closed })));
-    await expect.poll(observer).toEqual([{ url: `/api/agent/runs/${fixture.runId}/events`, closed: false }]);
-    const initialReads = fixture.statusReads();
-    fixture.run.status = "paused";
-    fixture.run.tasks[0].status = "needs_review";
-    fixture.run.ecommerceSceneSelection = selection;
-    await page.evaluate((run) => {
-        const source = (window as unknown as RunEventWindow).__ecommerceRunEvents.sources.at(-1)!;
-        source.emit("task.needs_review", { data: { error: "请确认需要修改的位置" } });
-        source.emit("run.snapshot", run);
-    }, fixture.run);
-    await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toBeVisible();
-    await page.getByRole("textbox").fill("同一任务已暂停，等待确认");
-    await flushRunEventRendering(page);
-    expect(await observer()).toEqual([{ url: `/api/agent/runs/${fixture.runId}/events`, closed: false }]);
-    expect(fixture.statusReads() - initialReads).toBe(1);
-    await expect(page.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
-    await expect(page.getByTestId("creative-generation-elapsed")).toHaveCount(0);
-
-    await page.evaluate((run) => {
-        const source = (window as unknown as RunEventWindow).__ecommerceRunEvents.sources.at(-1)!;
-        source.emit("run.snapshot", run);
-        source.onerror?.();
-    }, fixture.run);
-    await expect.poll(() => fixture.statusReads() - initialReads).toBe(2);
-    await page.evaluate(() => (window as unknown as RunEventWindow).__ecommerceRunEvents.sources.at(-1)!.onopen?.());
-    await flushRunEventRendering(page);
-    expect(await observer()).toEqual([{ url: `/api/agent/runs/${fixture.runId}/events`, closed: false }]);
-    expect(fixture.statusReads() - initialReads).toBe(2);
-    await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toBeVisible();
-
-    await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
-    await dragSceneSelection(page);
-    await page
-        .getByTestId("creative-scene-selection")
-        .getByRole("button", { name: /确认修改位置$/ })
-        .click();
-    await expect.poll(() => fixture.controls.length).toBe(1);
-    expect(fixture.controls[0]).toEqual({ conversationId: fixture.conversationId, sceneSelection: { baselineAssetId: selection.baselineAssetId, region: { x: 251, y: 125, width: 752, height: 377 } } });
-    fixture.releaseResume();
-    await expect.poll(observer).toEqual([
-        { url: `/api/agent/runs/${fixture.runId}/events`, closed: true },
-        { url: `/api/agent/runs/${fixture.runId}/events`, closed: false },
-    ]);
-    await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "停止生成", exact: true })).toBeVisible();
-    fixture.run.status = "completed";
-    fixture.run.tasks[0].status = "completed";
-    await page.evaluate(() => (window as unknown as RunEventWindow).__ecommerceRunEvents.sources.at(-1)!.emit("run.completed", { data: { reply: "原任务已完成" } }));
-    await expect(page.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
-    expect((await observer()).every((source) => source.closed)).toBe(true);
-    expect(fixture.createdRuns()).toBe(0);
-    expect(fixture.controls).toHaveLength(1);
-});
-
-type RunEventWindow = Window & {
-    __ecommerceRunEvents: { sources: Array<{ url: string; closed: boolean; emit: (type: string, data: unknown) => void; onerror: (() => void) | null; onopen: (() => void) | null }> };
-};
-
-async function flushRunEventRendering(page: Page) {
-    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-}
-
-test("selection-large-preview:待确认直接显示完整图片并在大图保留原像素选区", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== "chromium", "桌面大图框选专项");
-    await page.setViewportSize({ width: 1440, height: 900 });
+test("historical-selection:未提交旧任务可直接重新生成且不再框选", async ({ page }) => {
     const fixture = await mockPublicEcommerceRound(page, "selection");
     await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
-    const preview = page.getByRole("img", { name: "待修改的原图", exact: true });
-    await expect(preview).toBeVisible();
-    await expect.poll(() => preview.evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBe(418);
-    const small = await preview.boundingBox();
-    if (!small) throw new Error("Inline selection preview has no browser geometry");
-    expect(small.width / small.height).toBeCloseTo(2, 2);
-    await expect(page.getByRole("dialog", { name: "选择修改位置", exact: true })).toHaveCount(0);
-    await preview.click();
-    const dialog = page.getByRole("dialog", { name: "选择修改位置", exact: true });
-    await expect(dialog).toBeVisible();
-    const image = dialog.getByRole("img", { name: "选择修改位置的原图", exact: true });
-    await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(418);
-    const large = await sceneSelectionImageGeometry(page);
-    expect(large.width).toBeGreaterThan(small.width * 1.6);
-    expect(large.width / large.height).toBeCloseTo(2, 2);
-    expect(large.x).toBeGreaterThanOrEqual(0);
-    expect(large.y).toBeGreaterThanOrEqual(0);
-    expect(large.x + large.width).toBeLessThanOrEqual(1440);
-    expect(large.y + large.height).toBeLessThanOrEqual(900);
-    const confirm = dialog.getByRole("button", { name: /确认修改位置$/ });
-    await expect(confirm).toBeDisabled();
-    await dragSceneSelection(page);
-    await expect(confirm).toBeEnabled();
-    const selected = dialog.getByTestId("creative-scene-selection-region");
-    const expectedOverlay = await selected.getAttribute("style");
-    await dialog.getByRole("button", { name: "关闭大图", exact: true }).click();
-    await expect(dialog).toHaveCount(0);
-    await expect(page.getByTestId("creative-scene-selection-preview").getByTestId("creative-scene-selection-region")).toHaveAttribute("style", expectedOverlay!);
-    expect(fixture.controls).toHaveLength(0);
-    await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
-    await expect(dialog).toBeVisible();
-    await expect(selected).toHaveAttribute("style", expectedOverlay!);
-    await expect(confirm).toBeEnabled();
-    await page.keyboard.press("Escape");
-    await expect(dialog).toHaveCount(0);
-    await expect(page.getByTestId("creative-scene-selection-preview").getByTestId("creative-scene-selection-region")).toHaveAttribute("style", expectedOverlay!);
-    expect(fixture.controls).toHaveLength(0);
-    await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
-    await expect(dialog).toBeVisible();
-    await expect(selected).toHaveAttribute("style", expectedOverlay!);
-    await testInfo.attach("selection-large-preview", { body: await page.screenshot(), contentType: "image/png" });
-    await confirm.dblclick();
-    await expect(confirm).toBeDisabled();
+    const regenerate = page.getByRole("button", { name: "按原要求重新生成", exact: true });
+    await expect(regenerate).toBeVisible();
+    await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
+    await regenerate.click();
     await expect.poll(() => fixture.controls.length).toBe(1);
-    expect(fixture.controls[0]).toEqual({ conversationId: fixture.conversationId, sceneSelection: { baselineAssetId: "task16-baseline", region: { x: 251, y: 125, width: 752, height: 377 } } });
+    expect(fixture.controls[0]).toEqual({ conversationId: fixture.conversationId });
     fixture.releaseResume();
-    await expect(dialog).toHaveCount(0);
+    await expect(regenerate).toHaveCount(0);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(regenerate).toHaveCount(0);
     expect(fixture.createdRuns()).toBe(0);
-    expect(fixture.controls).toHaveLength(1);
 });
 
 for (const theme of ["light", "dark"] as const) {
-    test(`待选区同一任务可取消、刷新恢复并按原图像素确认-${theme}`, async ({ page }, testInfo) => {
-        test.skip(!["chromium", "mobile-390", "mobile-430"].includes(testInfo.project.name), "桌面与390/430专项");
-        await page.addInitScript((value) => localStorage.setItem("vozeb-pro:theme_store", JSON.stringify({ state: { theme: value }, version: 0 })), theme);
-        const fixture = await mockPublicEcommerceRound(page, "selection");
-        await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
-        await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toBeVisible();
-        await expect(page.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
-        await expect(page.getByTestId("creative-generation-elapsed")).toHaveCount(0);
-        await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
-        const confirm = page.getByTestId("creative-scene-selection").getByRole("button", { name: /确认修改位置$/ });
-        await expect(confirm).toBeDisabled();
-        await dragSceneSelection(page);
-        await expect(confirm).toBeEnabled();
-        await page.getByRole("button", { name: "取消选择", exact: true }).click();
-        expect(fixture.controls).toHaveLength(0);
-        await expect(page.getByRole("dialog", { name: "选择修改位置", exact: true })).toHaveCount(0);
-        await expect(page.getByTestId("creative-scene-selection-preview").getByTestId("creative-scene-selection-region")).toHaveCount(0);
-        await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
-        await expect(confirm).toBeDisabled();
-        await expect(page.getByTestId("creative-scene-selection").getByTestId("creative-scene-selection-region")).toHaveCount(0);
-        await page.getByRole("button", { name: "关闭大图", exact: true }).click();
-        await expect(page.getByRole("dialog", { name: "选择修改位置", exact: true })).toHaveCount(0);
-        await page.reload({ waitUntil: "domcontentloaded" });
-        await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
-        await expect(confirm).toBeDisabled();
-        await page.goto(`/create?conversationId=${fixture.otherConversationId}`, { waitUntil: "domcontentloaded" });
-        await expect(page.getByText("另一个对话自己的消息", { exact: true })).toBeVisible();
-        await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
-        await page.goto(`/create?conversationId=${fixture.conversationId}`, { waitUntil: "domcontentloaded" });
-        await page.getByRole("button", { name: "选择修改位置", exact: true }).click();
-        await expect(confirm).toBeDisabled();
-        await dragSceneSelection(page);
-        await expectNoHorizontalOverflow(page, `scene selection ${theme} ${testInfo.project.name}`);
-        await testInfo.attach(`scene-selection-${theme}-${testInfo.project.name}`, { body: await page.screenshot(), contentType: "image/png" });
-        await confirm.dblclick();
-        await expect(confirm).toBeDisabled();
-        await expect.poll(() => fixture.controls.length).toBe(1);
-        expect(fixture.controls[0]).toEqual({ conversationId: fixture.conversationId, sceneSelection: { baselineAssetId: "task16-baseline", region: { x: 251, y: 125, width: 752, height: 377 } } });
-        fixture.releaseResume();
-        await expect(page.getByRole("button", { name: "选择修改位置", exact: true })).toHaveCount(0);
-        expect(fixture.createdRuns()).toBe(0);
-        expect(fixture.controls).toHaveLength(1);
-    });
-
     test(`验收公开状态刷新和切换对话保持可读-${theme}`, async ({ page }, testInfo) => {
         test.skip(!["chromium", "mobile-390", "mobile-430"].includes(testInfo.project.name), "桌面与390/430专项");
         await page.addInitScript((value) => localStorage.setItem("vozeb-pro:theme_store", JSON.stringify({ state: { theme: value }, version: 0 })), theme);
@@ -1617,36 +1234,6 @@ test("resource-resume-ui:成功后刷新按原Run运行态恢复且保留旧助�
     expect(fixture.createdRuns()).toBe(0);
 });
 
-async function sceneSelectionImageGeometry(page: Page) {
-    const image = page.getByRole("img", { name: "选择修改位置的原图", exact: true });
-    await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(418);
-    await image.scrollIntoViewIfNeeded();
-    let previous: Awaited<ReturnType<typeof image.boundingBox>> = null;
-    let stableSamples = 0;
-    // Modal motion can start after its first visible frame; wait for stable geometry.
-    await expect
-        .poll(
-            async () => {
-                const box = await image.boundingBox();
-                stableSamples = box && previous && (["x", "y", "width", "height"] as const).every((key) => Math.abs(box[key] - previous![key]) < 0.5) ? stableSamples + 1 : 0;
-                previous = box;
-                return stableSamples;
-            },
-            { intervals: [100, 100, 100] },
-        )
-        .toBeGreaterThanOrEqual(2);
-    if (!previous) throw new Error("Selection image has no stable browser geometry");
-    return previous;
-}
-
-async function dragSceneSelection(page: Page) {
-    const box = await sceneSelectionImageGeometry(page);
-    await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
-    await page.mouse.down();
-    await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.8);
-    await page.mouse.up();
-}
-
 async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" | "hard" | "unavailable" | "resource", runningMessage = false, resourceResumeResult: "running" | "paused" | "error" = "running") {
     const conversationId = `task16-${state}`;
     const otherConversationId = `${conversationId}-other`;
@@ -1680,7 +1267,7 @@ async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" 
         ...(state === "resource"
             ? { imageProcessingRecovery: { reason: "resource_failure", canResume: false, message: RESOURCE_BLOCKED_MESSAGE }, canCheckStatus: false }
             : state === "selection"
-              ? { ecommerceSceneSelection: { action: "confirm_scene_selection", baselineAssetId: "task16-baseline", url: "/api/reference-assets/task16-baseline.png", width: 1254, height: 627 } }
+              ? { ecommerceSceneSelection: { action: "regenerate_full_image" } }
               : {
                     ecommerceQualityStatus: state === "soft" ? "needs_adjustment" : "needs_review",
                     ecommerceQualityReview: {
@@ -1690,7 +1277,7 @@ async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" 
                     },
                 }),
     };
-    const controls: Array<{ conversationId: string; sceneSelection?: CreativeSceneSelection }> = [];
+    const controls: Array<{ conversationId: string }> = [];
     let created = 0;
     let statusReads = 0;
     const eventSnapshots: Array<Pick<CreativeAgentRun, "id" | "conversationId" | "status">> = [];
@@ -1765,7 +1352,7 @@ async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" 
         if (route.request().method() === "POST") created += 1;
         return route.fulfill({ json: { code: 0, data: { runs: [] }, msg: "OK" } });
     });
-    await page.route(new RegExp(`/api/agent/runs/${run.id}/resume$`), async (route) => {
+    await page.route(new RegExp(`/api/agent/runs/${run.id}/${state === "selection" ? "retry" : "resume"}$`), async (route) => {
         controls.push(route.request().postDataJSON());
         await resumeRelease;
         if (state === "resource" && resourceResumeResult === "error") return route.fulfill({ status: 409, json: { code: 409, data: null, msg: RESOURCE_RESUME_ERROR } });
@@ -1773,7 +1360,8 @@ async function mockPublicEcommerceRound(page: Page, state: "selection" | "soft" 
             run.imageProcessingRecovery = { reason: "resource_failure", canResume: false, message: RESOURCE_BLOCKED_MESSAGE };
             return route.fulfill({ json: { code: 0, data: { run }, msg: "OK" } });
         }
-        run.status = "running";
+        run.status = state === "selection" ? "planning" : "running";
+        if (state === "selection") run.tasks = [];
         delete run.ecommerceSceneSelection;
         if (state === "resource") delete run.imageProcessingRecovery;
         await route.fulfill({ json: { code: 0, data: { run }, msg: "OK" } });
@@ -1945,6 +1533,7 @@ function expectSuccessfulTrace(
     const planningStage = traceStage(trace, "edit_planning");
     expect(planningStage.status).toBe("completed");
     expect(planningStage.output.operation).toBe(expected.operation);
+    expect(planningStage.output.protection).toMatchObject({ scope: "global", preserveOutsideMask: false, protectedObjectIds: [] });
     expect(planningStage.output.preserve?.productCore).toEqual(expected.hardProtections);
 
     const source = planningStage.output.source;
@@ -1966,16 +1555,13 @@ function expectSuccessfulTrace(
     const generationStage = traceStage(trace, "image_generation");
     expect(generationStage.status).toBe("completed");
     expect(generationStage.output.executionPrompt).toContain(expected.userRequest);
-    expect(generationStage.output.executionPrompt).toContain(expected.operation);
     for (const protection of expected.hardProtections) expect(generationStage.output.executionPrompt).toContain(protection);
-    expect(generationStage.output.mask).toEqual({
-        mode: "independent",
-        required: true,
-    });
+    expect(generationStage.output.mask).toBeUndefined();
+    expect(generationStage.output.protection).toBeUndefined();
     expect(generationStage.output.referenceRoles).toEqual(expectedReferences);
     expect(generationStage.output.imageTaskIds).toEqual(trace.imageTaskIds);
     const canvas = planningStage.output.canvas;
-    expect(canvas).toMatchObject({ mode: expected.operation === "product_to_scene" ? "ratio" : "exact", source: "baseline" });
+    expect(canvas).toMatchObject({ mode: "ratio", source: "baseline" });
     expect(generationStage.output.canvas).toEqual(canvas);
 
     const qualityStage = traceStage(trace, "quality_check");

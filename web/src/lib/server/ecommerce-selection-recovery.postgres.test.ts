@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { persistFrozenSceneSelection } from "./ecommerce-protection.test-fixtures";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -28,7 +29,7 @@ type ProcessResult = {
 };
 type HttpGate = { arrived: Promise<void>; release: () => void; wait: Promise<void>; arrive: () => void };
 
-postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent process recovery", () => {
+postgresDescribe("isolated PostgreSQL archived contracts and independent process recovery", () => {
     let directory: string;
     let originalSettings: AuthSettings;
     let userId: string;
@@ -281,16 +282,16 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
         const { listStoredGenerationTaskRecordsByRunIds } = await import("./generation-task-store");
         const records = await listStoredGenerationTaskRecordsByRunIds([...ownedRuns], [userId]);
         const { cancelImageProcessingTaskForRun } = await import("./image-processing-service");
+        for (const id of ownedRuns) {
+            const run = await stores.getAgentRun(id);
+            if (run && ["planning", "running", "paused", "failed"].includes(run.status)) await stores.setAgentRunStatus(run, "cancelled");
+        }
         for (const record of records) if (record.type === "image_processing" && ["pending", "running"].includes(record.status)) await cancelImageProcessingTaskForRun({ userId, runId: record.runId!, jobId: record.id });
         for (const record of records)
             if (record.type === "image" && ["pending", "running", "paused"].includes(record.status)) {
                 const image = await images.getImageTask(record.id);
                 if (image) await images.transitionImageTask(image, ["pending", "running"], { status: "cancelled" }, { executionPhase: "completed", nextPollAt: undefined });
             }
-        for (const id of ownedRuns) {
-            const run = await stores.getAgentRun(id);
-            if (run && ["planning", "running", "paused"].includes(run.status)) await stores.setAgentRunStatus(run, "cancelled");
-        }
         ownedRuns.clear();
         await clearAgentReservations();
         if (handlerFailures.length) throw new AggregateError(handlerFailures.splice(0), "Isolated HTTP handler failed");
@@ -559,14 +560,19 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
     }, 120_000);
 
     it("stops barrier commands before owned cleanup after a simulated parent failure", async () => {
-        const { run, selection } = await paused();
+        const { run: pausedRun, selection } = await paused();
+        const run = await persistFrozenSceneSelection(pausedRun, selection.region);
+        const building = await processCommand(run, "recover");
+        const waiting = building.run.ecommerceSnapshot?.processing?.waitingFor;
+        assert(waiting);
+        await processCommand(run, "native", { jobId: waiting.jobId });
         const gate = holdSource(1);
-        const command = processCommand(run, "confirm", { sceneSelection: selection });
+        const command = processCommand(run, "recover");
         const settled = Promise.allSettled([command]);
         await Promise.race([
             gate.arrived,
             command.then(() => {
-                throw new Error("Confirmation process exited before source barrier");
+                throw new Error("Recovery process exited before source barrier");
             }),
         ]);
         const parentFailure = new Error("simulated parent failure");
@@ -589,7 +595,10 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
         expect(await stores.getAgentRun(run.id)).toEqual(cleanedRun);
         expect(await runtime.listCreativeRunEvents(run.id)).toEqual(cleanedEvents);
         const { listStoredGenerationTaskRecordsByRunIds } = await import("./generation-task-store");
-        expect(await listStoredGenerationTaskRecordsByRunIds([run.id], [userId])).toMatchObject([{ type: "image_processing", status: "success", payload: { operation: "prepare_reference" } }]);
+        expect(await listStoredGenerationTaskRecordsByRunIds([run.id], [userId])).toMatchObject([
+            { type: "image_processing", status: "success", payload: { operation: "prepare_reference" } },
+            { type: "image_processing", status: "success", payload: { operation: "build_protection" } },
+        ]);
         expect(cleanedRun?.status).toBe("cancelled");
         expect(imageRequests.filter((request) => request.context.runId === run.id)).toEqual([]);
     }, 120_000);
@@ -682,71 +691,15 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
         expect(imageRequests.filter((request) => request.context.runId === run.id)).toEqual([]);
     }, 120_000);
 
-    it("records one receipt for two independent identical confirmation processes without changing the original task", async () => {
-        const { run, selection } = await paused();
-        const gate = holdSource(2);
-        const first = processCommand(run, "confirm", { sceneSelection: selection });
-        const second = processCommand(run, "confirm", { sceneSelection: selection });
-        await Promise.race([
-            gate.arrived,
-            ...[first, second].map((result) =>
-                result.then(() => {
-                    throw new Error("Confirmation process exited before source barrier");
-                }),
-            ),
-        ]);
-        barrier = undefined;
-        gate.release();
-        const outcomes = await Promise.all([first, second]);
-        expect(new Set(outcomes.map((result) => result.pid)).size).toBe(2);
-        expect(outcomes.map((result) => result.outcome.status).sort()).toEqual([200, 200]);
-        const saved = (await stores.getAgentRun(run.id))!;
-        expect(saved.tasks).toEqual(run.tasks);
-        const receipt = saved.ecommerceSnapshot?.processing?.sceneSelection;
-        const prepare = run.ecommerceSnapshot?.processing?.prepareReferences[0];
-        assert(receipt && prepare?.manifest);
-        expect(receipt).toMatchObject({
-            version: "scene-selection-receipt.v1",
-            parentTaskId: run.tasks[0].id,
-            baseline: { assetId: selection.baselineAssetId, sha256: prepare.manifest.sourceIdentities[0].sha256, bytes: prepare.manifest.sourceIdentities[0].bytes, width: 6, height: 4 },
-            prepare: { jobId: prepare.jobId, inputDigest: prepare.inputDigest, executionId: prepare.manifest.executionId },
-            region: selection.region,
-            confirmation: { actorUserId: userId, confirmedAt: expect.any(Number) },
-        });
-        expect(saved.ecommerceSnapshot).toEqual({ ...run.ecommerceSnapshot, processing: { ...run.ecommerceSnapshot!.processing!, sceneSelection: receipt } });
-        expect(saved.tasks[0].taskIds).toBeUndefined();
-        expect((await runtime.listCreativeRunEvents(run.id)).filter((event) => event.type === "run.resumed")).toHaveLength(1);
-    }, 120_000);
-
-    it("rejects a late confirmation after the task was submitted and paused again", async () => {
-        const { run, selection } = await paused();
-        const gate = holdSource(1);
-        const stale = processCommand(run, "confirm", { sceneSelection: selection });
-        await Promise.race([
-            gate.arrived,
-            stale.then(() => {
-                throw new Error("Late confirmation process exited before source barrier");
-            }),
-        ]);
-        const submittedTasks = [{ ...run.tasks[0], status: "running" as const, attempts: 1, taskId: "fixture-existing-child", taskIds: ["fixture-existing-child"], childTasks: [{ id: "fixture-existing-child", status: "pending" as const, attempt: 1 }] }];
-        await stores.updateAgentRunById(run.id, { status: "running", tasks: submittedTasks }, undefined, ["paused"]);
-        await stores.updateAgentRunById(run.id, { status: "paused" }, undefined, ["running"]);
-        barrier = undefined;
-        gate.release();
-        expect((await stale).outcome.status).toBe(409);
-        expect((await stores.getAgentRun(run.id))!.tasks).toEqual(submittedTasks);
-    }, 120_000);
-
     it.each(["ecommerce-edit.v3", "ecommerce-edit.v4", "ecommerce-edit.v5"] as const)(
-        "confirms and independently reads the immutable %s snapshot",
+        "independently reads the immutable archived %s snapshot",
         async (version) => {
             const { run, selection } = await paused(version);
-            const confirmed = await processCommand(run, "confirm", { sceneSelection: selection });
-            expect(confirmed.outcome).toMatchObject({ status: 200, body: { code: 0 } });
-            const restored = await processCommand(run, "read");
-            expect(restored.pid).not.toBe(confirmed.pid);
+            const confirmed = await persistFrozenSceneSelection(run, selection.region);
+            const restored = await processCommand(confirmed, "read");
+            expect(restored.pid).not.toBe(process.pid);
             expect(restored.run.tasks).toEqual(run.tasks);
-            expect(restored.run.ecommerceSnapshot).toEqual(confirmed.run.ecommerceSnapshot);
+            expect(restored.run.ecommerceSnapshot).toEqual(confirmed.ecommerceSnapshot);
             expect(restored.run.ecommerceSnapshot!.plan).toEqual(run.ecommerceSnapshot!.plan);
             expect(restored.run.ecommerceSnapshot!.referenceCheckpoint).toEqual(run.ecommerceSnapshot!.referenceCheckpoint);
             expect(restored.run.ecommerceSnapshot!.processing).toMatchObject({
@@ -758,40 +711,15 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
         120_000,
     );
 
-    it("rejects unauthenticated, cross-user, cross-conversation, replacement, old-version and QA-paused confirmations while replaying an identical receipt", async () => {
+    it("rejects retired selection submissions without mutating the original run", async () => {
         const { run, selection } = await paused();
-        expect((await processCommand(run, "confirm", { cookie: "", sceneSelection: selection })).outcome.status).toBe(401);
-        expect((await processCommand(run, "confirm", { cookie: otherCookie, sceneSelection: selection })).outcome.status).toBe(404);
-        expect((await processCommand(run, "confirm", { conversationId: "fixture-other-conversation", sceneSelection: selection })).outcome.status).toBe(409);
-        expect((await processCommand(run, "confirm", { sceneSelection: { ...selection, baselineAssetId: "fixture-other-baseline" } })).outcome.status).toBe(409);
-        expect((await processCommand(run, "confirm", { sceneSelection: selection })).outcome.status).toBe(200);
-        const confirmed = await stores.getAgentRun(run.id);
-        expect((await processCommand(run, "confirm", { sceneSelection: selection })).outcome.status).toBe(200);
-        expect(await stores.getAgentRun(run.id)).toEqual(confirmed);
-        expect((await processCommand(run, "confirm", { sceneSelection: { ...selection, region: { x: 1, y: 1, width: 2, height: 2 } } })).outcome.status).toBe(409);
-        expect((await runtime.listCreativeRunEvents(run.id)).filter((event) => event.type === "run.resumed")).toHaveLength(1);
-        for (const version of ["ecommerce-edit.v1", "ecommerce-edit.v2"] as const) {
-            const old = await paused(version);
-            expect((await processCommand(old.run, "confirm", { sceneSelection: old.selection })).outcome.status).toBe(409);
-            expect((await stores.getAgentRun(old.run.id))!.ecommerceSnapshot).toEqual(old.run.ecommerceSnapshot);
-        }
-        const qa = await paused();
-        await stores.updateAgentRunById(qa.run.id, {
-            ecommerceSnapshot: {
-                ...qa.run.ecommerceSnapshot!,
-                qualityCheck: {
-                    version: "ecommerce-quality.v2",
-                    status: "blocked",
-                    publicStatus: "needs_review",
-                    modelRole: { logicalRole: "quality_check", capability: "text", logicalModelId: "fixture-text", channelId: "fixture", upstreamModel: "fixture-text", apiFormat: "openai" },
-                    checks: [],
-                    hardFailures: [],
-                    internalReason: "fixture hard failure",
-                    checkedAt: Date.now(),
-                },
-            },
-        });
-        expect((await processCommand(qa.run, "confirm", { sceneSelection: qa.selection })).outcome.status).toBe(409);
+        const frozen = await stores.getAgentRun(run.id);
+        const events = await runtime.listCreativeRunEvents(run.id);
+        const result = await processCommand(run, "confirm", { sceneSelection: selection });
+        expect(result.outcome).toMatchObject({ status: 409, body: { code: 409, msg: "区域确认已停用，请使用按原要求重新生成。" } });
+        expect(await stores.getAgentRun(run.id)).toEqual(frozen);
+        expect(await runtime.listCreativeRunEvents(run.id)).toEqual(events);
+        expect(imageRequests.filter((request) => request.context.runId === run.id)).toEqual([]);
     }, 120_000);
 
     async function recoverStages(run: AgentRun) {
@@ -916,11 +844,10 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
         return unchanged.run;
     }
 
-    it("recovers confirmed, submitted, result-ready and persisted stages in new Worker processes without a second child or upstream create", async () => {
+    it("recovers archived, submitted, result-ready and persisted stages in new Worker processes without a second child or upstream create", async () => {
         const { run, selection } = await paused();
-        const confirmation = await processCommand(run, "confirm", { sceneSelection: selection });
-        expect(confirmation.outcome).toMatchObject({ status: 200, body: { code: 0 } });
-        const completed = await recoverStages(confirmation.run);
+        const confirmed = await persistFrozenSceneSelection(run, selection.region);
+        const completed = await recoverStages(confirmed);
         expect(completed.ecommerceSnapshot!.qualityCheck).toMatchObject({ sceneProtectionEvidence: [{ evidence: { compositeOutsideChangedPixels: 0 } }] });
     }, 120_000);
 
@@ -942,15 +869,13 @@ postgresDescribe("isolated PostgreSQL ecommerce confirmation and independent pro
 
     it("recovers a historical branch with the same root, selected parent and parent QA while preserving the earlier result", async () => {
         const first = await paused();
-        const firstConfirmation = await processCommand(first.run, "confirm", { sceneSelection: first.selection });
-        expect(firstConfirmation.outcome).toMatchObject({ status: 200, body: { code: 0 } });
-        const parent = await recoverStages(firstConfirmation.run);
+        const firstConfirmed = await persistFrozenSceneSelection(first.run, first.selection.region);
+        const parent = await recoverStages(firstConfirmed);
         const originalParent = structuredClone(parent);
         const originalAsset = await runtime.getCreativeAsset(parent.assetIds[0], userId);
         const branch = await paused("ecommerce-edit.v5", parent);
-        const branchConfirmation = await processCommand(branch.run, "confirm", { sceneSelection: branch.selection });
-        expect(branchConfirmation.outcome).toMatchObject({ status: 200, body: { code: 0 } });
-        const completed = await recoverStages(branchConfirmation.run);
+        const branchConfirmed = await persistFrozenSceneSelection(branch.run, branch.selection.region);
+        const completed = await recoverStages(branchConfirmed);
         expect(completed.ecommerceSnapshot!.continuity).toMatchObject({
             sceneRootAssetId: parent.ecommerceSnapshot!.continuity!.sceneRootAssetId,
             parentResultId: parent.assetIds[0],

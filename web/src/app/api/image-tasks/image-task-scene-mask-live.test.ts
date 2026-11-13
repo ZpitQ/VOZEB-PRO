@@ -1,3 +1,4 @@
+import { buildSceneEditProtection } from "@/lib/server/ecommerce-protection.test-fixtures";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,7 +13,7 @@ vi.mock("@/lib/server/object-storage-service", () => ({ deleteExternalMediaObjec
 vi.mock("@/lib/server/local-media-registry", () => ({ registerLocalMediaAsset: vi.fn() }));
 
 import { emptyAdvancedConfig } from "@/lib/channel-protocol-registry";
-import { buildSceneEditProtection } from "@/lib/server/ecommerce-product-regions";
+
 import { createImageTask, getImageTask } from "@/lib/server/image-task-store";
 import { createImageTaskUpstreamStep } from "@/lib/server/image-task-runtime";
 import { localAssetUrlToPath } from "@/lib/server/generation-log-repository";

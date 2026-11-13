@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { persistFrozenEcommercePlan } from "./ecommerce-protection.test-fixtures";
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
@@ -34,7 +35,19 @@ vi.mock("./safe-outbound-fetch", async (original) => ({
     },
 }));
 
-describe("Agent persists its plan before native protection and resumes the same Run", () => {
+const historicalPlanning = vi.hoisted(() => ({ stopped: false }));
+vi.mock("./ecommerce-protection-preparation", async (original) => {
+    const actual = await original<typeof import("./ecommerce-protection-preparation")>();
+    return {
+        ...actual,
+        prepareEcommerceFullImageTask: async () => {
+            historicalPlanning.stopped = true;
+            return undefined;
+        },
+    };
+});
+
+describe("Agent recovers archived protection plans through native stages in the same Run", () => {
     let directory: string;
     let runtime: typeof import("./creative-runtime-store");
     let runs: typeof import("./agent-run-store");
@@ -50,6 +63,7 @@ describe("Agent persists its plan before native protection and resumes the same 
 
     beforeEach(async () => {
         vi.resetModules();
+        historicalPlanning.stopped = false;
         boundary.settings.mockReset();
         boundary.request.mockReset();
         boundary.model.mockReset();
@@ -120,8 +134,15 @@ describe("Agent persists its plan before native protection and resumes the same 
         const current = await runs.getAgentRun(runId);
         assert(current);
         await executor.executeAgentRun(current, origin, "session=fixture");
-        const saved = await runs.getAgentRun(runId);
+        let saved = await runs.getAgentRun(runId);
         assert(saved);
+        if (historicalPlanning.stopped) {
+            historicalPlanning.stopped = false;
+            saved = await persistFrozenEcommercePlan(saved, origin, "session=fixture");
+            const released = await scheduler.releaseGenerationTaskLease("agent", runId, workerId, { executionPhase: "created", nextPollAt: Date.now() });
+            assert(released);
+            return claimAndExecute(runId, workerId + "-historical");
+        }
         return saved;
     }
 
@@ -214,13 +235,13 @@ describe("Agent persists its plan before native protection and resumes the same 
             const scene = input.visualAnalysis.references.find((reference) => reference.assetId === input.sources.currentSceneBaselineId);
             assert(product?.productFacts, "The real planner must receive a confirmed product anchor");
             return modelReply({
-                planVersion: "ecommerce-edit.v6",
+                planVersion: "ecommerce-edit.v7",
                 operation,
                 source: { productAnchorId: input.sources.productAnchorId, currentSceneBaselineId: input.sources.currentSceneBaselineId, sceneReferenceIds: input.sources.sceneReferenceIds },
                 baseline: { productFacts: product.productFacts, sceneFacts: scene?.sceneFacts ?? null },
                 delta: { requestedChanges: ["把背景换成厨房"], targetObjects: ["background-main"], targetRegions: [] },
                 preserve: { productCore: ["outline", "brand_text", "color", "material", "scale", "view"], sceneElements: [] },
-                strategy: "strict_product",
+                strategy: "full_image",
                 modelRoles: input.requiredModelRoles,
                 continuity: input.continuity,
                 referenceUses: input.visualAnalysis.references.map((reference) => ({ assetId: reference.assetId, alias: reference.alias, purposes: reference.purposes, usedCueIds: [] })),

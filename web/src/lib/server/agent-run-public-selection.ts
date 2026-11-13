@@ -2,8 +2,6 @@ import type { AgentRun } from "./agent-run-store";
 import { publicAgentRun, publicAgentRunSnapshot } from "./agent-run-public";
 import { ecommerceSceneSelectionTask } from "./ecommerce-generation-snapshot";
 import { getCreativeAssetsByIds } from "./creative-runtime-store";
-import { readCompletedEcommerceReference, verifyPreparedEcommerceReferenceSource } from "./ecommerce-reference-preparation";
-import { resolveInternalOrigin } from "./internal-origin";
 import { originalImageSourceUrl } from "@/lib/media-image-url";
 import type { CreativeReferenceReview } from "@/lib/creative-runtime-contract";
 import { allowedEcommerceReferencePurposes } from "./ecommerce-reference-purpose";
@@ -12,20 +10,20 @@ import { listStoredGenerationTaskRecordsByRunIds } from "./generation-task-store
 import { canContinueCreatedImageReference, canRecoverImageNativeResult, canRecoverUnsubmittedImageMask, canRecoverUnsubmittedImageReference } from "./generation-task-scheduler";
 import { imageProcessingRecoveryForRun } from "./image-processing-service";
 
-export async function publicAgentRunForRequest(run: AgentRun, request: Request) {
+export async function publicAgentRunForRequest(run: AgentRun, _request: Request) {
     return {
         ...publicAgentRun(run),
-        ecommerceSceneSelection: await sceneSelectionAction(run, request),
+        ecommerceSceneSelection: sceneSelectionAction(run),
         ecommerceReferenceReview: await referenceReviewAction(run),
         canCheckStatus: await canCheckRunStatus(run),
         imageProcessingRecovery: await imageProcessingRecoveryForRun(run),
     };
 }
 
-export async function publicAgentRunSnapshotForRequest(run: AgentRun, request: Request) {
+export async function publicAgentRunSnapshotForRequest(run: AgentRun, _request: Request) {
     return {
         ...publicAgentRunSnapshot(run),
-        ecommerceSceneSelection: await sceneSelectionAction(run, request),
+        ecommerceSceneSelection: sceneSelectionAction(run),
         ecommerceReferenceReview: await referenceReviewAction(run),
         canCheckStatus: await canCheckRunStatus(run),
         imageProcessingRecovery: await imageProcessingRecoveryForRun(run),
@@ -101,22 +99,7 @@ async function referenceReviewAction(run: AgentRun): Promise<CreativeReferenceRe
     return { version: "ecommerce-reference-review.v1", reviewId: checkpoint.reviewId, kind, question: referenceReviewQuestion(checkpoint), assets, ...(inheritedEditTarget ? { inheritedEditTarget } : {}) };
 }
 
-async function sceneSelectionAction(run: AgentRun, request: Request) {
-    if (run.surface !== "chat" || !ecommerceSceneSelectionTask(run)) return undefined;
-    const plan = run.ecommerceSnapshot!.plan!;
-    const baselineAssetId = plan.source.currentSceneBaselineId!;
-    try {
-        const prepared = await readCompletedEcommerceReference(run, baselineAssetId);
-        if (!prepared) return undefined;
-        const source = prepared.sourceUrl.trim();
-        if (!/^\/api\/(reference-assets|generation-log-assets)\//.test(source)) return undefined;
-        const url = new URL(originalImageSourceUrl(source), request.url).pathname;
-        if (!/^\/api\/(reference-assets|generation-log-assets)\//.test(url)) return undefined;
-        const size = prepared.sourceSize;
-        if (plan.canvas?.mode !== "exact" || plan.canvas.size.width !== size.width || plan.canvas.size.height !== size.height) return undefined;
-        await verifyPreparedEcommerceReferenceSource({ ...prepared, sourceUrl: url }, resolveInternalOrigin(new URL(request.url).origin), request.headers.get("cookie") || "");
-        return { action: "confirm_scene_selection" as const, baselineAssetId, url, width: size.width, height: size.height };
-    } catch {
-        return undefined;
-    }
+function sceneSelectionAction(run: AgentRun) {
+    if (run.surface !== "chat" || !ecommerceSceneSelectionTask(run) || run.ecommerceSnapshot?.processing?.waitingFor) return undefined;
+    return { action: "regenerate_full_image" as const };
 }

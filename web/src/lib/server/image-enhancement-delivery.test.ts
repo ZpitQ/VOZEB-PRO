@@ -1,10 +1,10 @@
+import { buildSceneEditProtection } from "./ecommerce-protection.test-fixtures";
 import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
 import { freezeEcommerceEnhancementDelivery } from "./image-enhancement-delivery";
 import { imageTaskResultOptions, usesImageTaskResultProcessing } from "./image-task-result-contract";
 import type { ImageTask } from "./image-task-store";
-import { buildSceneEditProtection } from "./ecommerce-product-regions";
 
 type Input = Parameters<typeof freezeEcommerceEnhancementDelivery>[0];
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");

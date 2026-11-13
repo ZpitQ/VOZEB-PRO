@@ -646,6 +646,11 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
 
         async function recoverStages(created: ProcessResult) {
             const run = created.run;
+            expect(run.ecommerceSnapshot?.plan).toMatchObject({ planVersion: "ecommerce-edit.v7", strategy: "full_image", canvas: { mode: "ratio", source: "baseline", size: { width: 64, height: 48 } } });
+            expect(run.tasks[0].ecommerceExecution).toMatchObject({ compilerVersion: "ecommerce-openai-image-2.5.v5", state: "ready" });
+            expect(run.tasks[0].ecommerceExecution).not.toHaveProperty("mask");
+            expect(run.tasks[0]).not.toHaveProperty("productProtection");
+            expect(run.tasks[0]).not.toHaveProperty("sceneProtection");
             const frozen = structuredClone(run.ecommerceSnapshot!.referenceCheckpoint!);
             const snapshot = structuredClone(run.ecommerceSnapshot!);
             const childId = run.tasks[0].taskIds?.[0];
@@ -839,7 +844,7 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
                 expect(worker.run.ecommerceSnapshot).toMatchObject({ qualityPolicy: "disabled", technicalCheck: { status: "passed" } });
                 expect(worker.run.ecommerceSnapshot?.qualityCheck).toBeUndefined();
                 expect(worker.run.ecommerceSnapshot?.visualAnalysis?.analysisVersion).toBe("ecommerce-visual-analysis.v4");
-                expect(worker.run.ecommerceSnapshot?.plan?.planVersion).toBe("ecommerce-edit.v6");
+                expect(worker.run.ecommerceSnapshot?.plan?.planVersion).toBe("ecommerce-edit.v7");
                 expect(worker.run.ecommerceSnapshot?.referenceCheckpoint?.inputId).toBe(run.ecommerceSnapshot!.referenceCheckpoint!.inputId);
                 expect(worker.publicRun.ecommerceReferenceReview).toBeNull();
                 expect(visionPosts()).toBe(count);
@@ -876,7 +881,7 @@ export function referenceRecoveryProcessSuite(provider: "file" | "postgres") {
             expect(worker.run.ecommerceSnapshot).toMatchObject({ qualityPolicy: "disabled", technicalCheck: { status: "passed" } });
             expect(worker.run.ecommerceSnapshot?.qualityCheck).toBeUndefined();
             expect(worker.run.ecommerceSnapshot?.visualAnalysis?.analysisVersion).toBe("ecommerce-visual-analysis.v4");
-            expect(worker.run.ecommerceSnapshot?.plan?.planVersion).toBe("ecommerce-edit.v6");
+            expect(worker.run.ecommerceSnapshot?.plan?.planVersion).toBe("ecommerce-edit.v7");
             expect(worker.messages.map((message) => message.id)).toEqual(before.messages.map((message) => message.id));
             expect(worker.run.ecommerceSnapshot!.referenceCheckpoint!.analysisStage.requestId).toBe(next.analysisStage.requestId);
             expect(await durableChildren(run)).toHaveLength(1);

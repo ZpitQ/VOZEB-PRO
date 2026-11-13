@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { persistFrozenEcommercePlan, persistFrozenSceneSelection } from "./ecommerce-protection.test-fixtures";
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -47,7 +48,19 @@ vi.mock("./safe-outbound-fetch", async (original) => ({
 // Real File stores, wallet, routing/compiler, Action, scheduler and native subprocesses.
 // Auth/settings, media HTTP, model replies and deferred Next after are controlled fixture boundaries.
 // The first case stops after native completion and parent due. The separate successor reaches actual ImageTask submission.
-describe("scene confirmation persists its receipt before a new claim builds the native mask", () => {
+const historicalPlanning = vi.hoisted(() => ({ stopped: false }));
+vi.mock("./ecommerce-protection-preparation", async (original) => {
+    const actual = await original<typeof import("./ecommerce-protection-preparation")>();
+    return {
+        ...actual,
+        prepareEcommerceFullImageTask: async () => {
+            historicalPlanning.stopped = true;
+            return undefined;
+        },
+    };
+});
+
+describe("archived scene receipts recover through native mask and image stages", () => {
     let directory: string;
     let runtime: typeof import("./creative-runtime-store");
     let runs: typeof import("./agent-run-store");
@@ -56,7 +69,6 @@ describe("scene confirmation persists its receipt before a new claim builds the 
     let references: typeof import("./reference-asset-store");
     let executor: typeof import("./agent-run-executor");
     let service: typeof import("./image-processing-service");
-    let actionRoute: typeof import("@/app/api/agent/runs/[id]/[action]/route");
     let auth: typeof import("@/lib/auth/store-repository");
     let wallet: typeof import("./points-wallet-service");
     let compiler: typeof import("./ecommerce-image-compiler");
@@ -68,6 +80,7 @@ describe("scene confirmation persists its receipt before a new claim builds the 
 
     beforeEach(async () => {
         vi.resetModules();
+        historicalPlanning.stopped = false;
         boundary.settings.mockReset();
         boundary.request.mockReset();
         boundary.model.mockReset();
@@ -97,7 +110,7 @@ describe("scene confirmation persists its receipt before a new claim builds the 
         configured.logicalModels[1].bindings[0].upstreamModel = "gpt-image-2.5-flare";
         boundary.settings.mockResolvedValue(configured);
         boundary.user.mockResolvedValue({ id: userId });
-        [runtime, runs, tasks, scheduler, references, executor, service, actionRoute, auth, wallet, compiler, routing] = await Promise.all([
+        [runtime, runs, tasks, scheduler, references, executor, service, auth, wallet, compiler, routing] = await Promise.all([
             import("./creative-runtime-store"),
             import("./agent-run-store"),
             import("./generation-task-store"),
@@ -105,7 +118,6 @@ describe("scene confirmation persists its receipt before a new claim builds the 
             import("./reference-asset-store"),
             import("./agent-run-executor"),
             import("./image-processing-service"),
-            import("@/app/api/agent/runs/[id]/[action]/route"),
             import("@/lib/auth/store-repository"),
             import("./points-wallet-service"),
             import("./ecommerce-image-compiler"),
@@ -177,8 +189,15 @@ describe("scene confirmation persists its receipt before a new claim builds the 
         const current = await runs.getAgentRun(runId);
         assert(current);
         await executor.executeAgentRun(current, origin, cookie);
-        const saved = await runs.getAgentRun(runId);
+        let saved = await runs.getAgentRun(runId);
         assert(saved);
+        if (historicalPlanning.stopped) {
+            historicalPlanning.stopped = false;
+            saved = await persistFrozenEcommercePlan(saved, origin, cookie);
+            const released = await scheduler.releaseGenerationTaskLease("agent", runId, workerId, { executionPhase: "created", nextPollAt: Date.now() });
+            assert(released);
+            return saved;
+        }
         return saved;
     }
 
@@ -295,14 +314,14 @@ describe("scene confirmation persists its receipt before a new claim builds the 
             const baseline = input.visualAnalysis.references.find((reference) => reference.assetId === assetId);
             assert(baseline?.sceneFacts);
             return modelReply({
-                planVersion: "ecommerce-edit.v6",
+                planVersion: "ecommerce-edit.v7",
                 operation: "scene_edit",
                 source: input.sources,
                 baseline: { productFacts: null, sceneFacts: baseline.sceneFacts },
                 delta: { requestedChanges: ["在柜子上增加花瓶和接触阴影"], targetObjects: ["vase"], targetRegions: ["cabinet-top"] },
                 preserve: { productCore: [], sceneElements: ["layout", "camera"] },
                 protection: { scope: "local", protectedObjectIds: [assetId], preserveOutsideMask: true, allowLightingChange: false },
-                strategy: "integrated_scene",
+                strategy: "full_image",
                 modelRoles: input.requiredModelRoles,
                 continuity: input.continuity,
                 referenceUses: input.visualAnalysis.references.map((reference) => ({ assetId: reference.assetId, alias: reference.alias, purposes: reference.purposes, usedCueIds: [] })),
@@ -378,7 +397,7 @@ describe("scene confirmation persists its receipt before a new claim builds the 
         return { run: paused, prepared: prepared[0], completed };
     }
 
-    it("stores the authenticated confirmation before claim A builds and completes the native mask", async () => {
+    it("recovers an archived receipt before claim A builds and completes the native mask", async () => {
         const imageRoute = routing.routeEcommerceRole(configured, "image_generation");
         assert(imageRoute, "SETUP: a real configured image route is required");
         expect(imageRoute.snapshot).toMatchObject({ apiFormat: "openai", upstreamModel: "gpt-image-2.5-flare", imageEdit: { editPath: "/images/edits", transport: "multipart", supportsIndependentMask: true } });
@@ -416,65 +435,8 @@ describe("scene confirmation persists its receipt before a new claim builds the 
         expect(moneyBefore.pointRecords).toContainEqual(expect.objectContaining({ type: "credit", amount: 1000 }));
         const originalTasks = structuredClone(paused.tasks);
         const region = { x: 20, y: 20, width: 25, height: 16 };
-        const requestedAt = Date.now();
-        const response = await actionRoute.POST(
-            new Request(origin + "/api/agent/runs/" + paused.id + "/resume", {
-                method: "POST",
-                headers: { "content-type": "application/json", cookie: "session=fixture" },
-                body: JSON.stringify({ conversationId: conversation.id, sceneSelection: { baselineAssetId: baseline.asset.id, region, actorUserId: "forged-client-actor", confirmedAt: 1, semantics: ["forged client semantics"] } }),
-            }),
-            { params: Promise.resolve({ id: paused.id, action: "resume" }) },
-        );
-        const responseAt = Date.now();
-        expect(response.status, "SETUP: the real authenticated resume handler must accept this valid scene selection").toBe(200);
-        expect(await response.json()).toMatchObject({ code: 0, data: { run: { id: paused.id, status: "running" } } });
-        const confirmed = await runs.getAgentRun(paused.id);
-        assert(confirmed);
-
-        // First new behavior assertion: expected RED on v406 only after the real Action returns 200.
-        // Matcher keys do not require the future field to exist in current production types.
-        expect(confirmed.ecommerceSnapshot?.processing, "Confirmation must persist its server receipt before any mask is trusted").toMatchObject({
-            sceneSelection: {
-                version: "scene-selection-receipt.v1",
-                parentTaskId: paused.tasks[0].id,
-                baseline: { assetId: baseline.asset.id, assetVersion: currentReference.assetVersion, sha256: baseline.sourceSha256, bytes: original.length, width: 100, height: 80 },
-                prepare: { jobId: fixture.prepared.jobId, inputDigest: fixture.prepared.inputDigest, executionId: fixture.completed.executionId, manifestDigest: prepareManifestDigest, assetVersion: fixture.prepared.assetVersion },
-                region: { x: 20, y: 20, width: 25, height: 16 },
-                semantics: ["在柜子上增加花瓶和接触阴影"],
-                confirmation: { actorUserId: userId, confirmedAt: expect.any(Number) },
-            },
-        });
-
-        // Everything below is UNREACHED in the first RED, not evidence of a completed native bridge.
-        const processingFields: Record<string, unknown> = { ...confirmed.ecommerceSnapshot?.processing };
-        const savedReceipt = processingFields.sceneSelection;
-        assert(savedReceipt && typeof savedReceipt === "object" && "confirmation" in savedReceipt);
-        const confirmation = savedReceipt.confirmation;
-        assert(confirmation && typeof confirmation === "object" && "confirmedAt" in confirmation);
-        const confirmedAt = confirmation.confirmedAt;
-        assert(typeof confirmedAt === "number");
-        expect(Number.isSafeInteger(confirmedAt)).toBe(true);
-        expect(confirmedAt).toBeGreaterThanOrEqual(requestedAt);
-        expect(confirmedAt).toBeLessThanOrEqual(responseAt);
-        const receiptBefore = structuredClone(savedReceipt);
-        expect(savedReceipt).not.toHaveProperty("mask");
-        expect(savedReceipt).not.toHaveProperty("maskDigest");
-        expect(confirmed.tasks).toStrictEqual(originalTasks);
-        expect(confirmed.executionId).toBeUndefined();
-        expect(confirmed.ecommerceSnapshot).toMatchObject({ plan, modelRouteSnapshots: snapshot.modelRouteSnapshots, compilerVersion: snapshot.compilerVersion, referenceCheckpoint: snapshot.referenceCheckpoint, fallback: snapshot.fallback });
-        expect(confirmed).toMatchObject({ id: paused.id, userId, conversationId: paused.conversationId, inputMessageId: paused.inputMessageId, assistantMessageId: paused.assistantMessageId, status: "running" });
-        expect(confirmed.ecommerceSnapshot?.processing?.prepareReferences).toStrictEqual(snapshot.processing.prepareReferences);
-        expect(confirmed.ecommerceSnapshot?.processing?.protection).toBeUndefined();
-        expect(confirmed.ecommerceSnapshot?.processing?.waitingFor).toBeUndefined();
-        expect(await childrenForRun(paused.id)).toStrictEqual([prepareBefore]);
-        expect(await financialTruth()).toStrictEqual(moneyBefore);
-        const dueAfterAction = await tasks.getStoredGenerationTaskRecord("agent", paused.id);
-        assert(dueAfterAction);
-        expect(dueAfterAction.executionPhase).toBe("created");
-        expect(dueAfterAction.nextPollAt).toBeGreaterThan(0);
-        expect(dueAfterAction.workerId).toBeUndefined();
-        expect(dueAfterAction.leaseUntil).toBeUndefined();
-
+        const confirmed = await persistFrozenSceneSelection(paused, region);
+        const receiptBefore = structuredClone(confirmed.ecommerceSnapshot!.processing!.sceneSelection);
         const waiting = await claimAndExecute(paused.id, "scene-action-build-parent");
         expect(waiting.status).toBe("running");
         const build = await waitingStage(paused.id, "build_protection", originalTasks[0].id);
@@ -660,16 +622,7 @@ describe("scene confirmation persists its receipt before a new claim builds the 
         const prepareBefore = await tasks.getStoredGenerationTaskRecord("image_processing", fixture.prepared.jobId);
         assert(prepareBefore?.resultPayload);
         expect(service.hasOnlyCompletedEcommerceReferencePrepares(paused, await childrenForRun(paused.id))).toBe(true);
-        const response = await actionRoute.POST(
-            new Request(origin + "/api/agent/runs/" + paused.id + "/resume", {
-                method: "POST",
-                headers: { cookie, "content-type": "application/json" },
-                body: JSON.stringify({ conversationId: conversation.id, sceneSelection: { baselineAssetId: baseline.asset.id, region: { x: 20, y: 20, width: 25, height: 16 } } }),
-            }),
-            { params: Promise.resolve({ id: paused.id, action: "resume" }) },
-        );
-        expect(response.status, "SETUP: actual authenticated Action must persist a native-confirmation receipt").toBe(200);
-        const confirmed = await runs.getAgentRun(paused.id);
+        const confirmed = await persistFrozenSceneSelection(paused, { x: 20, y: 20, width: 25, height: 16 });
         const receipt = confirmed?.ecommerceSnapshot?.processing?.sceneSelection;
         assert(confirmed && receipt);
         expect(confirmed.tasks).toStrictEqual(paused.tasks);
@@ -937,15 +890,7 @@ describe("scene confirmation persists its receipt before a new claim builds the 
     async function otherRealJobMask(fixture: NativeSceneFixture) {
         const donor = await pausedSceneRun(fixture.conversation.id, fixture.baseline.asset.id, "scene-native-mask-donor", fixture.cookie);
         expect(donor.run.id).not.toBe(fixture.paused.id);
-        const response = await actionRoute.POST(
-            new Request(origin + "/api/agent/runs/" + donor.run.id + "/resume", {
-                method: "POST",
-                headers: { cookie: fixture.cookie, "content-type": "application/json" },
-                body: JSON.stringify({ conversationId: fixture.conversation.id, sceneSelection: { baselineAssetId: fixture.baseline.asset.id, region: { x: 60, y: 20, width: 20, height: 15 } } }),
-            }),
-            { params: Promise.resolve({ id: donor.run.id, action: "resume" }) },
-        );
-        expect(response.status).toBe(200);
+        await persistFrozenSceneSelection(donor.run, { x: 60, y: 20, width: 20, height: 15 });
         await claimAndExecute(donor.run.id, "scene-mask-donor-claim-a", fixture.cookie);
         const build = await waitingStage(donor.run.id, "build_protection", donor.run.tasks[0].id);
         const completed = await completeStage(build.id);
@@ -1115,8 +1060,11 @@ describe("scene confirmation persists its receipt before a new claim builds the 
         const actualPost = imageRoute.POST;
         const posted = Promise.withResolvers<string>();
         const released = Promise.withResolvers<void>();
-        const post = vi.spyOn(imageRoute, "POST").mockImplementationOnce(async (request) => {
+        const post = vi.spyOn(imageRoute, "POST").mockImplementation(async (request) => {
+            const body: CreateImageTaskBody = await request.clone().json();
             const response = await actualPost(request);
+            // Copies are posted concurrently; hold copy 1 by its stable request identity.
+            if (!body.context?.clientRequestId?.endsWith(":1:1")) return response;
             const envelope: { task?: { id?: string } } = await response.clone().json();
             assert(envelope.task?.id);
             posted.resolve(envelope.task.id);

@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
@@ -62,16 +63,19 @@ async function handleFixtureRequest({ request, response, url, body, tasks, reque
     if (request.method === "GET" && path === "/health") return sendJson(response, 200, { ok: true });
     if (request.method === "GET" && path === "/__state") {
         return sendJson(response, 200, {
-            requests: requests
-                .filter((item) => !item.path.endsWith("/__state"))
-                .map((item) => ({
-                    method: item.method,
-                    path: item.path,
-                    authorization: item.headers.authorization || "",
-                    contentType: item.contentType,
-                    bodyBytes: item.body.byteLength,
-                    model: requestedModel(item.body, item.contentType),
-                })),
+            requests: await Promise.all(
+                requests
+                    .filter((item) => !item.path.endsWith("/__state"))
+                    .map(async (item) => ({
+                        method: item.method,
+                        path: item.path,
+                        authorization: item.headers.authorization || "",
+                        contentType: item.contentType,
+                        bodyBytes: item.body.byteLength,
+                        model: requestedModel(item.body, item.contentType),
+                        ...(item.path.endsWith("/images/edits") && item.contentType.startsWith("multipart/form-data") ? await imageEditRequestFacts(item.body, item.contentType) : {}),
+                    })),
+            ),
             tasks: Array.from(tasks.entries()).map(([id, task]) => ({ id, ...task })),
         });
     }
@@ -732,7 +736,7 @@ function ecommerceEditPlanArguments(payload) {
     const targetId = /亮|光/.test(userRequest) ? "lighting-main" : /植物|绿植/.test(userRequest) ? "plant-right" : "background-main";
     return {
         planVersion: version,
-        ...(version === "ecommerce-edit.v6"
+        ...(["ecommerce-edit.v6", "ecommerce-edit.v7"].includes(version)
             ? {
                   referenceUses: references.map((reference) => {
                       const binding = referenceDecision?.bindings.find((item) => item.assetId === reference.assetId);
@@ -747,13 +751,13 @@ function ecommerceEditPlanArguments(payload) {
             : {}),
         operation: sceneOnly ? "scene_edit" : localEdit ? "local_edit" : "product_to_scene",
         ...(version === "ecommerce-edit.v5" ? { photography: fixturePhotography() } : {}),
-        ...(["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(version) ? { visibleStructure: (sceneOnly ? scene : product).visibleStructure || [] } : {}),
-        ...(["ecommerce-edit.v3", "ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(version) && localEdit
+        ...(["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6", "ecommerce-edit.v7"].includes(version) ? { visibleStructure: (sceneOnly ? scene : product).visibleStructure || [] } : {}),
+        ...(version === "ecommerce-edit.v7" || (["ecommerce-edit.v3", "ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(version) && localEdit)
             ? {
                   protection: {
-                      scope: localScope ? "local" : "global",
-                      protectedObjectIds: (sceneOnly ? scene : product).visibleStructure?.map((fact) => fact.objectId) || [],
-                      preserveOutsideMask: localScope,
+                      scope: version !== "ecommerce-edit.v7" && localScope ? "local" : "global",
+                      protectedObjectIds: version === "ecommerce-edit.v7" ? [] : (sceneOnly ? scene : product).visibleStructure?.map((fact) => fact.objectId) || [],
+                      preserveOutsideMask: version !== "ecommerce-edit.v7" && localScope,
                       allowLightingChange: !localScope && /亮|光/.test(userRequest),
                   },
               }
@@ -766,10 +770,12 @@ function ecommerceEditPlanArguments(payload) {
         baseline: {
             productFacts: sceneOnly
                 ? null
-                : version === "ecommerce-edit.v6"
+                : ["ecommerce-edit.v6", "ecommerce-edit.v7"].includes(version)
                   ? product.productFacts || null
                   : product.productFacts || { identity: "ecommerce fixture product", outline: "complete product silhouette", color: "original neutral color", material: "original visible material", brandText: [], view: "front three-quarter view" },
-            sceneFacts: version === "ecommerce-edit.v6" ? scene.sceneFacts || null : scene.sceneFacts || { space: "modern European or American home interior", composition: "eye-level product-centered composition", lighting: "soft natural daylight" },
+            sceneFacts: ["ecommerce-edit.v6", "ecommerce-edit.v7"].includes(version)
+                ? scene.sceneFacts || null
+                : scene.sceneFacts || { space: "modern European or American home interior", composition: "eye-level product-centered composition", lighting: "soft natural daylight" },
         },
         delta: {
             requestedChanges: [userRequest || "place product in a modern home scene"],
@@ -777,7 +783,7 @@ function ecommerceEditPlanArguments(payload) {
             targetRegions: localEdit ? [] : ["background", "environment"],
         },
         preserve: { productCore: sceneOnly ? [] : ["outline", "brand_text", "color", "material", "scale", "view"], sceneElements: sceneOnly ? ["cabinet", "room", "camera"] : [] },
-        strategy: sceneOnly ? "integrated_scene" : "strict_product",
+        strategy: ecommerceToolProperties(payload).strategy?.enum?.[0] || (sceneOnly ? "integrated_scene" : "strict_product"),
         modelRoles: {
             visionAnalysis: String(roles.visionAnalysis || ""),
             editPlanning: String(roles.editPlanning || ""),
@@ -955,6 +961,22 @@ async function layeredFixtureImages(body, contentType, options) {
     if (!hasElement || !hasBackground) throw new Error("layer fixture source must contain a visible element and background");
     const raw = { width: info.width, height: info.height, channels: 4 };
     return Promise.all([sharp(element, { raw }).png().toBuffer(), sharp(background, { raw }).png().toBuffer()]);
+}
+
+async function imageEditRequestFacts(body, contentType) {
+    const form = await new Response(body, { headers: { "content-type": contentType } }).formData();
+    const images = [...form.entries()].filter(([name, value]) => ["image", "image[]"].includes(name) && value instanceof Blob).map(([, value]) => value);
+    return {
+        imageInputs: await Promise.all(
+            images.map(async (image) => ({
+                mimeType: image.type,
+                sha256: createHash("sha256")
+                    .update(Buffer.from(await image.arrayBuffer()))
+                    .digest("hex"),
+            })),
+        ),
+        hasMask: form.has("mask"),
+    };
 }
 
 async function multipartImage(body, contentType) {

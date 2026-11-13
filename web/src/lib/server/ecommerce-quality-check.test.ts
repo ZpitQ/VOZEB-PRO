@@ -1,7 +1,8 @@
+import { buildSceneEditProtection } from "./ecommerce-protection.test-fixtures";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
 import { createHash } from "node:crypto";
-import { buildSceneEditProtection, compositeSceneEdit } from "./ecommerce-product-regions";
+import { compositeSceneEdit } from "./ecommerce-product-regions";
 
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import type { EcommerceRoleCandidate } from "./ecommerce-model-routing";
@@ -732,6 +733,55 @@ describe("ecommerce quality check", () => {
         const canvas = { mode: "ratio" as const, size: { width: 16, height: 9 }, source: "user_text" as const, allowReframe: true };
         expect(evaluateEcommerceCanvas(canvas, { width: 1920, height: 1080 }, { width: 3840, height: 2160 }).hardFailures).toEqual([]);
         expect(evaluateEcommerceCanvas({ ...canvas, mode: "exact", size: { width: 3840, height: 2160 } }, { width: 1920, height: 1080 }, { width: 3840, height: 2160 }).nativeMatches).toBe(false);
+    });
+    it("delivers a full-image v7 ratio rounded to real 1672 x 941 pixels", async () => {
+        const input = await independentRequest();
+        input.plan.planVersion = "ecommerce-edit.v7";
+        input.plan.strategy = "full_image";
+        input.plan.protection = { scope: "global", protectedObjectIds: [], preserveOutsideMask: false, allowLightingChange: true };
+        input.plan.canvas = { mode: "ratio", size: { width: 16, height: 9 }, source: "explicit_size", allowReframe: true };
+        const bytes = await sharp({ create: { width: 1672, height: 941, channels: 3, background: "#aaa" } })
+            .png()
+            .toBuffer();
+        const image = "data:image/png;base64," + bytes.toString("base64");
+        input.resultImages = [{ resultId: "result-1", nativeUrl: image, url: image }];
+
+        const technical = await checkEcommerceTechnicalResult(input);
+
+        expect(technical).toMatchObject({ status: "passed", hardFailures: [], canvasEvidence: [{ nativeSize: { width: 1672, height: 941 }, storedSize: { width: 1672, height: 941 }, nativeMatches: true, storedMatches: true, normalization: "none" }] });
+        expect(ecommerceResultDeliveryGate(technical).action).toBe("publish");
+        mocks.requestStructuredText.mockResolvedValue(modelCall(independentResult(3)));
+        const quality = await checkEcommerceResult(input, candidate());
+        expect(quality).toMatchObject({ status: "passed", hardFailures: [], canvasEvidence: [{ nativeMatches: true, storedMatches: true, normalization: "none" }] });
+        expect(ecommerceResultDeliveryGate(technical, quality).action).toBe("publish");
+    });
+    it.each([
+        { planVersion: "ecommerce-edit.v7", strategy: "full_image", mode: "ratio", width: 16, height: 9, actualHeight: 1000 },
+        { planVersion: "ecommerce-edit.v7", strategy: "full_image", mode: "exact", width: 1672, height: 940, actualHeight: 941 },
+        { planVersion: "ecommerce-edit.v1", strategy: "integrated_scene", mode: "ratio", width: 16, height: 9, actualHeight: 941 },
+        { planVersion: "ecommerce-edit.v2", strategy: "integrated_scene", mode: "ratio", width: 16, height: 9, actualHeight: 941 },
+        { planVersion: "ecommerce-edit.v3", strategy: "integrated_scene", mode: "ratio", width: 16, height: 9, actualHeight: 941 },
+        { planVersion: "ecommerce-edit.v4", strategy: "integrated_scene", mode: "ratio", width: 16, height: 9, actualHeight: 941 },
+        { planVersion: "ecommerce-edit.v5", strategy: "integrated_scene", mode: "ratio", width: 16, height: 9, actualHeight: 941 },
+        { planVersion: "ecommerce-edit.v6", strategy: "integrated_scene", mode: "ratio", width: 16, height: 9, actualHeight: 941 },
+    ] as const)("keeps $planVersion $mode geometry strict for 1672 x $actualHeight", async ({ planVersion, strategy, mode, width, height, actualHeight }) => {
+        const input = await independentRequest();
+        input.plan.planVersion = planVersion;
+        input.plan.strategy = strategy;
+        input.plan.canvas = { mode, size: { width, height }, source: "explicit_size", allowReframe: true };
+        const image =
+            "data:image/png;base64," +
+            (
+                await sharp({ create: { width: 1672, height: actualHeight, channels: 3, background: "#aaa" } })
+                    .png()
+                    .toBuffer()
+            ).toString("base64");
+        input.resultImages = [{ resultId: "result-1", nativeUrl: image, url: image }];
+
+        const technical = await checkEcommerceTechnicalResult(input);
+
+        expect(technical).toMatchObject({ status: "blocked", canvasEvidence: [{ nativeMatches: false, storedMatches: false, hardFailures: ["canvas_geometry"] }] });
+        expect(ecommerceResultDeliveryGate(technical).action).toBe("pause");
     });
     it("actual native and stored bytes beat QA passed claims and supplied dimensions", async () => {
         const image = async (width: number, height: number) =>

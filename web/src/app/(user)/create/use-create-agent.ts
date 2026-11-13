@@ -21,7 +21,6 @@ import {
     uploadCreativeAsset,
     watchCreativeAgentRun,
     type CreativeAgentRun,
-    type CreativeSceneSelection,
 } from "@/services/api/creative";
 import { getMaterializedCreativeProject, materializeCreativeProjectHandoff, type MaterializedCreativeProject } from "@/services/creative-project-handoff";
 import { agentRequirementAcknowledgement } from "@/lib/agent-requirement-acknowledgement";
@@ -133,6 +132,7 @@ export function useCreateAgent() {
     }, []);
 
     const refreshConversation = useCallback(async (id: string, generation = conversationGenerationRef.current) => {
+        if (generation !== conversationGenerationRef.current || activeConversationRef.current !== id) return;
         const requestId = ++refreshRequestRef.current;
         const assetRequestId = ++assetRefreshRequestRef.current;
         const [nextMessages, nextAssets] = await Promise.all([listCreativeMessages(id, undefined, MESSAGE_PAGE_SIZE), listCreativeAssets(id)]);
@@ -596,29 +596,12 @@ export function useCreateAgent() {
         [activeRunId, isCurrentConversation, messages, watchRun],
     );
 
-    const confirmSceneSelection = useCallback(
-        async (runId: string, selection: CreativeSceneSelection) => {
-            const expectedConversationId = activeConversationRef.current;
-            const generation = conversationGenerationRef.current;
-            if (!expectedConversationId) throw new Error("当前对话已切换");
-            const result = await controlCreativeAgentRun(runId, "resume", expectedConversationId, selection);
-            if (!isCurrentConversation(expectedConversationId, generation) || result.run.conversationId !== expectedConversationId) return;
-            setRunDetails((current) => ({ ...current, [runId]: result.run }));
-            const assistantMessage = messages.find((item) => item.runId === runId && item.role === "assistant");
-            if (assistantMessage) {
-                updateAssistant(assistantMessage.id, "已确认修改位置，继续这次创作。", "running");
-                watchRun(result.run, assistantMessage.id, generation);
-            }
-        },
-        [isCurrentConversation, messages, updateAssistant, watchRun],
-    );
-
     const recoverReference = useCallback(
         async (runId: string, recovery: CreativeReferenceRecovery) => {
             const expectedConversationId = activeConversationRef.current;
             const generation = conversationGenerationRef.current;
             if (!expectedConversationId) throw new Error("当前对话已切换");
-            const result = await controlCreativeAgentRun(runId, "resume", expectedConversationId, undefined, recovery);
+            const result = await controlCreativeAgentRun(runId, "resume", expectedConversationId, recovery);
             if (!isCurrentConversation(expectedConversationId, generation) || result.run.conversationId !== expectedConversationId) return;
             setRunDetails((current) => ({ ...current, [runId]: result.run }));
             const assistantMessage = messages.find((item) => item.runId === runId && item.role === "assistant");
@@ -752,7 +735,6 @@ export function useCreateAgent() {
         submit,
         cancel,
         control,
-        confirmSceneSelection,
         recoverReference,
         checkStatus,
         resumeImageProcessing,

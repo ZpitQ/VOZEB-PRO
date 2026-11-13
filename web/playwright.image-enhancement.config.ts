@@ -9,7 +9,6 @@ const data = process.env.VOZEB_PRO_M5_BROWSER_DATA;
 const storageState = process.env.VOZEB_PRO_M5_BROWSER_STATE;
 const outputDir = process.env.VOZEB_PRO_M5_BROWSER_OUTPUT;
 const m7 = process.env.VOZEB_PRO_M7_PRODUCT_BUSINESS === "1";
-const m8 = process.env.VOZEB_PRO_M8_SCENE_BUSINESS === "1";
 if (!data || !storageState || !outputDir) throw new Error("Run node scripts/run-image-enhancement-e2e.mjs from web/.");
 if (process.env.VOZEB_PRO_M5_BUSINESS_PRELOAD || process.env.VOZEB_PRO_E2E_DATABASE_URL || process.env.DATABASE_URL) throw new Error("image_enhancement_e2e_requires_isolated_environment");
 
@@ -30,7 +29,7 @@ export default defineConfig({
         {
             name: "chromium",
             testMatch: m7 ? /image-enhancement-product\.spec\.ts/ : /image-enhancement-generation\.spec\.ts/,
-            grep: m8 ? /SR-M8 actual protected local scene chain:/ : m7 ? /SR-M7 actual protected background chain:/ : /SR-M5-07\/F13 actual frozen scene chain:/,
+            grep: m7 ? /SR-M7 actual protected background chain:/ : /SR-M5-07\/F13 full-image chain:/,
             dependencies: ["setup"],
             use: { ...devices["Desktop Chrome"], storageState },
         },

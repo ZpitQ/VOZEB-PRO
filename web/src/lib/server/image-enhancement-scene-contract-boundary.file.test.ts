@@ -212,7 +212,8 @@ describe("real scene producer proof and protected CPU publication", () => {
             },
         ]);
         const regions = await import("./ecommerce-product-regions");
-        const protection = await regions.buildSceneEditProtection(source, "scene-source", { x: 8, y: 8, width: 8, height: 8 }, ["replace selected prop"], "user_selection");
+        const { buildSceneEditProtection } = await import("./ecommerce-protection.test-fixtures");
+        const protection = await buildSceneEditProtection(source, "scene-source", { x: 8, y: 8, width: 8, height: 8 }, ["replace selected prop"], "user_selection");
         protection.confirmation = { actorUserId: userId, confirmedAt: 1 };
         const task: ImageTask = {
             id: taskId,

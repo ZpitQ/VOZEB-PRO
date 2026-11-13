@@ -245,7 +245,7 @@ export function resolveEcommerceReferenceDecision(input: { planningInput: Ecomme
         const reference = facts.get(binding.assetId);
         if (!reference) issues.push({ code: "reference_analysis_missing", assetId: binding.assetId, path: "references", message: "这张图片尚无有效视觉事实" });
         if (!binding.purposes.length) issues.push({ code: "reference_purpose_required", assetId: binding.assetId, path: "bindings", message: "请确认这张图片在本次修改中的用途" });
-        if (binding.purposes.includes("product_identity") && !reliableProduct(reference)) issues.push({ code: "product_identity_unreliable", assetId: binding.assetId, path: "productFacts", message: "无法可靠确认这张图片的完整商品身份与保护区域" });
+        if (binding.purposes.includes("product_identity") && !reliableProduct(reference)) issues.push({ code: "product_identity_unreliable", assetId: binding.assetId, path: "productFacts", message: "无法可靠确认这张图片的商品身份" });
     }
     if (target && !reliableProduct(target) && !(target.contentType === "interior_scene" && target.confidence === "high" && (target.sceneFacts || target.productCore || target.visibleStructure.length))) {
         issues.push({ code: "edit_target_facts_unreliable", assetId: target.assetId, path: "references", message: "修改目标的可见事实不足，请确认或提供清晰图片" });
@@ -333,10 +333,9 @@ export function referenceUsesFromEcommerceDecision(input: { decision: EcommerceR
 }
 
 function reliableProduct(reference: EcommerceVisualReferenceV4 | undefined): boolean {
-    if (!reference || !["isolated_product", "product_detail"].includes(reference.contentType) || !reference.productFacts || !reference.productCore || !reference.fusionHalo) return false;
+    if (!reference || !["isolated_product", "product_detail"].includes(reference.contentType) || !reference.productFacts) return false;
     if (reference.confidence === "high") return true;
-    // A close-up/detail image may be medium confidence while still being a
-    // safe white-background anchor; pixel segmentation remains the final gate.
+    // A clear isolated detail can still identify the product at medium confidence.
     return reference.confidence === "medium" && reference.visualEvidence.isolatedSubject && (reference.visualEvidence.whiteBackground || reference.visualEvidence.transparentBackground);
 }
 

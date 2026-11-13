@@ -38,13 +38,13 @@ const REVIEW_PHASES = new Set<GenerationTaskExecutionPhase>(["review_pending", "
 const CANCELLATION_PHASES = new Set<GenerationTaskExecutionPhase>(["cancel_requested", "cancel_polling"]);
 const FENCED_REVIEW_SQL = `(task_type = 'agent' AND status = 'success' AND NULLIF(payload ->> 'executionId', '') IS NOT NULL
     AND payload #>> '{ecommerceSnapshot,qualityPolicy}' = 'advisory'
-    AND payload #>> '{ecommerceSnapshot,plan,planVersion}' IN ('ecommerce-edit.v4', 'ecommerce-edit.v5', 'ecommerce-edit.v6'))`;
+    AND payload #>> '{ecommerceSnapshot,plan,planVersion}' IN ('ecommerce-edit.v4', 'ecommerce-edit.v5', 'ecommerce-edit.v6', 'ecommerce-edit.v7'))`;
 const FENCED_EXECUTION_SQL = `(task_type = 'image' OR ${FENCED_REVIEW_SQL})`;
 
 function completedAdvisoryReview(task: { type: string; status: string; payload: Record<string, unknown> }) {
     const snapshot = record(task.payload.ecommerceSnapshot);
     const plan = record(snapshot?.plan);
-    return task.type === "agent" && task.status === "success" && snapshot?.qualityPolicy === "advisory" && ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(String(plan?.planVersion));
+    return task.type === "agent" && task.status === "success" && snapshot?.qualityPolicy === "advisory" && ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6", "ecommerce-edit.v7"].includes(String(plan?.planVersion));
 }
 
 function fencedExecution(task: { type: string; status: string; payload: Record<string, unknown> }) {

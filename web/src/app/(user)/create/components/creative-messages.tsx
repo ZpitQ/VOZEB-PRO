@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 import { userAvatarFallback } from "@/lib/user-avatar";
 import { DEFAULT_SITE_TITLE } from "@/lib/site-brand";
 import type { MaterializedCreativeProject } from "@/services/creative-project-handoff";
-import { getCreativeAgentRun, type CreativeAgentRun, type CreativeSceneSelection } from "@/services/api/creative";
+import { getCreativeAgentRun, type CreativeAgentRun } from "@/services/api/creative";
 import { usePublicSessionStore } from "@/stores/use-public-session-store";
 
 import { creativeAssetLayout } from "./creative-asset-layout";
@@ -42,7 +42,7 @@ export function CreativeMessages({
     onMaterializeProject,
     onRetryMessage,
     onAdjustRequest,
-    onConfirmSceneSelection,
+    onRegenerateFullImage,
     onRecoverReference,
     onCheckStatus,
     onResumeImageProcessing,
@@ -64,7 +64,7 @@ export function CreativeMessages({
     onMaterializeProject: (handoff: CreativeProjectHandoff) => Promise<MaterializedCreativeProject>;
     onRetryMessage: (message: CreativeMessage, run?: CreativeAgentRun) => Promise<boolean | void>;
     onAdjustRequest?: (message: CreativeMessage, run?: CreativeAgentRun) => void;
-    onConfirmSceneSelection?: (runId: string, selection: CreativeSceneSelection) => Promise<void>;
+    onRegenerateFullImage?: (runId: string) => Promise<void>;
     onRecoverReference?: (runId: string, recovery: CreativeReferenceRecovery) => Promise<void>;
     onCheckStatus?: (runId: string) => Promise<void>;
     onResumeImageProcessing?: (runId: string) => Promise<void>;
@@ -151,7 +151,7 @@ export function CreativeMessages({
                             onMaterializeProject={onMaterializeProject}
                             onRetryMessage={onRetryMessage}
                             onAdjustRequest={onAdjustRequest}
-                            onConfirmSceneSelection={onConfirmSceneSelection}
+                            onRegenerateFullImage={onRegenerateFullImage}
                             onRecoverReference={onRecoverReference}
                             onCheckStatus={onCheckStatus}
                             onResumeImageProcessing={onResumeImageProcessing}
@@ -181,14 +181,7 @@ export function CreativeMessages({
                         <div className={cn("min-w-0", item.role === "user" ? "max-w-[520px] text-right" : "min-w-0 flex-1")}>
                             {item.role === "user" && itemAssets.length ? <CreativeRoundReferenceStrip assets={itemAssets} /> : null}
                             {item.role === "assistant" && (running || (run?.status === "paused" && Boolean(run.ecommerceReferenceReview || run.canCheckStatus || run.imageProcessingRecovery))) ? (
-                                <CreativeGenerationWaiting
-                                    run={run}
-                                    message={item}
-                                    onConfirmSceneSelection={onConfirmSceneSelection}
-                                    onRecoverReference={onRecoverReference}
-                                    onCheckStatus={onCheckStatus}
-                                    onResumeImageProcessing={onResumeImageProcessing}
-                                />
+                                <CreativeGenerationWaiting run={run} message={item} onRegenerateFullImage={onRegenerateFullImage} onRecoverReference={onRecoverReference} onCheckStatus={onCheckStatus} onResumeImageProcessing={onResumeImageProcessing} />
                             ) : textAssetContent && item.role === "assistant" && item.status === "completed" ? null : (
                                 <div
                                     className={cn(
@@ -238,7 +231,7 @@ function CreativeMediaRound({
     onMaterializeProject,
     onRetryMessage,
     onAdjustRequest,
-    onConfirmSceneSelection,
+    onRegenerateFullImage,
     onRecoverReference,
     onCheckStatus,
     onResumeImageProcessing,
@@ -258,7 +251,7 @@ function CreativeMediaRound({
     onMaterializeProject: (handoff: CreativeProjectHandoff) => Promise<MaterializedCreativeProject>;
     onRetryMessage: (message: CreativeMessage, run?: CreativeAgentRun) => Promise<boolean | void>;
     onAdjustRequest?: (message: CreativeMessage, run?: CreativeAgentRun) => void;
-    onConfirmSceneSelection?: (runId: string, selection: CreativeSceneSelection) => Promise<void>;
+    onRegenerateFullImage?: (runId: string) => Promise<void>;
     onRecoverReference?: (runId: string, recovery: CreativeReferenceRecovery) => Promise<void>;
     onCheckStatus?: (runId: string) => Promise<void>;
     onResumeImageProcessing?: (runId: string) => Promise<void>;
@@ -297,7 +290,7 @@ function CreativeMediaRound({
                       ? "参考图片待核对"
                       : "参考图片待分析"
                 : sceneSelectionPending
-                  ? "确认修改位置"
+                  ? "按原要求重新生成"
                   : imageProcessingPending
                     ? "图像处理已暂停"
                     : taskTitle?.startsWith("生成")
@@ -347,7 +340,7 @@ function CreativeMediaRound({
                                 <CreativeGenerationWaiting
                                     run={run}
                                     message={assistantMessage}
-                                    onConfirmSceneSelection={onConfirmSceneSelection}
+                                    onRegenerateFullImage={onRegenerateFullImage}
                                     onRecoverReference={onRecoverReference}
                                     onCheckStatus={onCheckStatus}
                                     onResumeImageProcessing={onResumeImageProcessing}

@@ -295,6 +295,88 @@ describe("image task runtime submission safety", () => {
         if (replaced) expect(mocks.updateTask).not.toHaveBeenCalled();
     });
 
+    it("streams frozen full-image originals before sub2api submission and keeps their URLs", async () => {
+        const source = await sharp({ create: { width: 64, height: 48, channels: 3, background: "white" } })
+            .png()
+            .toBuffer();
+        const changed = Buffer.from(source);
+        changed[changed.length - 1] ^= 1;
+        state.kind = "edit";
+        state.runId = "frozen-full-image-run";
+        state.conversationId = "frozen-conversation";
+        state.config.advancedConfig = { ...emptyAdvancedConfig(), protocol: "sub2api" };
+        state.references = [{ id: "product", dataUrl: "", url: "/api/reference-assets/product.png?width=120", ecommerceRole: "product" }];
+        const persistedReferences = structuredClone(state.references);
+        const asset = {
+            id: "product",
+            userId: state.userId,
+            conversationId: state.conversationId,
+            ordinal: 0,
+            type: "image" as const,
+            status: "ready" as const,
+            serverUrl: "/api/reference-assets/product.png",
+            title: "product",
+            metadata: {},
+            createdAt: 1,
+            updatedAt: 1,
+        };
+        const contentSha256 = createHash("sha256").update(source).digest("hex");
+        state.referenceDispatch = { executionId: "original-worker", inputId: "frozen-input", decisionId: "frozen-decision", analysisRequestId: "frozen-analysis", copy: 1 };
+        state.ecommerceExecution = {
+            state: "ready",
+            compilerVersion: "ecommerce-openai-image-2.5.v5",
+            providerProfileId: "gpt-image-2.5-sunburst",
+            prompt: state.prompt,
+            referenceRoles: [{ assetId: "product", role: "product" }],
+            canvas: { mode: "exact", size: { width: 32, height: 32 }, source: "explicit_size", allowReframe: true },
+            protection: { scope: "global", protectedObjectIds: [], preserveOutsideMask: false, allowLightingChange: false },
+            parameters: { variant: "gpt-image-2.5-sunburst" },
+            modelSnapshot: {
+                logicalRole: "image_generation",
+                capability: "image",
+                logicalModelId: "image",
+                channelId: "fixture",
+                upstreamModel: "gpt-image-2.5-sunburst",
+                apiFormat: "openai",
+                imageEdit: { protocol: "sub2api", editPath: "/images/edits", transport: "json", supportsIndependentMask: true },
+            },
+        };
+        mocks.getAgentRun.mockResolvedValue({
+            id: state.runId,
+            userId: state.userId,
+            conversationId: state.conversationId,
+            ecommerceSnapshot: {
+                referenceCheckpoint: {
+                    version: "ecommerce-reference-checkpoint.v1",
+                    inputId: "frozen-input",
+                    decisionId: "frozen-decision",
+                    state: "resolved",
+                    analysisStage: { requestId: "frozen-analysis", state: "completed" },
+                    assets: [{ asset, assetVersion: referenceAssetVersion(asset, contentSha256), contentSha256 }],
+                    planningInput: { conversationId: state.conversationId, assetCandidates: [{ id: "product", type: "image", url: "/api/reference-assets/product.png?width=120" }] },
+                },
+                processing: { prepareReferences: [{ assetId: "product", manifest: { sourceIdentities: [{ assetId: "product", sha256: contentSha256, bytes: source.length, width: 64, height: 48, mimeType: "image/png" }] } }] },
+            },
+        });
+        mocks.referenceDataUrl.mockResolvedValue(dataUrl(source));
+        mocks.nativeFetch.mockResolvedValueOnce(new Response(new Uint8Array(changed))).mockResolvedValueOnce(new Response(new Uint8Array(source)));
+        mocks.runOpenAi.mockResolvedValue({ pending: { id: "same-upstream", pollBaseUrl: "http://fixture", mediaBaseUrl: "http://fixture" } });
+        const rejected = await createImageTaskUpstreamStep(state, "http://fixture", "http://fixture", "session=test");
+        expect(rejected).toMatchObject({ state: "needs_review", status: "reference_source_changed" });
+        expect(mocks.runOpenAi).not.toHaveBeenCalled();
+        const submitted = await createImageTaskUpstreamStep(state, "http://fixture", "http://fixture", "session=test");
+        expect(submitted.state).toBe("pending");
+        expect(mocks.runOpenAi).toHaveBeenCalledWith(
+            expect.objectContaining({ references: [{ ...persistedReferences[0], url: "/api/reference-assets/product.png", remoteUrl: undefined, serverUrl: undefined }] }),
+            "http://fixture",
+            "http://fixture",
+            "session=test",
+            true,
+        );
+        expect(mocks.referenceDataUrl).not.toHaveBeenCalled();
+        expect(state.references).toEqual(persistedReferences);
+    });
+
     it.each(["source_read", "parent_database"] as const)("recovers the same unsubmitted image from %s without misclassifying the source or starting a provider attempt", async (failure) => {
         const source = await sharp({ create: { width: 64, height: 48, channels: 3, background: "white" } })
             .png()
@@ -367,7 +449,7 @@ describe("image task runtime submission safety", () => {
     });
 
     it.each(["valid", "sub2api", "exchanged_order", "invalid_mapping", "system_changed", "product_changed", "product_json"])("keeps v4 auxiliary references and validates the frozen local baseline (%s)", async (condition) => {
-        const { buildSceneEditProtection } = await import("./ecommerce-product-regions");
+        const { buildSceneEditProtection } = await import("./ecommerce-protection.test-fixtures");
         const source = await sharp({ create: { width: 6, height: 4, channels: 3, background: "blue" } })
             .png()
             .toBuffer();

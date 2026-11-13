@@ -1,10 +1,11 @@
+import { buildLocalEditProductProtection } from "./ecommerce-protection.test-fixtures";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 
 import type { CreativeAsset } from "@/lib/creative-runtime-contract";
 import type { EcommerceEditPlan, EcommerceManualRegion } from "./ecommerce-edit-plan";
 import { resolveLocalEditTarget } from "./ecommerce-edit-planner";
-import { buildLocalEditProductProtection, createEcommerceLocalEditTask } from "./ecommerce-generation-service";
+import { createEcommerceLocalEditTask } from "./ecommerce-generation-service";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
 import { resolveImageEditProtocol } from "./image-edit-protocol";
@@ -44,27 +45,6 @@ describe("ecommerce local edit target resolution", () => {
 });
 
 describe("ecommerce local edit compilation", () => {
-    it("builds a target-only mask that keeps product core, fusion halo, and unrelated scene pixels opaque", async () => {
-        const source = await sharp({ create: { width: 100, height: 80, channels: 4, background: "#d8d8d8" } })
-            .png()
-            .toBuffer();
-        const resolution = resolveLocalEditTarget(localEditPlan("去掉右边绿植", ["plant-right"]), visualAnalysis());
-        if (resolution.state !== "resolved") throw new Error("expected a resolved target");
-
-        const regions = await buildLocalEditProductProtection(source, visualAnalysis(), "scene-result", "product-anchor", resolution.target);
-        const maskUrl = regions.editableBackground.mask?.reference.dataUrl;
-        if (!maskUrl) throw new Error("expected an inline local edit mask");
-        const mask = Buffer.from(maskUrl.slice(maskUrl.indexOf(",") + 1), "base64");
-        const decoded = await sharp(mask).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-        const alpha = (x: number, y: number) => decoded.data[(y * decoded.info.width + x) * decoded.info.channels + 3];
-
-        expect(regions).toMatchObject({ productAnchorId: "product-anchor", sourceAssetId: "scene-result", sourceSize: { width: 100, height: 80 } });
-        expect(alpha(80, 30)).toBe(0);
-        expect(alpha(50, 40)).toBe(255);
-        expect(alpha(36, 20)).toBe(255);
-        expect(alpha(10, 10)).toBe(255);
-    });
-
     it("uses the current scene baseline first and the original product anchor second", async () => {
         const source = await sharp({ create: { width: 100, height: 80, channels: 4, background: "#d8d8d8" } })
             .png()

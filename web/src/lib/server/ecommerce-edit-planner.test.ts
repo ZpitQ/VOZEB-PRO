@@ -28,11 +28,11 @@ vi.mock("./text-planning-runtime", () => ({
 const mockedRequest = vi.mocked(requestStructuredText);
 
 describe("ecommerce edit planner", () => {
-    it("freezes the visible extent of a qualified product detail in the plan and generation prompt", () => {
+    it("keeps a product detail as a semantic reference without forcing its original framing", () => {
         const { input, analysis, plan } = productPurposeFixture("参考图片1风格，修改图片2背景");
         analysis.references.find((reference) => reference.assetId === "product")!.contentType = "product_detail";
         const normalized = normalizePlannedEdit(plan, input, analysis, "planner-model");
-        expect(normalized?.preserve).toMatchObject({ sourceFraming: "visible_extent" });
+        expect(normalized?.preserve.sourceFraming).toBeUndefined();
         const profile = resolveEcommerceImageProviderProfile({
             logicalRole: "image_generation",
             capability: "image",
@@ -42,9 +42,9 @@ describe("ecommerce edit planner", () => {
             apiFormat: "openai",
             imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
         })!;
-        expect(compileEcommerceImageRequest(normalized!, profile).prompt).toContain("不得补全画面外的商品结构");
+        expect(compileEcommerceImageRequest(normalized!, profile).prompt).not.toContain("不得补全画面外的商品结构");
     });
-    it.each(["operation", "strategy"] as const)("rejects an unexecutable v6 product-only %s without rewriting the request or raw output", (field) => {
+    it.each(["operation", "strategy"] as const)("rejects an unexecutable v7 product-only %s without rewriting the request or raw output", (field) => {
         const { input, analysis, plan } = productPurposeFixture("参考图片1的风格，修改图片2");
         if (field === "operation") plan.operation = "local_edit";
         else plan.strategy = "integrated_scene";
@@ -54,7 +54,7 @@ describe("ecommerce edit planner", () => {
         expect({ input, analysis, plan }).toEqual(before);
     });
 
-    it.each(["operation", "strategy"] as const)("rejects an unexecutable raw v6 scene-only %s before legacy adaptation", (field) => {
+    it.each(["operation", "strategy"] as const)("rejects an unexecutable raw v7 scene-only %s before legacy adaptation", (field) => {
         const { input, analysis, plan } = purposeFixture();
         if (field === "operation") plan.operation = "local_edit";
         else plan.strategy = "strict_product";
@@ -71,13 +71,13 @@ describe("ecommerce edit planner", () => {
         const result = normalizePlannedEdit(plan, input, analysis, "planner-model")!;
 
         expect(result.operation).toBe("product_to_scene");
-        expect(result.strategy).toBe("strict_product");
+        expect(result.strategy).toBe("full_image");
         expect(result.baseline.sceneFacts).toBeNull();
-        expect(result.delta).toEqual(plan.delta);
+        expect(result.delta).toEqual({ ...plan.delta, requestedChanges: [input.planningInput.userRequest, ...plan.delta.requestedChanges] });
         expect({ input, analysis, plan }).toEqual(before);
     });
 
-    it("takes v6 scene facts only from the edit target even when the auxiliary scene is first", () => {
+    it("takes v7 scene facts only from the edit target even when the auxiliary scene is first", () => {
         const { input, analysis, plan } = purposeFixture();
         const result = normalizePlannedEdit(plan, input, analysis, "planner-model")!;
         expect(result.baseline.sceneFacts).toEqual(analysis.references[1].sceneFacts);
@@ -85,225 +85,35 @@ describe("ecommerce edit planner", () => {
             { assetId: "scene", alias: null, purposes: ["edit_target"], usedCueIds: [] },
             { assetId: "aux", alias: "图片1", purposes: ["lighting"], usedCueIds: ["light"] },
         ]);
-        expect(result.planVersion).toBe("ecommerce-edit.v6");
+        expect(result.planVersion).toBe("ecommerce-edit.v7");
     });
 
-    it("keeps unknown v6 target scene facts null instead of borrowing the reference room", () => {
+    it("keeps unknown v7 target scene facts null instead of borrowing the reference room", () => {
         const { input, analysis, plan } = purposeFixture();
         analysis.references[1].sceneFacts = null;
         const result = normalizePlannedEdit(plan, input, analysis, "planner-model")!;
         expect(result.baseline.sceneFacts).toBeNull();
-        expect(result.delta.requestedChanges).toEqual(plan.delta.requestedChanges);
+        expect(result.delta.requestedChanges).toEqual([input.planningInput.userRequest, ...plan.delta.requestedChanges]);
     });
 
-    it.each(["version", "uses"])("requires the active raw v6 %s contract before normalization", (kind) => {
+    it.each(["version", "uses"])("requires the active raw v7 %s contract before normalization", (kind) => {
         const { input, analysis, plan } = purposeFixture();
         if (kind === "version") plan.planVersion = "ecommerce-edit.v5";
         else delete plan.referenceUses;
         expect(() => normalizePlannedEdit(plan, input, analysis, "planner-model")).toThrow(kind === "version" ? "版本" : "referenceUses");
     });
 
-    it.each([
-        ["参考图片1光线，修改图片2商品颜色为白色", "change product color to white"],
-        ["将图片2商品材质改为金属", "change product material to metal"],
-        ["不要改变背景，把商品颜色改成白色", "change product color to white"],
-        ["将商品材质改为金属并保持背景不变", "change product material to metal"],
-        ["商品颜色换成白色", "change product color to white"],
-        ["修改产品的材料为金属", "change product material to metal"],
-        ["参考图片1光线，修改图片2商品颜色为白色", "generate a living room"],
-        ["将图片2商品材质改为金属", "generate a living room"],
-        ["参考图片1光线，把图片2中的商品颜色从黑色改成白色", "change product color from black to white"],
-        ["参考图片1光线，把图片2中的商品颜色从黑色改成白色", "generate a living room"],
-        ["参考图片1光线，将图片2中的商品材质由木质换成金属", "change product material from wood to metal"],
-        ["参考图片1光线，将图片2中的商品材质由木质换成金属", "generate a living room"],
-        ["不要改变商品颜色，但将商品材质由木质换成金属", "generate a living room"],
-        ["参考图片1光线，修改图片2背景颜色和商品颜色", "generate a living room"],
-        ["参考图片1光线，把图片2中的背景颜色和商品颜色都改成白色", "generate a living room"],
-        ["不要改变商品颜色但把商品材质和背景地板材质一起换成金属", "generate a living room"],
-        ...["中的", "里面的", "里的", "的"].flatMap((qualifier) => [
-            [`参考图片1光线，修改图片2${qualifier}商品颜色为白色`, "change product color to white"],
-            [`参考图片1光线，修改图片2${qualifier}商品颜色为白色`, "generate a living room"],
-            [`不要改变背景，将图片2${qualifier}商品材质改为金属`, "change product material to metal"],
-        ]),
-    ])("rejects a protected product request without erasing it: %s / %s", (userRequest, modelDelta) => {
+    it.each(["把商品颜色改为白色，保持背景不变", "把商品材质改为金属", "增加一个抽屉", "不要改变商品颜色，只修改背景"])("preserves the original full-image request: %s", (userRequest) => {
         const { input, analysis, plan } = productPurposeFixture(userRequest);
-        plan.delta.requestedChanges = [modelDelta];
         const original = structuredClone({ input, plan });
-        const profile = resolveEcommerceImageProviderProfile({
-            logicalRole: "image_generation",
-            capability: "image",
-            logicalModelId: "image-generation",
-            channelId: "fixture",
-            upstreamModel: "gpt-image-2.5-flare",
-            apiFormat: "openai",
-            imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
-        })!;
-        expect(() => compileEcommerceImageRequest(normalizePlannedEdit(plan, input, analysis, "planner-model")!, profile)).toThrow("暂不支持修改商品颜色或材质");
-        expect(input.planningInput.userRequest).toBe(original.input.planningInput.userRequest);
-        expect(plan.preserve).toEqual(original.plan.preserve);
-        expect(analysis.references[0].productFacts).toEqual(productFacts());
-    });
-
-    it.each([
-        "参考图片1光线，修改图片2商品结构为四层抽屉，同时生成客厅",
-        "参考图片1光线，把图片2中的商品结构从三层改成四层",
-        "参考图片1光线，将图片2商品抽屉数量改为四个",
-        "参考图片1光线，把图片2商品柜门数量换成两个",
-        "参考图片1光线，修改图片2商品把手形状为圆形",
-        "参考图片1光线，将图片2商品腿数量改为四条",
-        "参考图片1光线，修改图片2背景结构和商品结构",
-        "参考图片1光线，不要改变背景结构，但把商品结构改成四层抽屉",
-        "参考图片1光线，change product structure to four drawers",
-        "参考图片1光线，change product shape to round",
-        "参考图片1光线，修改图片2场景，新增商品抽屉，同时生成客厅",
-        "参考图片1光线，修改图片2场景，删除商品把手，同时生成客厅",
-        "参考图片1光线，修改图片2场景，商品抽屉数量增加到四个，同时生成客厅",
-        "参考图片1光线，修改图片2场景，添加商品柜门，同时生成客厅",
-        "参考图片1光线，修改图片2场景，商品抽屉数量减少到两个，同时生成客厅",
-        "参考图片1光线，修改图片2场景，移除商品把手，同时生成客厅",
-        "参考图片1光线，修改图片2场景，去掉商品腿，同时生成客厅",
-        "参考图片1光线，修改图片2场景，增加背景结构和商品抽屉数量",
-        "参考图片1光线，修改图片2场景，商品把手和背景结构都删除",
-        "参考图片1光线，修改图片2场景，add product drawers and generate a living room",
-        "参考图片1光线，修改图片2场景，remove product handles and generate a living room",
-        "参考图片1光线，修改图片2场景，delete product legs and generate a living room",
-        "参考图片1光线，修改图片2场景，increase product drawer count to four and generate a living room",
-        "参考图片1光线，修改图片2场景，product door count decrease to one and generate a living room",
-    ])("rejects an original product structure request before an environment-only planner delta: %s", async (userRequest) => {
-        const { input, analysis: rawAnalysis, plan } = productPurposeFixture(userRequest);
-        const normalized = normalizeEcommerceVisualAnalysis(rawAnalysis, input.planningInput.assetCandidates);
-        expect(normalized?.analysisVersion).toBe("ecommerce-visual-analysis.v4");
-        if (normalized?.analysisVersion !== "ecommerce-visual-analysis.v4") throw new Error("Invalid visual fixture");
-        const analysis = { ...normalized, modelRole: rawAnalysis.modelRole };
-        input.referenceDecision = resolveEcommerceReferenceDecision({ planningInput: input.planningInput, analysis });
-        expect(input.referenceDecision.state).toBe("resolved");
-        plan.referenceUses = referenceUsesFromEcommerceDecision({ decision: input.referenceDecision, sourceOrder: ["product", "scene"] });
-        plan.delta.requestedChanges = ["generate a living room"];
-        mockedRequest.mockResolvedValue(modelCall(plan));
-        const original = structuredClone({ input, analysis, plan });
-
-        await expect(planEcommerceEdit(input, analysis, [roleCandidate("edit_planning", "planner-model", "fixture")])).rejects.toThrow("结构");
-        expect(mockedRequest).not.toHaveBeenCalled();
-        expect(() => normalizePlannedEdit(plan, input, analysis, "planner-model")).toThrow("结构");
-        expect({ input, analysis, plan }).toEqual(original);
-    });
-
-    it.each([
-        "参考图片1光线，修改图片2场景，不要改变商品结构",
-        "参考图片1光线，修改图片2场景，商品结构不要从三层改成四层",
-        "参考图片1光线，修改图片2背景结构，保持商品结构不变",
-        "参考图片1光线，修改图片2场景，商品抽屉数量和背景结构都不要修改",
-        "参考图片1光线，修改图片2背景结构和墙面材质，保留商品抽屉数量",
-        "参考图片1光线和风格，修改图片2场景，商品结构从原图继承",
-        "参考图片1光线，修改图片2场景，不要删除商品把手，只改背景",
-        "参考图片1光线，修改图片2场景，不添加或删除商品结构，只改背景",
-        "参考图片1光线，修改图片2场景，商品抽屉数量不要增加到四个，只改背景",
-        "参考图片1光线，修改图片2场景，禁止新增商品抽屉，只改背景",
-        "参考图片1光线，修改图片2场景，不要同时增加商品抽屉数量和背景结构",
-        "参考图片1光线，修改图片2场景，商品把手和背景结构都不要删除",
-        "参考图片1光线，修改图片2场景，添加背景摆件，保持商品结构不变",
-        "参考图片1光线，修改图片2场景，删除背景墙装饰，保留商品把手",
-        "参考图片1光线，修改图片2场景，新增背景结构，保持商品抽屉数量",
-        "参考图片1光线，修改图片2场景，do not add product drawers, change background",
-        "参考图片1光线，修改图片2场景，do not remove product handles, change background",
-        "参考图片1光线，修改图片2场景，product drawer count do not increase, change background",
-        "参考图片1光线，修改图片2场景，add background structure, preserve product structure",
-        "参考图片1光线，修改图片2场景，delete background handles, keep product handles",
-    ])("keeps product structure preservation and environment structure edits executable: %s", async (userRequest) => {
-        const { input, analysis: rawAnalysis, plan } = productPurposeFixture(userRequest);
-        const normalized = normalizeEcommerceVisualAnalysis(rawAnalysis, input.planningInput.assetCandidates);
-        expect(normalized?.analysisVersion).toBe("ecommerce-visual-analysis.v4");
-        if (normalized?.analysisVersion !== "ecommerce-visual-analysis.v4") throw new Error("Invalid visual fixture");
-        const analysis = { ...normalized, modelRole: rawAnalysis.modelRole };
-        input.referenceDecision = resolveEcommerceReferenceDecision({ planningInput: input.planningInput, analysis });
-        expect(input.referenceDecision.state).toBe("resolved");
-        plan.referenceUses = referenceUsesFromEcommerceDecision({ decision: input.referenceDecision, sourceOrder: ["product", "scene"] });
-        const original = structuredClone({ input, analysis, plan });
-        mockedRequest.mockResolvedValue(modelCall(plan));
-
-        const result = await planEcommerceEdit(input, analysis, [roleCandidate("edit_planning", "planner-model", "fixture")]);
-
-        expect(mockedRequest).toHaveBeenCalledOnce();
-        expect(result.plan.preserve.productCore).toEqual(plan.preserve.productCore);
-        expect(result.plan.baseline.productFacts).toEqual(productFacts());
-        expect({ input, analysis, plan }).toEqual(original);
-    });
-
-    it.each([
-        "参考图片1光线，修改图片2场景，不要改变商品颜色和材质",
-        "把背景墙的颜色改为白色，保持商品颜色不变",
-        "将背景地板材质改为金属，不要改变商品材质",
-        "参考图片1的木质风格生成场景，不改变商品外观",
-        "商品颜色不要修改，背景改成白色",
-        "修改背景材质，不要改变商品材质",
-        "保留产品颜色并调整光线",
-        "参考图片1光线，修改图片2场景，请不要更改商品颜色和材质",
-        "参考图片1光线，修改图片2场景，不要让商品颜色变成白色",
-        "参考图片1光线，修改图片2场景，商品颜色不要从黑色改成白色",
-        "参考图片1光线，修改图片2场景，请勿将商品材质由木质换成金属",
-        "参考图片1光线，修改图片2场景，不要把商品颜色和背景颜色都改成白色",
-        "参考图片1光线，修改图片2场景，商品材质和背景地板材质都不要换成金属",
-        "参考图片1光线，修改图片2场景，商品颜色保持不变并将背景颜色改成白色",
-        "参考图片1光线，修改图片2场景，保持商品材质和颜色并将背景地板材质换成金属",
-        "参考图片1光线，修改图片2场景，不要同时修改商品颜色和背景颜色",
-        "参考图片1光线，修改图片2场景，禁止一起修改商品材质和背景地板材质",
-        "参考图片1光线，修改图片2场景，商品材质由原图继承并将背景地板材质换成金属",
-        "参考图片1光线，修改图片2场景，商品颜色从原图继承并将背景颜色改成白色",
-        ...["中的", "里面的", "里的", "的"].flatMap((qualifier) => [`修改图片2场景，不要对图片2${qualifier}商品颜色进行修改`, `修改图片2场景，将背景地板材质改成石材，禁止修改图片2${qualifier}商品材质`]),
-    ])("keeps scene edits and product-preservation instructions executable: %s", (userRequest) => {
-        const { input, analysis, plan } = productPurposeFixture(userRequest);
-        const profile = resolveEcommerceImageProviderProfile({
-            logicalRole: "image_generation",
-            capability: "image",
-            logicalModelId: "image-generation",
-            channelId: "fixture",
-            upstreamModel: "gpt-image-2.5-flare",
-            apiFormat: "openai",
-            imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
-        })!;
         const normalized = normalizePlannedEdit(plan, input, analysis, "planner-model")!;
-        expect(compileEcommerceImageRequest(normalized, profile).state).toBe("ready");
-        expect(normalized.preserve.productCore).toEqual(expect.arrayContaining(["color", "material"]));
-        expect(normalized.baseline.productFacts).toEqual(productFacts());
+        expect(normalized.strategy).toBe("full_image");
+        expect(normalized.protection).toMatchObject({ scope: "global", preserveOutsideMask: false, protectedObjectIds: [] });
+        expect(normalized.delta.requestedChanges).toContain(userRequest);
+        expect({ input, plan }).toEqual(original);
     });
 
-    it.each([
-        ["参考图片1光线，把图片2中的商品颜色和背景颜色都改成白色", "change product color and background color to white"],
-        ["参考图片1光线，将图片2中的商品材质和背景地板材质一起换成金属", "change product material and background floor material to metal"],
-    ])("rejects shared product and environment actions through legal v4 sources and both compilers: %s", (userRequest, requestedChange) => {
-        const { input, analysis: rawAnalysis, plan } = productPurposeFixture(userRequest);
-        const analysis = normalizeEcommerceVisualAnalysis(rawAnalysis, input.planningInput.assetCandidates);
-        expect(analysis?.analysisVersion).toBe("ecommerce-visual-analysis.v4");
-        if (analysis?.analysisVersion !== "ecommerce-visual-analysis.v4") throw new Error("Invalid visual fixture");
-        input.referenceDecision = resolveEcommerceReferenceDecision({ planningInput: input.planningInput, analysis });
-        const sources = resolveSourcesFromEcommerceReferenceDecision(
-            input.referenceDecision,
-            input.planningInput.assetCandidates.map((asset, ordinal) => ({ ...asset, userId: "fixture-user", conversationId: "fixture-conversation", ordinal, status: "ready", serverUrl: asset.url, metadata: {}, createdAt: 1, updatedAt: 1 })),
-        );
-        const resolvedInput = { ...input, sources };
-        expect(input.referenceDecision.state).toBe("resolved");
-        expect(sources).toMatchObject({ status: "resolved", productAnchorId: "product", sceneReferenceIds: ["scene"] });
-        const original = structuredClone({ input: resolvedInput, analysis });
-        for (const model of ["gpt-image-2.5-flare", "nano-banana-2"]) {
-            const profile = resolveEcommerceImageProviderProfile({
-                logicalRole: "image_generation",
-                capability: "image",
-                logicalModelId: "image-generation",
-                channelId: "fixture",
-                upstreamModel: model,
-                apiFormat: model === "nano-banana-2" ? "gemini" : "openai",
-            })!;
-            for (const modelDelta of [requestedChange, "generate a living room"]) {
-                plan.delta.requestedChanges = [modelDelta];
-                const originalPlan = structuredClone(plan);
-                expect(() => compileEcommerceImageRequest(normalizePlannedEdit(plan, resolvedInput, { ...rawAnalysis, ...analysis }, "planner-model")!, profile)).toThrow("暂不支持修改商品颜色或材质");
-                expect(plan).toEqual(originalPlan);
-            }
-        }
-        expect({ input: resolvedInput, analysis }).toEqual(original);
-    });
-
-    it("rejects a v6 planner source exchange before server canonicalization", () => {
+    it("rejects a v7 planner source exchange before server canonicalization", () => {
         const { input, analysis, plan } = purposeFixture();
         analysis.references.reverse();
         plan.source = { ...plan.source, currentSceneBaselineId: "aux", sceneReferenceIds: ["scene"] };
@@ -343,7 +153,7 @@ describe("ecommerce edit planner", () => {
         expect(() => normalizePlannedEdit(plan, input, analysis, "planner-model")).toThrow("线索");
     });
 
-    it.each(["purpose", "cue"])("rejects an auxiliary v6 %s permission exchange", (kind) => {
+    it.each(["purpose", "cue"])("rejects an auxiliary v7 %s permission exchange", (kind) => {
         const { input, analysis, plan } = purposeFixture();
         analysis.references.reverse();
         plan.referenceUses = [
@@ -379,7 +189,7 @@ describe("ecommerce edit planner", () => {
         expect(() => normalizePlannedEdit({ editPlan: raw }, input, visualAnalysis(), "planner-model")).toThrow("版本");
     });
 
-    it.each(["structure", "protection"])("rejects auxiliary v6 %s objects while allowing target count comparisons", (kind) => {
+    it.each(["structure"])("rejects auxiliary v7 %s objects while allowing target count comparisons", (kind) => {
         const { input, analysis, plan } = purposeFixture();
         plan.visibleStructure = kind === "structure" ? structuredClone(analysis.references[0].visibleStructure) : structuredClone(analysis.references[1].visibleStructure);
         analysis.references.reverse();
@@ -785,7 +595,8 @@ describe("ecommerce edit planner", () => {
         mockedRequest.mockResolvedValue(
             modelCall(
                 validPlan({
-                    planVersion: "ecommerce-edit.v6",
+                    planVersion: "ecommerce-edit.v7",
+                    strategy: "full_image",
                     operation: "local_edit",
                     delta: { requestedChanges: [planningInput.userRequest], targetObjects: ["scene-light"], targetRegions: [] },
                     source: { productAnchorId: "product", currentSceneBaselineId: "scene", sceneReferenceIds: [] },
@@ -801,11 +612,10 @@ describe("ecommerce edit planner", () => {
 
         const result = await planEcommerceEdit(input, analysis, plannerRole([candidate("planner")]));
         const request = mockedRequest.mock.lastCall![0];
-        expect(request.validateArguments!(JSON.stringify({ ...result.plan, delta: { ...result.plan.delta, targetRegions: ["当前场景图全画面，仅调整室内自然光亮度"] } }))).toMatchObject({ valid: false, issues: [{ path: "delta.targetRegions" }] });
+        expect(request.validateArguments!(JSON.stringify({ ...result.plan, delta: { ...result.plan.delta, targetRegions: ["当前场景图全画面，仅调整室内自然光亮度"] } }))).toMatchObject({ valid: true });
         const user = request.messages.find((message) => message.role === "user")!;
         expect(JSON.parse(String(user.content))).toMatchObject({
             visualAnalysis: { references: [{ assetId: "product" }, { assetId: "scene" }] },
-            allowedLocalEditTargetIds: ["scene-light"],
             requiredReferenceUses: [
                 { assetId: "scene", alias: "图片1", purposes: ["edit_target"], usedCueIds: [] },
                 { assetId: "product", alias: null, purposes: ["product_identity"], usedCueIds: [] },
@@ -814,7 +624,7 @@ describe("ecommerce edit planner", () => {
         expect(request.tool.parameters).toMatchObject({
             properties: {
                 referenceUses: { minItems: 2, maxItems: 2, items: { properties: { assetId: { enum: ["scene", "product"] } } } },
-                delta: { properties: { targetObjects: { items: { enum: ["scene-light"] } }, targetRegions: { items: { enum: ["scene-light"] } } } },
+                delta: { properties: { targetObjects: { type: "array" }, targetRegions: { type: "array" } } },
             },
         });
         expect(result.plan.referenceUses).toEqual([
@@ -1088,7 +898,7 @@ function purposeFixture() {
         ],
     };
     const plan = validPlan({
-        planVersion: "ecommerce-edit.v6",
+        planVersion: "ecommerce-edit.v7",
         operation: "scene_edit",
         source: { ...base.sources, sceneReferenceIds: ["aux"] },
         baseline: { productFacts: null, sceneFacts: reference.sceneFacts },
@@ -1096,7 +906,7 @@ function purposeFixture() {
             { assetId: "scene", alias: null, purposes: ["edit_target"], usedCueIds: [] },
             { assetId: "aux", alias: "图片1", purposes: ["lighting"], usedCueIds: ["light"] },
         ],
-        strategy: "integrated_scene",
+        strategy: "full_image",
         preserve: { productCore: [], sceneElements: ["cabinet"] },
     });
     return { input, analysis, plan };
@@ -1135,7 +945,8 @@ function productPurposeFixture(userRequest: string) {
     const decision = resolveEcommerceReferenceDecision({ planningInput, analysis });
     const input = { ...base, planningInput, referenceDecision: decision };
     const plan = validPlan({
-        planVersion: "ecommerce-edit.v6",
+        planVersion: "ecommerce-edit.v7",
+        strategy: "full_image",
         baseline: { productFacts: productFacts(), sceneFacts: null },
         referenceUses: referenceUsesFromEcommerceDecision({ decision, sourceOrder: ["product", "scene"] }),
     });

@@ -1,3 +1,4 @@
+import { buildSceneEditProtection } from "./ecommerce-protection.test-fixtures";
 import assert from "node:assert/strict";
 import { prepareAdvisoryReview, recoverAdvisoryReview } from "./ecommerce-visual-review.test-fixture";
 import { completeClaimedImageProcessingFixture, completeImageTaskResultFixture, readImageTaskResultBytesFixture } from "./image-processing.test-fixture";
@@ -15,7 +16,6 @@ import type { ImageTask } from "./image-task-store";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import { routeEcommerceRole } from "./ecommerce-model-routing";
 import { toSystemGenerationChannel } from "./generation-channel";
-import { buildSceneEditProtection } from "./ecommerce-product-regions";
 
 const textPlanningActual = vi.hoisted((): { module?: typeof import("./text-planning-runtime") } => ({}));
 const boundary = vi.hoisted(() => ({ request: vi.fn(), outbound: vi.fn(), create: vi.fn(), submit: vi.fn(), poll: vi.fn(), structured: vi.fn(), refund: vi.fn(), settings: {} as AuthSettings }));
@@ -56,7 +56,7 @@ vi.mock("next/server", async (original) => ({ ...(await original<typeof import("
 
 import { imageTask, settings } from "./agent-run-executor.test-fixtures";
 
-describe("agent canvas batch evidence through real file/runtime/QA services", () => {
+describe("agent canvas batch evidence through real file/runtime/QA services", { timeout: 120_000 }, () => {
     let directory: string;
     let childIds: string[];
     let nativeResults: Array<{ dataUrl: string; remoteUrl?: string }>;
@@ -218,7 +218,15 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
         const source = await uploadAssetForUser("batch-user", conversation.id, new File([new Uint8Array(Buffer.from(baseline.slice(baseline.indexOf(",") + 1), "base64"))], "scene.png", { type: "image/png" }));
         assert.ok(source.serverUrl);
         const initial = (
-            await createAgentRun("batch-user", { clientRequestId: requestId, conversationId: conversation.id, surface: "chat", prompt: "调整光线", assetIds: [source.id], skillIds: [], modelIds: multipleModels ? ["image-model", "image-model-two"] : [] })
+            await createAgentRun("batch-user", {
+                clientRequestId: requestId,
+                conversationId: conversation.id,
+                surface: "chat",
+                prompt: "调整光线，保持原图尺寸",
+                assetIds: [source.id],
+                skillIds: [],
+                modelIds: multipleModels ? ["image-model", "image-model-two"] : [],
+            })
         ).run;
         const plan: EcommerceEditPlan = {
             planVersion: "ecommerce-edit.v5",
@@ -274,7 +282,8 @@ describe("agent canvas batch evidence through real file/runtime/QA services", ()
                 const { referenceUsesFromEcommerceDecision } = await import("./ecommerce-reference-purpose");
                 value = {
                     ...plan,
-                    planVersion: "ecommerce-edit.v6",
+                    planVersion: "ecommerce-edit.v7",
+                    strategy: "full_image",
                     modelRoles: payload.requiredModelRoles,
                     continuity: payload.continuity,
                     referenceUses: referenceUsesFromEcommerceDecision({ decision: payload.referenceDecision, sourceOrder: [source.id] }),

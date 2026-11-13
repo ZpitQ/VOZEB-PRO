@@ -382,7 +382,7 @@ describe("image task result persistence", () => {
     });
 
     it.each([false, true])("stores independent mask, untouched native file and protected composite as separate internal evidence (v4 auxiliary=%s)", async (withStyle) => {
-        const { buildSceneEditProtection } = await import("./ecommerce-product-regions");
+        const { buildSceneEditProtection } = await import("./ecommerce-protection.test-fixtures");
         const source = await imageBytes(6, 4);
         const native = await sharp({ create: { width: 6, height: 4, channels: 3, background: "red" } })
             .png()
@@ -434,7 +434,7 @@ describe("image task result persistence", () => {
     });
 
     it("does not turn a partially unreadable local scene batch into success", async () => {
-        const { buildSceneEditProtection } = await import("./ecommerce-product-regions");
+        const { buildSceneEditProtection } = await import("./ecommerce-protection.test-fixtures");
         const source = await imageBytes(6, 4);
         const task = imageTask({ size: "6x4" });
         task.kind = "edit";
@@ -445,7 +445,7 @@ describe("image task result persistence", () => {
     });
 
     it("fails a mixed valid-ratio and wrong-ratio local scene batch before registering or writing any file", async () => {
-        const { buildSceneEditProtection } = await import("./ecommerce-product-regions");
+        const { buildSceneEditProtection } = await import("./ecommerce-protection.test-fixtures");
         const source = await imageBytes(6, 4);
         const good = await imageBytes(3, 2);
         const wrongRatio = await imageBytes(5, 5);
@@ -463,7 +463,8 @@ describe("image task result persistence", () => {
     });
 
     it("removes the saved mask and native when protected composite storage fails without deleting older files", async () => {
-        const { buildSceneEditProtection, compositeSceneEdit } = await import("./ecommerce-product-regions");
+        const { buildSceneEditProtection } = await import("./ecommerce-protection.test-fixtures");
+        const { compositeSceneEdit } = await import("./ecommerce-product-regions");
         const source = await imageBytes(6, 4);
         const native = await sharp({ create: { width: 3, height: 2, channels: 4, background: "red" } })
             .png()

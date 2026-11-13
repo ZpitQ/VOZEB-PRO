@@ -4,10 +4,9 @@ import { Sparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { CreativeMessage, CreativeReferenceRecovery } from "@/lib/creative-runtime-contract";
-import type { CreativeAgentRun, CreativeSceneSelection } from "@/services/api/creative";
+import type { CreativeAgentRun } from "@/services/api/creative";
 
 import { creativeRunMode } from "./creative-run-presentation";
-import { CreativeSceneSelectionPanel } from "./creative-scene-selection-panel";
 import { CreativeReferenceReviewPanel } from "./creative-reference-review-panel";
 
 const LONG_WAIT_MESSAGES = ["主人，久等了，辛苦你再陪我一会儿，我一直在这里守着这次创作。", "主人，别担心，创作还在继续，不用重复发送，先放松一下，这里交给我守着吧。", "主人，作品正在慢慢雕琢，可能比平时久一点，但我没有离开。"] as const;
@@ -15,14 +14,14 @@ const LONG_WAIT_MESSAGES = ["主人，久等了，辛苦你再陪我一会儿，
 export function CreativeGenerationWaiting({
     run,
     message,
-    onConfirmSceneSelection,
+    onRegenerateFullImage,
     onRecoverReference,
     onCheckStatus,
     onResumeImageProcessing,
 }: {
     run?: CreativeAgentRun;
     message: Pick<CreativeMessage, "content" | "createdAt">;
-    onConfirmSceneSelection?: (runId: string, selection: CreativeSceneSelection) => Promise<void>;
+    onRegenerateFullImage?: (runId: string) => Promise<void>;
     onRecoverReference?: (runId: string, recovery: CreativeReferenceRecovery) => Promise<void>;
     onCheckStatus?: (runId: string) => Promise<void>;
     onResumeImageProcessing?: (runId: string) => Promise<void>;
@@ -63,6 +62,21 @@ export function CreativeGenerationWaiting({
         }
     };
 
+    const regenerateFullImage = async () => {
+        if (!run?.ecommerceSceneSelection || !onRegenerateFullImage || checkingRef.current) return;
+        checkingRef.current = true;
+        setChecking(true);
+        setCheckError("");
+        try {
+            await onRegenerateFullImage(run.id);
+        } catch (error) {
+            setCheckError(error instanceof Error ? error.message : "暂时无法重新生成，请重试。");
+        } finally {
+            checkingRef.current = false;
+            setChecking(false);
+        }
+    };
+
     useEffect(() => {
         if (!active) return;
         const update = () => setNow(Date.now());
@@ -79,7 +93,7 @@ export function CreativeGenerationWaiting({
         : run?.ecommerceReferenceReview && run.status === "paused"
           ? run.ecommerceReferenceReview.question
           : run?.ecommerceSceneSelection && run.status === "paused"
-            ? "请确认需要修改的位置，然后继续这次创作。"
+            ? "这次创作尚未提交生图，可按原要求直接生成整张图片。"
             : creativeGenerationWaitingCopy({ mode: creativeRunMode(run), runStatus: run?.status, progressText: message.content, reviewText, elapsedSeconds });
 
     return (
@@ -95,8 +109,10 @@ export function CreativeGenerationWaiting({
                             已等待 {formatCreativeWaitingTime(elapsedSeconds)}
                         </p>
                     ) : null}
-                    {run?.status === "paused" && run.ecommerceSceneSelection && onConfirmSceneSelection ? (
-                        <CreativeSceneSelectionPanel key={`${run.id}:${run.ecommerceSceneSelection.baselineAssetId}`} runId={run.id} action={run.ecommerceSceneSelection} onConfirm={onConfirmSceneSelection} />
+                    {run?.status === "paused" && run.ecommerceSceneSelection && onRegenerateFullImage ? (
+                        <button type="button" disabled={checking} onClick={() => void regenerateFullImage()} className="mt-3 rounded-lg bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-60">
+                            {checking ? "正在重新生成" : "按原要求重新生成"}
+                        </button>
                     ) : null}
                     {run?.status === "paused" && run.ecommerceReferenceReview && onRecoverReference ? (
                         <CreativeReferenceReviewPanel key={`${run.id}:${run.ecommerceReferenceReview.reviewId}`} runId={run.id} review={run.ecommerceReferenceReview} onRecover={onRecoverReference} />

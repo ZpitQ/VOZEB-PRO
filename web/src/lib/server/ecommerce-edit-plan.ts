@@ -1,6 +1,7 @@
 import { resolveAgentTaskCount } from "./agent-run-validation";
 
 export const ECOMMERCE_EDIT_PLAN_VERSION = "ecommerce-edit.v5" as const;
+export const ECOMMERCE_EDIT_PLAN_V7_VERSION = "ecommerce-edit.v7" as const;
 export const ECOMMERCE_EDIT_PLAN_V6_VERSION = "ecommerce-edit.v6" as const;
 export const ECOMMERCE_REFERENCE_PURPOSE_VALUES = ["edit_target", "product_identity", "style", "lighting", "composition"] as const;
 export type EcommerceReferencePurposeValue = (typeof ECOMMERCE_REFERENCE_PURPOSE_VALUES)[number];
@@ -85,7 +86,7 @@ export const ecommerceVisibleStructureSchema = {
 };
 
 export type EcommerceOperation = "product_to_scene" | "local_edit" | "scene_edit";
-export type EcommerceStrategy = "strict_product" | "integrated_scene" | "creative_variation";
+export type EcommerceStrategy = "strict_product" | "integrated_scene" | "creative_variation" | "full_image";
 export type EcommerceDimensions = { width: number; height: number };
 export type EcommerceEditProtection = {
     scope: "local" | "global";
@@ -114,9 +115,11 @@ export type EcommerceCanvasConstraint = {
     allowReframe: boolean;
 };
 export type EcommerceCanvasInput = {
+    strategy?: EcommerceStrategy;
     operation: EcommerceOperation;
     userRequest?: { mode: "preserve" } | { mode: "exact" | "ratio"; size: EcommerceDimensions };
     explicitSize?: EcommerceDimensions;
+    explicitRatio?: EcommerceDimensions;
     baselineSize?: EcommerceDimensions;
     planningSize?: EcommerceDimensions;
     defaultSize?: EcommerceDimensions;
@@ -137,14 +140,15 @@ export function validateEcommerceDimensions(size: EcommerceDimensions): void {
 }
 
 export function resolveEcommerceCanvasConstraint(input: EcommerceCanvasInput): EcommerceCanvasConstraint | null {
-    for (const size of [input.explicitSize, input.baselineSize, input.planningSize, input.defaultSize, input.userRequest && input.userRequest.mode !== "preserve" ? input.userRequest.size : undefined]) {
+    for (const size of [input.explicitSize, input.explicitRatio, input.baselineSize, input.planningSize, input.defaultSize, input.userRequest && input.userRequest.mode !== "preserve" ? input.userRequest.size : undefined]) {
         if (size !== undefined) validateEcommerceDimensions(size);
     }
     const constraint = (mode: EcommerceCanvasConstraint["mode"], size: EcommerceDimensions, source: EcommerceCanvasConstraint["source"], allowReframe: boolean): EcommerceCanvasConstraint => ({ mode, size: { ...size }, source, allowReframe });
     if (input.userRequest?.mode === "preserve") return input.baselineSize ? constraint("exact", input.baselineSize, "user_text", false) : null;
     if (input.userRequest) return constraint(input.userRequest.mode, input.userRequest.size, "user_text", true);
     if (input.explicitSize) return constraint("exact", input.explicitSize, "explicit_size", true);
-    if (input.baselineSize) return constraint(input.operation === "product_to_scene" ? "ratio" : "exact", input.baselineSize, "baseline", input.operation === "product_to_scene");
+    if (input.explicitRatio) return constraint("ratio", input.explicitRatio, "explicit_size", true);
+    if (input.baselineSize) return constraint(input.operation === "product_to_scene" || input.strategy === "full_image" ? "ratio" : "exact", input.baselineSize, "baseline", input.operation === "product_to_scene");
     if (input.planningSize) return constraint("ratio", input.planningSize, "planning", true);
     if (input.defaultSize) return constraint("ratio", input.defaultSize, "default", true);
     return null;
@@ -170,15 +174,15 @@ export function ecommerceCanvasSize(canvas: EcommerceCanvasConstraint): string {
     while (b) [a, b] = [b, a % b];
     return `${width / a}:${height / a}`;
 }
-export function matchesEcommerceCanvasDimensions(canvas: EcommerceCanvasConstraint, size: EcommerceDimensions): boolean {
+export function matchesEcommerceCanvasDimensions(canvas: EcommerceCanvasConstraint, size: EcommerceDimensions, allowRatioRounding = false): boolean {
     if (canvas.mode === "exact") return size.width === canvas.size.width && size.height === canvas.size.height;
     const [width, height] = ecommerceCanvasSize(canvas).split(":").map(BigInt);
     const actualWidth = BigInt(size.width);
     const actualHeight = BigInt(size.height);
     const cross = actualWidth * height - actualHeight * width;
     if (cross === BigInt(0)) return true;
-    // Ratios below their reduced integer terms use the existing half-pixel grid contract.
-    return actualWidth < width && actualHeight < height && BigInt(2) * (cross < BigInt(0) ? -cross : cross) < width + height;
+    // New full-image results may round either axis; frozen requests keep the smaller-grid contract.
+    return (allowRatioRounding || (actualWidth < width && actualHeight < height)) && BigInt(2) * (cross < BigInt(0) ? -cross : cross) < width + height;
 }
 
 export type EcommerceModelRoles = {
@@ -213,7 +217,7 @@ export type EcommerceManualRegion = {
 export type EcommerceEditPlan = {
     taskId?: string;
     selectedSkills?: import("./agent-run-audit").AgentRunSkillSnapshot[];
-    planVersion: typeof ECOMMERCE_EDIT_PLAN_V6_VERSION | typeof ECOMMERCE_EDIT_PLAN_VERSION | "ecommerce-edit.v4" | "ecommerce-edit.v3" | "ecommerce-edit.v2" | "ecommerce-edit.v1";
+    planVersion: typeof ECOMMERCE_EDIT_PLAN_V7_VERSION | typeof ECOMMERCE_EDIT_PLAN_V6_VERSION | typeof ECOMMERCE_EDIT_PLAN_VERSION | "ecommerce-edit.v4" | "ecommerce-edit.v3" | "ecommerce-edit.v2" | "ecommerce-edit.v1";
     photography?: EcommercePhotographyPlan;
     visibleStructure?: EcommerceVisibleStructure[];
     canvas?: EcommerceCanvasConstraint;
@@ -268,15 +272,23 @@ export type EcommerceEditPlanPublicSummary = {
 };
 
 const OPERATIONS = new Set<EcommerceOperation>(["product_to_scene", "local_edit", "scene_edit"]);
-const STRATEGIES = new Set<EcommerceStrategy>(["strict_product", "integrated_scene", "creative_variation"]);
+const STRATEGIES = new Set<EcommerceStrategy>(["strict_product", "integrated_scene", "creative_variation", "full_image"]);
 const STRICT_PRODUCT_CORE = ["outline", "brand_text", "color", "material", "scale", "view"];
 
 export function normalizeEcommerceEditPlan(value: unknown): EcommerceEditPlan | null {
-    if (!isRecord(value) || ![ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_VERSION, "ecommerce-edit.v4", "ecommerce-edit.v3", "ecommerce-edit.v2", "ecommerce-edit.v1"].includes(String(value.planVersion))) return null;
+    if (!isRecord(value) || ![ECOMMERCE_EDIT_PLAN_V7_VERSION, ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_VERSION, "ecommerce-edit.v4", "ecommerce-edit.v3", "ecommerce-edit.v2", "ecommerce-edit.v1"].includes(String(value.planVersion)))
+        return null;
     const photography = value.photography === undefined ? undefined : normalizeEcommercePhotographyPlan(value.photography);
-    if (photography === null || (photography !== undefined && ![ECOMMERCE_EDIT_PLAN_VERSION, ECOMMERCE_EDIT_PLAN_V6_VERSION].includes(String(value.planVersion) as typeof ECOMMERCE_EDIT_PLAN_VERSION | typeof ECOMMERCE_EDIT_PLAN_V6_VERSION))) return null;
+    if (
+        photography === null ||
+        (photography !== undefined &&
+            ![ECOMMERCE_EDIT_PLAN_VERSION, ECOMMERCE_EDIT_PLAN_V7_VERSION, ECOMMERCE_EDIT_PLAN_V6_VERSION].includes(
+                String(value.planVersion) as typeof ECOMMERCE_EDIT_PLAN_VERSION | typeof ECOMMERCE_EDIT_PLAN_V7_VERSION | typeof ECOMMERCE_EDIT_PLAN_V6_VERSION,
+            ))
+    )
+        return null;
     const visibleStructure = value.visibleStructure === undefined ? undefined : normalizeEcommerceVisibleStructure(value.visibleStructure);
-    if (visibleStructure === null || (visibleStructure !== undefined && ![ECOMMERCE_EDIT_PLAN_VERSION, ECOMMERCE_EDIT_PLAN_V6_VERSION, "ecommerce-edit.v4"].includes(String(value.planVersion)))) return null;
+    if (visibleStructure === null || (visibleStructure !== undefined && ![ECOMMERCE_EDIT_PLAN_VERSION, ECOMMERCE_EDIT_PLAN_V7_VERSION, ECOMMERCE_EDIT_PLAN_V6_VERSION, "ecommerce-edit.v4"].includes(String(value.planVersion)))) return null;
     const canvas = value.canvas === undefined ? undefined : normalizeEcommerceCanvasConstraint(value.canvas);
     if (canvas === null) return null;
     const protection = value.protection === undefined ? undefined : normalizeEcommerceEditProtection(value.protection);
@@ -291,7 +303,7 @@ export function normalizeEcommerceEditPlan(value: unknown): EcommerceEditPlan | 
     const validation = asRecord(value.validation);
     const productFacts = asRecord(baseline?.productFacts);
     const sceneFacts = asRecord(baseline?.sceneFacts);
-    const referenceUses = normalizeReferenceUses(value.referenceUses, String(value.planVersion) === ECOMMERCE_EDIT_PLAN_V6_VERSION);
+    const referenceUses = normalizeReferenceUses(value.referenceUses, [ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_V7_VERSION].includes(String(value.planVersion) as typeof ECOMMERCE_EDIT_PLAN_V6_VERSION | typeof ECOMMERCE_EDIT_PLAN_V7_VERSION));
     if (referenceUses === null) return null;
 
     const normalized: EcommerceEditPlan = {
@@ -320,7 +332,7 @@ export function normalizeEcommerceEditPlan(value: unknown): EcommerceEditPlan | 
                           view: normalizeText(productFacts?.view),
                       },
             sceneFacts:
-                baseline?.sceneFacts === null && value.planVersion === ECOMMERCE_EDIT_PLAN_V6_VERSION
+                baseline?.sceneFacts === null && [ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_V7_VERSION].includes(value.planVersion as typeof ECOMMERCE_EDIT_PLAN_V6_VERSION | typeof ECOMMERCE_EDIT_PLAN_V7_VERSION)
                     ? null
                     : {
                           space: normalizeText(sceneFacts?.space),
@@ -364,25 +376,41 @@ export function normalizeEcommerceEditPlan(value: unknown): EcommerceEditPlan | 
 }
 
 export function validateEcommerceEditPlan(plan: EcommerceEditPlan): void {
-    if (!isRecord(plan) || ![ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_VERSION, "ecommerce-edit.v4", "ecommerce-edit.v3", "ecommerce-edit.v2", "ecommerce-edit.v1"].includes(plan.planVersion)) throw new Error("商品编辑计划版本无效");
+    if (!isRecord(plan) || ![ECOMMERCE_EDIT_PLAN_V7_VERSION, ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_VERSION, "ecommerce-edit.v4", "ecommerce-edit.v3", "ecommerce-edit.v2", "ecommerce-edit.v1"].includes(plan.planVersion))
+        throw new Error("商品编辑计划版本无效");
     if (
         plan.photography !== undefined &&
-        (![ECOMMERCE_EDIT_PLAN_VERSION, ECOMMERCE_EDIT_PLAN_V6_VERSION].includes(plan.planVersion as typeof ECOMMERCE_EDIT_PLAN_VERSION | typeof ECOMMERCE_EDIT_PLAN_V6_VERSION) || !normalizeEcommercePhotographyPlan(plan.photography))
+        (![ECOMMERCE_EDIT_PLAN_VERSION, ECOMMERCE_EDIT_PLAN_V7_VERSION, ECOMMERCE_EDIT_PLAN_V6_VERSION].includes(plan.planVersion as typeof ECOMMERCE_EDIT_PLAN_VERSION | typeof ECOMMERCE_EDIT_PLAN_V7_VERSION | typeof ECOMMERCE_EDIT_PLAN_V6_VERSION) ||
+            !normalizeEcommercePhotographyPlan(plan.photography))
     )
         throw new Error("摄影规划无效或不属于原任务版本");
     if (
         plan.visibleStructure !== undefined &&
-        (![ECOMMERCE_EDIT_PLAN_VERSION, ECOMMERCE_EDIT_PLAN_V6_VERSION, "ecommerce-edit.v4"].includes(plan.planVersion as typeof ECOMMERCE_EDIT_PLAN_VERSION | typeof ECOMMERCE_EDIT_PLAN_V6_VERSION | "ecommerce-edit.v4") ||
+        (![ECOMMERCE_EDIT_PLAN_VERSION, ECOMMERCE_EDIT_PLAN_V7_VERSION, ECOMMERCE_EDIT_PLAN_V6_VERSION, "ecommerce-edit.v4"].includes(
+            plan.planVersion as typeof ECOMMERCE_EDIT_PLAN_VERSION | typeof ECOMMERCE_EDIT_PLAN_V7_VERSION | typeof ECOMMERCE_EDIT_PLAN_V6_VERSION | "ecommerce-edit.v4",
+        ) ||
             !normalizeEcommerceVisibleStructure(plan.visibleStructure))
     )
         throw new Error("可见结构事实无效或不属于原任务版本");
-    if (plan.planVersion === ECOMMERCE_EDIT_PLAN_V6_VERSION && plan.referenceUses !== undefined && !normalizeReferenceUses(plan.referenceUses, true)) throw new Error("参考用途快照无效");
+    if (
+        [ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_V7_VERSION].includes(plan.planVersion as typeof ECOMMERCE_EDIT_PLAN_V6_VERSION | typeof ECOMMERCE_EDIT_PLAN_V7_VERSION) &&
+        plan.referenceUses !== undefined &&
+        !normalizeReferenceUses(plan.referenceUses, true)
+    )
+        throw new Error("参考用途快照无效");
     if (plan.canvas !== undefined && !normalizeEcommerceCanvasConstraint(plan.canvas)) throw new Error("商品编辑画布尺寸约束无效");
     if (plan.protection !== undefined && !normalizeEcommerceEditProtection(plan.protection)) throw new Error("编辑保护约束无效");
-    if ([ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_VERSION, "ecommerce-edit.v4", "ecommerce-edit.v3"].includes(plan.planVersion as string) && ["local_edit", "scene_edit"].includes(plan.operation) && !plan.protection)
+    if (
+        [ECOMMERCE_EDIT_PLAN_V7_VERSION, ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_VERSION, "ecommerce-edit.v4", "ecommerce-edit.v3"].includes(plan.planVersion as string) &&
+        ["local_edit", "scene_edit"].includes(plan.operation) &&
+        !plan.protection
+    )
         throw new Error("局部或场景编辑缺少保护范围");
     if (!OPERATIONS.has(plan.operation)) throw new Error("商品编辑操作无效");
     if (!STRATEGIES.has(plan.strategy)) throw new Error("商品编辑策略无效");
+    if ((plan.planVersion === ECOMMERCE_EDIT_PLAN_V7_VERSION) !== (plan.strategy === "full_image")) throw new Error("整图策略与计划版本不一致");
+    if (plan.strategy === "full_image" && (!plan.referenceUses || plan.protection?.scope !== "global" || plan.protection.preserveOutsideMask || plan.protection.protectedObjectIds.length || plan.delta.manualRegion))
+        throw new Error("整图计划不能包含像素保护或人工选区");
     if (!isRecord(plan.source)) throw new Error("商品编辑来源无效");
 
     const sceneEdit = plan.operation === "scene_edit";
@@ -391,7 +419,7 @@ export function validateEcommerceEditPlan(plan: EcommerceEditPlan): void {
         if (plan.source.productAnchorId !== null) throw new Error("场景编辑不能包含商品锚点");
         if (plan.source.currentSceneBaselineId === null) throw new Error("场景编辑缺少当前场景基线");
         if (plan.baseline?.productFacts !== null) throw new Error("场景编辑不能包含商品事实");
-        if (plan.strategy !== "integrated_scene") throw new Error("场景编辑策略必须是 integrated_scene");
+        if (plan.strategy !== "integrated_scene" && plan.strategy !== "full_image") throw new Error("场景编辑策略必须是 integrated_scene");
     } else {
         requireId(plan.source.productAnchorId, "商品主参考图");
     }
@@ -406,13 +434,14 @@ export function validateEcommerceEditPlan(plan: EcommerceEditPlan): void {
     }
 
     if (!sceneEdit) validateProductFacts(plan.baseline?.productFacts);
-    if (plan.baseline?.sceneFacts !== null || plan.planVersion !== ECOMMERCE_EDIT_PLAN_V6_VERSION) validateSceneFacts(plan.baseline?.sceneFacts);
+    if (plan.baseline?.sceneFacts !== null || ![ECOMMERCE_EDIT_PLAN_V6_VERSION, ECOMMERCE_EDIT_PLAN_V7_VERSION].includes(plan.planVersion as typeof ECOMMERCE_EDIT_PLAN_V6_VERSION | typeof ECOMMERCE_EDIT_PLAN_V7_VERSION))
+        validateSceneFacts(plan.baseline?.sceneFacts);
     if (!isRecord(plan.delta)) throw new Error("场景增量无效");
     requireStringArray(plan.delta.requestedChanges, "创作请求");
     requireStringArray(plan.delta.targetObjects, "编辑目标");
     requireStringArray(plan.delta.targetRegions, "编辑区域");
     if (plan.delta.manualRegion !== undefined) validateManualRegion(plan.delta.manualRegion);
-    if (plan.operation === "local_edit" && !plan.delta.targetObjects.length && !plan.delta.manualRegion) throw new Error("局部编辑目标无效");
+    if (plan.strategy !== "full_image" && plan.operation === "local_edit" && !plan.delta.targetObjects.length && !plan.delta.manualRegion) throw new Error("局部编辑目标无效");
 
     if (!isRecord(plan.preserve)) throw new Error("商品保护项无效");
     requireStringArray(plan.preserve.productCore, "商品核心保护项");

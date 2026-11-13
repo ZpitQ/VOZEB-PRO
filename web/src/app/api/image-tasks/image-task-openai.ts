@@ -1,4 +1,5 @@
 import { readEcommerceGenerationInput } from "@/lib/server/image-processing-service";
+import { isFullImageEcommerceExecution } from "@/lib/server/ecommerce-image-compiler";
 import { after, NextResponse } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth/session";
@@ -424,7 +425,7 @@ export async function buildJsonImageEditBodies(
     const referenceContext = { ownerUserId: task.userId, taskId: task.id };
     const nativeSub2Api = isNativeSub2ApiImageEdit(task.config);
     const generation =
-        nativeSub2Api && task.ecommerceExecution && task.productProtection
+        nativeSub2Api && task.ecommerceExecution && (task.productProtection || isFullImageEcommerceExecution(task.ecommerceExecution))
             ? await readEcommerceGenerationInput(task, quality, requestSize).catch((cause: unknown) => {
                   const error = new GenerationSubmissionSafeFailure("生成输入副本读取失败，请重新发起任务");
                   error.cause = cause;

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { persistFrozenSceneSelection } from "./ecommerce-protection.test-fixtures";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
@@ -103,6 +104,21 @@ vi.mock("@/app/api/image-tasks/image-task-support", async (original) => {
     return { ...actual, pollOpenAiImageTask: boundary.poll };
 });
 
+const legacyPlanningFreeze = vi.hoisted(() => ({ runId: "" }));
+vi.mock("./ecommerce-protection-preparation", async (original) => {
+    const actual = await original<typeof import("./ecommerce-protection-preparation")>();
+    return {
+        ...actual,
+        prepareEcommerceFullImageTask: (...args: Parameters<typeof actual.prepareEcommerceFullImageTask>) => {
+            if (args[0].id === legacyPlanningFreeze.runId) {
+                legacyPlanningFreeze.runId = "";
+                return Promise.resolve(undefined);
+            }
+            return actual.prepareEcommerceFullImageTask(...args);
+        },
+    };
+});
+
 export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
     const enabled = provider === "file" || process.env.VOZEB_PRO_RUN_ECOMMERCE_POSTGRES_INTEGRATION === "1";
     (enabled ? describe : describe.skip)(`${provider} ordinary Run copies through real dispatch, image Routes and result Workers`, () => {
@@ -152,6 +168,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
             vi.resetModules();
             vi.clearAllMocks();
             r03ProjectionWrite.runId = "";
+            legacyPlanningFreeze.runId = "";
             r03ProjectionRead.afterImageGet = undefined;
             boundary.model.mockReset();
             userId = "";
@@ -1683,13 +1700,13 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const product = input.visualAnalysis.references.find((reference) => reference.assetId === assetId);
                 assert.ok(product?.productFacts, "SETUP: the real product planner must receive its accepted product anchor");
                 return reply({
-                    planVersion: "ecommerce-edit.v6",
+                    planVersion: "ecommerce-edit.v7",
                     operation: "product_to_scene",
                     source: { productAnchorId: input.sources.productAnchorId, currentSceneBaselineId: input.sources.currentSceneBaselineId, sceneReferenceIds: input.sources.sceneReferenceIds },
                     baseline: { productFacts: product.productFacts, sceneFacts: null },
                     delta: { requestedChanges: ["Replace the background with a living room"], targetObjects: ["background-main"], targetRegions: [] },
                     preserve: { productCore: ["outline", "brand_text", "color", "material", "scale", "view"], sceneElements: [] },
-                    strategy: "strict_product",
+                    strategy: "full_image",
                     modelRoles: input.requiredModelRoles,
                     continuity: input.continuity,
                     referenceUses: input.visualAnalysis.references.map((reference) => ({ assetId: reference.assetId, alias: reference.alias, purposes: reference.purposes, usedCueIds: [] })),
@@ -1754,13 +1771,13 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const scene = input.visualAnalysis.references.find((reference) => reference.assetId === sceneId);
                 assert.ok(product?.productFacts && scene?.sceneFacts, "SETUP: the real local planner must receive both accepted source facts");
                 return reply({
-                    planVersion: "ecommerce-edit.v6",
+                    planVersion: "ecommerce-edit.v7",
                     operation: "local_edit",
                     source: { productAnchorId: input.sources.productAnchorId, currentSceneBaselineId: input.sources.currentSceneBaselineId, sceneReferenceIds: input.sources.sceneReferenceIds },
                     baseline: { productFacts: product.productFacts, sceneFacts: scene.sceneFacts },
                     delta: { requestedChanges: ["把左侧花瓶换成小盆绿植"], targetObjects: ["left-vase"], targetRegions: [] },
                     preserve: { productCore: ["outline", "brand_text", "color", "material", "scale", "view"], sceneElements: [] },
-                    strategy: "strict_product",
+                    strategy: "full_image",
                     modelRoles: input.requiredModelRoles,
                     continuity: input.continuity,
                     referenceUses: input.visualAnalysis.references.map((reference) => ({ assetId: reference.assetId, alias: reference.alias, purposes: reference.purposes, usedCueIds: reference.assetId === styleId ? ["auxiliary-style-cue"] : [] })),
@@ -1818,14 +1835,13 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const baseline = input.visualAnalysis.references.find((reference) => reference.assetId === assetId);
                 assert.ok(baseline?.sceneFacts);
                 return reply({
-                    planVersion: "ecommerce-edit.v6",
+                    planVersion: "ecommerce-edit.v7",
                     operation: "scene_edit",
                     source: input.sources,
                     baseline: { productFacts: null, sceneFacts: baseline.sceneFacts },
                     delta: { requestedChanges: ["在柜子上增加花瓶和接触阴影"], targetObjects: ["vase"], targetRegions: ["cabinet-top"] },
                     preserve: { productCore: [], sceneElements: ["layout", "camera"] },
-                    protection: { scope: "local", protectedObjectIds: [assetId], preserveOutsideMask: true, allowLightingChange: false },
-                    strategy: "integrated_scene",
+                    strategy: "full_image",
                     modelRoles: input.requiredModelRoles,
                     continuity: input.continuity,
                     referenceUses: input.visualAnalysis.references.map((reference) => ({ assetId: reference.assetId, alias: reference.alias, purposes: reference.purposes, usedCueIds: reference.assetId === styleId ? ["auxiliary-style-cue"] : [] })),
@@ -1883,14 +1899,13 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const baseline = input.visualAnalysis.references.find((reference) => reference.assetId === assetId);
                 assert.ok(baseline?.sceneFacts);
                 return reply({
-                    planVersion: "ecommerce-edit.v6",
+                    planVersion: "ecommerce-edit.v7",
                     operation: "scene_edit",
                     source: input.sources,
                     baseline: { productFacts: null, sceneFacts: baseline.sceneFacts },
                     delta: { requestedChanges: ["全局调整光线为明亮自然日光"], targetObjects: ["lighting-main"], targetRegions: ["whole-scene"] },
                     preserve: { productCore: [], sceneElements: ["layout", "camera"] },
-                    protection: { scope: "global", protectedObjectIds: [assetId], preserveOutsideMask: false, allowLightingChange: true },
-                    strategy: "integrated_scene",
+                    strategy: "full_image",
                     modelRoles: input.requiredModelRoles,
                     continuity: input.continuity,
                     referenceUses: input.visualAnalysis.references.map((reference) => ({ assetId: reference.assetId, alias: reference.alias, purposes: reference.purposes, usedCueIds: [] })),
@@ -1948,14 +1963,13 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const baseline = input.visualAnalysis.references.find((reference) => reference.assetId === assetId);
                 assert.ok(baseline?.sceneFacts);
                 return reply({
-                    planVersion: "ecommerce-edit.v6",
+                    planVersion: "ecommerce-edit.v7",
                     operation: "scene_edit",
                     source: input.sources,
                     baseline: { productFacts: null, sceneFacts: baseline.sceneFacts },
                     delta: { requestedChanges: ["全局调整光线为明亮自然日光"], targetObjects: ["lighting-main"], targetRegions: ["whole-scene"] },
                     preserve: { productCore: [], sceneElements: ["layout", "camera"] },
-                    protection: { scope: "global", protectedObjectIds: [], preserveOutsideMask: false, allowLightingChange: true },
-                    strategy: "integrated_scene",
+                    strategy: "full_image",
                     modelRoles: input.requiredModelRoles,
                     continuity: input.continuity,
                     referenceUses: input.visualAnalysis.references.map((reference) => ({ assetId: reference.assetId, alias: reference.alias, purposes: reference.purposes, usedCueIds: [] })),
@@ -1979,6 +1993,96 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
             const saved = await runs.getAgentRun(runId);
             assert.ok(saved);
             return saved;
+        }
+
+        async function claimLegacyNativeSceneRun(runId: string, workerId: string, origin: string) {
+            const { resolveEcommerceCanvasConstraint, validateEcommerceEditPlan } = await import("./ecommerce-edit-plan");
+            const { ecommerceCanvasInputFromRequest } = await import("./ecommerce-generation-service");
+            // Stop at the next stage only after the real v7 planner snapshot is committed.
+            legacyPlanningFreeze.runId = runId;
+            let stopped: AgentRun;
+            try {
+                stopped = await claimNativeSceneRun(runId, workerId, origin);
+                expect(
+                    legacyPlanningFreeze.runId,
+                    JSON.stringify({
+                        status: stopped.status,
+                        failure: stopped.failure,
+                        failureStage: stopped.failureStage,
+                        fallback: stopped.ecommerceSnapshot?.fallback,
+                        waitingFor: stopped.ecommerceSnapshot?.processing?.waitingFor,
+                        tools: boundary.model.mock.calls.map(([request]) => request.tool.name),
+                    }),
+                ).toBe("");
+            } finally {
+                legacyPlanningFreeze.runId = "";
+            }
+            const snapshot = stopped.ecommerceSnapshot;
+            const plan = snapshot?.plan;
+            assert.ok(snapshot && plan && snapshot.referenceCheckpoint?.analysis && snapshot.modelRouteSnapshots?.image_generation && snapshot.modelRouteSnapshots.edit_planning);
+            expect(stopped).toMatchObject({ status: "running", tasks: [], ecommerceSnapshot: { plan: { planVersion: "ecommerce-edit.v7", strategy: "full_image" }, referenceCheckpoint: { state: "resolved", analysisStage: { state: "completed" } } } });
+            await runs.updateAgentRunById(runId, { status: "paused", executionId: undefined });
+            const baselineId = plan.source.currentSceneBaselineId || plan.source.productAnchorId;
+            const baseline = snapshot.referenceCheckpoint.assets.find((item) => item.asset.id === baselineId)?.asset;
+            assert.ok(baseline?.width && baseline.height);
+            const scene = plan.operation === "scene_edit";
+            const local = plan.operation !== "product_to_scene";
+            const canvas = resolveEcommerceCanvasConstraint({ ...ecommerceCanvasInputFromRequest(stopped.prompt, stopped.generationPreferences?.image?.size, { width: baseline.width, height: baseline.height }), operation: plan.operation });
+            const protectedAssetId = plan.source.productAnchorId || baselineId;
+            const plannerRoute = snapshot.modelRouteSnapshots.edit_planning;
+            assert.ok(canvas && protectedAssetId && plannerRoute);
+            const legacyPlan: EcommerceEditPlan = {
+                ...plan,
+                planVersion: "ecommerce-edit.v6",
+                strategy: scene ? "integrated_scene" : "strict_product",
+                canvas,
+                protection: { scope: local ? "local" : "global", protectedObjectIds: [protectedAssetId], preserveOutsideMask: scene, allowLightingChange: !local },
+                visibleStructure: snapshot.referenceCheckpoint.analysis.references.find((reference) => reference.assetId === baselineId)?.visibleStructure || [],
+            };
+            validateEcommerceEditPlan(legacyPlan);
+            const { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } = await import("./ecommerce-image-compiler");
+            const profile = resolveEcommerceImageProviderProfile(snapshot.modelRouteSnapshots.image_generation);
+            assert.ok(profile);
+            const compiled = compileEcommerceImageRequest(legacyPlan, profile);
+            expect(compiled.state).toBe("ready");
+            const preferences = stopped.generationPreferences?.image;
+            const reviewTask: AgentRunTask = {
+                id: "ecommerce-scene-edit",
+                title: "Historical scene edit",
+                type: "image",
+                model: plan.modelRoles.generation,
+                optimizedPrompt: stopped.prompt,
+                prompt: compiled.prompt,
+                ecommerceExecution: compiled,
+                count: preferences?.count || 1,
+                quality: preferences?.quality,
+                ratio: preferences?.size,
+                dependencies: [],
+                status: "needs_review",
+                attempts: 0,
+            };
+            const saved = await runs.updateAgentRunById(runId, {
+                status: scene ? "paused" : "running",
+                executionId: undefined,
+                reviewed: scene || snapshot.qualityPolicy === "disabled",
+                tasks: scene ? [reviewTask] : [],
+                ecommerceSnapshot: {
+                    ...snapshot,
+                    plan: legacyPlan,
+                    modelRoles: plan.modelRoles,
+                    compilerVersion: compiled.compilerVersion,
+                    continuity: { ...plan.continuity, sceneRootAssetId: plan.source.currentSceneBaselineId },
+                    modelRouteSnapshots: { ...snapshot.modelRouteSnapshots, edit_planning: { ...plannerRoute, logicalRole: "edit_planning" } },
+                    ...(scene ? { fallback: { reason: "scene_selection_required" } } : {}),
+                },
+            });
+            assert.ok(saved);
+            if (scene) return saved;
+            const released = await scheduler.releaseGenerationTaskLease("agent", runId, workerId, { executionPhase: "created", nextPollAt: Date.now() });
+            assert.ok(released, "SETUP: the fixture must release its original planning lease before replaying the frozen legacy build");
+            expect(released.workerId).toBeUndefined();
+            expect(released.leaseUntil).toBeUndefined();
+            return claimNativeSceneRun(runId, workerId + "-legacy-build", origin);
         }
 
         async function nativeSceneWaitingStage(runId: string, operation: "prepare_reference" | "build_protection", parentTaskId: string) {
@@ -2128,7 +2232,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const prepareBefore = await tasks.getStoredGenerationTaskRecord("image_processing", prepare.id);
                 assert.ok(prepareBefore?.resultPayload?.manifestDigest);
                 expect(prepareBefore).toMatchObject({ status: "success", executionPhase: "completed", resultPayload: { executionId: prepared.child.executionId, manifest: prepared.completion.manifest } });
-                const paused = await claimNativeSceneRun(initial.id, "fixture-native-result-planning-parent", sceneOrigin);
+                const paused = await claimLegacyNativeSceneRun(initial.id, "fixture-native-result-planning-parent", sceneOrigin);
                 expect(paused, JSON.stringify({ run: paused, modelCalls: boundary.model.mock.calls.map(([request]) => ({ tool: request.tool.name, messages: request.messages })) })).toMatchObject({
                     status: "paused",
                     tasks: [{ id: "ecommerce-scene-edit", type: "image", status: "needs_review", count: 2, attempts: 0 }],
@@ -2152,13 +2256,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const referenceCheckpoint = snapshot.referenceCheckpoint;
                 expect(compileEcommerceImageRequest(snapshot.plan, profile)).toStrictEqual(originalTask.ecommerceExecution);
                 expect(snapshot.processing?.prepareReferences).toMatchObject([{ jobId: prepare.id, inputDigest: prepare.payload.inputDigest, assetId: baseline.id, manifest: prepared.completion.manifest }]);
-                const response = await fetch(sceneOrigin + "/api/agent/runs/" + paused.id + "/resume", {
-                    method: "POST",
-                    headers: { cookie: boundary.cookie, "content-type": "application/json" },
-                    body: JSON.stringify({ conversationId: conversation.id, sceneSelection: { baselineAssetId: baseline.id, region: { x: 256, y: 256, width: 256, height: 256 } } }),
-                });
-                expect(response.status, "SETUP: actual authenticated Action must persist the native selection receipt").toBe(200);
-                const confirmed = await runs.getAgentRun(paused.id);
+                const confirmed = await persistFrozenSceneSelection(paused, { x: 256, y: 256, width: 256, height: 256 });
                 const receipt = confirmed?.ecommerceSnapshot?.processing?.sceneSelection;
                 assert.ok(confirmed && receipt);
                 expect(confirmed.tasks).toStrictEqual(paused.tasks);
@@ -2383,7 +2481,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
             await claimNativeSceneRun(runId, "fixture-aux-reference-prepare-" + assetId, origin);
             const stage = await nativeSceneWaitingStage(runId, "prepare_reference", runId);
             expect(stage.payload.inputs).toMatchObject([{ assetId }]);
-            await completeNativeSceneStage(stage.id);
+            return completeNativeSceneStage(stage.id);
         }
 
         async function createAuxiliaryRun(conversationId: string, assetIds: string[], prompt: string) {
@@ -2403,7 +2501,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
 
         async function withAuxiliaryReferenceCopy(
             localProduct: boolean,
-            action: (fixture: { run: AgentRun; image: ImageTask; origin: string; baselineId: string; styleId: string; source: Buffer; built: Awaited<ReturnType<typeof completeNativeSceneStage>>; native: Buffer }) => Promise<void>,
+            action: (fixture: { run: AgentRun; image: ImageTask; origin: string; baselineId: string; styleId: string; source: Buffer; prepared: Awaited<ReturnType<typeof completeNativeSceneStage>>; native: Buffer }) => Promise<void>,
         ) {
             await configureNativeScenePlanning();
             const conversation = await creative.createConversationForUser(userId, { surface: "chat", title: "Native auxiliary reference result" });
@@ -2434,16 +2532,14 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 productId = product.id;
                 installNativeProductPlanningReplies(product.id);
                 const previous = await createAuxiliaryRun(conversation.id, [product.id], "修改图片1，把背景换成客厅场景，保持商品不变");
-                const expected: AgentRunTask = { id: "ecommerce-product-scene", type: "image", title: "Product scene", prompt: "Route expectation", count: 1, quality: "low", ratio: "1024x1024", dependencies: [], status: "ready", attempts: 0 };
+                const expected: AgentRunTask = { id: "ecommerce-scene-edit", type: "image", title: "Product scene", prompt: "Route expectation", count: 1, quality: "low", ratio: "1024x1024", dependencies: [], status: "ready", attempts: 0 };
                 const publication: { asset?: typeof baseline } = {};
                 await withSceneRoutes(previous.id, async (referenceOrigin) => {
                     await prepareAuxiliaryReference(previous.id, product.id, referenceOrigin);
-                    const planned = await claimNativeSceneRun(previous.id, "fixture-aux-prior-planning", referenceOrigin);
-                    expect(planned.ecommerceSnapshot?.plan).toMatchObject({ planVersion: "ecommerce-edit.v6", operation: "product_to_scene" });
-                    const build = await nativeSceneWaitingStage(previous.id, "build_protection", expected.id);
-                    await completeNativeSceneStage(build.id);
-                    await withImageRoutes(planned, expected, async (imageOrigin, created) => {
+                    await withImageRoutes(previous, expected, async (imageOrigin, created) => {
                         const dispatched = await claimNativeSceneRun(previous.id, "fixture-aux-prior-dispatch", imageOrigin);
+                        expect(dispatched.ecommerceSnapshot?.plan).toMatchObject({ planVersion: "ecommerce-edit.v7", operation: "product_to_scene", strategy: "full_image" });
+                        expect(dispatched.tasks[0].productProtectionRegions).toBeUndefined();
                         assert.ok(dispatched.executionId);
                         expect(created).toHaveLength(1);
                         const prepared = await waitForCopy(created[0].taskId, source, imageOrigin);
@@ -2466,34 +2562,20 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
             else installNativeScenePlanningReplies(baseline.id, style.id);
             const initial = await createAuxiliaryRun(conversation.id, [baseline.id, style.id], "修改图片1，把左侧花瓶换成小盆绿植，只参考图片2的风格，仅修改局部，保留其他区域和原图尺寸");
             await withSceneRoutes(initial.id, async (referenceOrigin) => {
-                await prepareAuxiliaryReference(initial.id, baseline.id, referenceOrigin);
+                const prepared = await prepareAuxiliaryReference(initial.id, baseline.id, referenceOrigin);
                 await prepareAuxiliaryReference(initial.id, style.id, referenceOrigin);
                 if (productId) await prepareAuxiliaryReference(initial.id, productId, referenceOrigin);
-                let planned = await claimNativeSceneRun(initial.id, "fixture-aux-planning", referenceOrigin);
-                expect(planned.ecommerceSnapshot).toMatchObject({
-                    referenceCheckpoint: { state: "resolved", analysis: { analysisVersion: "ecommerce-visual-analysis.v4" } },
-                    plan: { planVersion: "ecommerce-edit.v6", source: { productAnchorId: productId || null, currentSceneBaselineId: baseline.id, sceneReferenceIds: [style.id] } },
-                });
-                if (!productId) {
-                    expect(planned).toMatchObject({ status: "paused", ecommerceSnapshot: { fallback: { reason: "scene_selection_required" } } });
-                    const response = await fetch(referenceOrigin + "/api/agent/runs/" + initial.id + "/resume", {
-                        method: "POST",
-                        headers: { cookie: boundary.cookie, "content-type": "application/json" },
-                        body: JSON.stringify({ conversationId: conversation.id, sceneSelection: { baselineAssetId: baseline.id, region: { x: 128, y: 384, width: 128, height: 192 } } }),
-                    });
-                    expect(response.status, "SETUP: the public Action must accept the actual baseline selection").toBe(200);
-                    await claimNativeSceneRun(initial.id, "fixture-aux-confirmed-selection", referenceOrigin);
-                    const confirmed = await runs.getAgentRun(initial.id);
-                    assert.ok(confirmed);
-                    planned = confirmed;
-                }
-                const taskId = productId ? "ecommerce-local-edit" : "ecommerce-scene-edit";
-                const build = await nativeSceneWaitingStage(initial.id, "build_protection", taskId);
-                expect(build.payload.inputs).toMatchObject([{ assetId: baseline.id, expectedSha256: digest(source) }]);
-                const built = await completeNativeSceneStage(build.id);
+                const taskId = "ecommerce-scene-edit";
                 const expected: AgentRunTask = { id: taskId, type: "image", title: "Auxiliary reference edit", prompt: "Route expectation", count: 1, quality: "low", ratio: "1024x1024", dependencies: [], status: "ready", attempts: 0 };
-                await withImageRoutes(planned, expected, async (imageOrigin, created) => {
+                await withImageRoutes(initial, expected, async (imageOrigin, created) => {
                     const dispatched = await claimNativeSceneRun(initial.id, "fixture-aux-dispatch", imageOrigin);
+                    expect(dispatched.ecommerceSnapshot).toMatchObject({
+                        referenceCheckpoint: { state: "resolved", analysis: { analysisVersion: "ecommerce-visual-analysis.v4" } },
+                        compilerVersion: "ecommerce-openai-image-2.5.v5",
+                        plan: { planVersion: "ecommerce-edit.v7", strategy: "full_image", source: { productAnchorId: productId || null, currentSceneBaselineId: baseline.id, sceneReferenceIds: [style.id] } },
+                    });
+                    expect(dispatched.ecommerceSnapshot?.processing?.sceneSelection).toBeUndefined();
+                    expect(dispatched.ecommerceSnapshot?.processing?.protection).toBeUndefined();
                     expect(dispatched).toMatchObject({ status: "running", tasks: [{ id: taskId, attempts: 1, status: "running" }] });
                     expect(created).toHaveLength(1);
                     const image = await imageTasks.getImageTask(created[0].taskId);
@@ -2505,21 +2587,25 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                         referenceMapping: [{ assetId: baseline.id }, ...(productId ? [{ assetId: productId }] : []), { assetId: style.id, purposes: ["style"] }],
                     });
                     expect(image.references.map((reference) => reference.id)).toStrictEqual(expectedRoles.map((reference) => reference.assetId));
-                    expect(image.mask).toMatchObject({ dataUrl: "", serverUrl: "/api/reference-assets/" + built.stored.storageKey.split("/").map(encodeURIComponent).join("/") });
+                    expect(image.mask).toBeUndefined();
+                    expect(image.sceneProtection).toBeUndefined();
+                    expect(image.productProtection).toBeUndefined();
                     expect(image.runId).toBe(initial.id);
                     expect(image.parentTaskId).toBe(initial.id);
-                    await action({ run: dispatched, image, origin: imageOrigin, baselineId: baseline.id, styleId: style.id, source, built, native });
+                    await action({ run: dispatched, image, origin: imageOrigin, baselineId: baseline.id, styleId: style.id, source, prepared, native });
                 });
             });
         }
 
         it.each([
             { label: "inherited local product with a new style", localProduct: true, mode: "ordinary", inputCount: 1 },
-            { label: "confirmed local scene with a style", localProduct: false, mode: "scene_protection", inputCount: 3 },
+            { label: "full-image scene with a style", localProduct: false, mode: "ordinary", inputCount: 1 },
         ] as const)(
             "routes $label through the original ImageTask result Worker",
             async ({ localProduct, mode, inputCount }) => {
-                await withAuxiliaryReferenceCopy(localProduct, async ({ run, image, origin, baselineId, styleId, source, built, native }) => {
+                await withAuxiliaryReferenceCopy(localProduct, async ({ run, image, origin, baselineId, styleId, source, prepared, native }) => {
+                    expect(image.config.quality).toBe("low");
+                    expect(image.enhancementPolicy).toMatchObject({ enabled: false, connection: null });
                     const [claim] = await scheduler.claimDueGenerationTasks({ workerId: "fixture-aux-original-image", taskIds: [image.id], limit: 1 });
                     assert.ok(claim && typeof claim.payload.executionId === "string");
                     const claimed = await imageTasks.getImageTask(image.id);
@@ -2561,18 +2647,34 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                     expect(worker.receipt).toMatchObject({ jobId: queued.id, parentRescheduled: true });
                     expect(await recovery.runGenerationTaskRecoveryBatch({ origin, cookie: boundary.cookie, workerId: "fixture-aux-consumer", taskIds: [image.id], limit: 1 })).toMatchObject({ completed: 1, failed: 0 });
                     const published = await imageTasks.getImageTask(image.id);
-                    expect(published).toMatchObject({ id: image.id, status: "success", runId: run.id, parentTaskId: run.id, references: image.references, mask: image.mask, nativeResults: sealed.nativeResults, billing: submitted.billing });
+                    expect(published).toMatchObject({ id: image.id, status: "success", runId: run.id, parentTaskId: run.id, references: image.references, nativeResults: sealed.nativeResults, billing: submitted.billing });
+                    expect(published?.mask).toBeUndefined();
                     const final = published?.result?.results?.[0];
-                    assert.ok(final?.serverUrl);
+                    assert.ok(published?.result && final?.serverUrl);
+                    expect(final.enhancementSkip).toStrictEqual({ status: "skipped", reason: "disabled" });
+                    expect(published.result.enhancementSkip).toStrictEqual({ status: "skipped", reason: "disabled" });
+                    expect(final.enhancementId).toBeUndefined();
+                    expect(published.result.enhancementId).toBeUndefined();
+                    const { listEnhancementJobsForTask } = await import("./database/image-enhancement-job-repository");
+                    expect(await listEnhancementJobsForTask(image.id, userId)).toStrictEqual([]);
                     const publicResponse = await fetch(origin + "/api/image-tasks/" + image.id, { headers: { cookie: boundary.cookie } });
                     expect(publicResponse.status).toBe(200);
                     expect(await publicResponse.json()).toMatchObject({ task: { id: image.id, status: "success" } });
                     const bytes = await fetch(origin + final.serverUrl, { headers: { cookie: boundary.cookie } });
                     expect(bytes.status).toBe(200);
                     expect(Buffer.from(await bytes.arrayBuffer())).toEqual(worker.uploads[0].bytes);
-                    expect(await tasks.getStoredGenerationTaskRecord("image_processing", built.child.id)).toMatchObject({ status: "success", resultPayload: { manifest: built.completion.manifest } });
+                    expect(await tasks.getStoredGenerationTaskRecord("image_processing", prepared.child.id)).toMatchObject({ status: "success", resultPayload: { manifest: prepared.completion.manifest } });
                     expect(image.references.map((reference) => reference.id)).toEqual(expect.arrayContaining([baselineId, styleId]));
-                    expect(built.completion.manifest.sourceIdentities).toMatchObject([{ assetId: baselineId, sha256: digest(source) }]);
+                    expect(prepared.completion.manifest.sourceIdentities).toMatchObject([{ assetId: baselineId, sha256: digest(source) }]);
+                    assert.ok(run.executionId);
+                    await execution.executeTasks(run.id, origin, boundary.cookie, run.executionId);
+                    const adopted = (await creative.listAssetsForUser(userId, run.conversationId)).find((asset) => asset.sourceTaskId === image.id);
+                    assert.ok(adopted);
+                    expect(await runs.getAgentRun(run.id)).toMatchObject({ status: "completed", assetIds: [adopted.id] });
+                    expect(adopted).toMatchObject({ sourceRunId: run.id, sourceTaskId: image.id, messageId: run.assistantMessageId, metadata: { enhancementSkip: { status: "skipped", reason: "disabled" } } });
+                    expect(adopted.metadata.enhancementId).toBeUndefined();
+                    expect(await listEnhancementJobsForTask(image.id, userId)).toStrictEqual([]);
+                    expect(await imageTasks.getImageTask(image.id)).toMatchObject({ nativeResults: sealed.nativeResults, references: image.references, billing: submitted.billing });
                 });
             },
             120_000,
@@ -3180,7 +3282,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const prepareBefore = await tasks.getStoredGenerationTaskRecord("image_processing", prepare.id);
                 assert.ok(prepareBefore?.resultPayload?.manifestDigest);
                 expect(prepareBefore).toMatchObject({ status: "success", executionPhase: "completed", resultPayload: { executionId: prepared.child.executionId, manifest: prepared.completion.manifest } });
-                const paused = await claimNativeSceneRun(initial.id, "fixture-native-result-planning-parent", sceneOrigin);
+                const paused = await claimLegacyNativeSceneRun(initial.id, "fixture-native-result-planning-parent", sceneOrigin);
                 expect(paused, JSON.stringify({ run: paused, modelCalls: boundary.model.mock.calls.map(([request]) => ({ tool: request.tool.name, messages: request.messages })) })).toMatchObject({
                     status: "paused",
                     tasks: [{ id: "ecommerce-scene-edit", type: "image", status: "needs_review", count: 2, attempts: 0 }],
@@ -3204,13 +3306,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const referenceCheckpoint = snapshot.referenceCheckpoint;
                 expect(compileEcommerceImageRequest(snapshot.plan, profile)).toStrictEqual(originalTask.ecommerceExecution);
                 expect(snapshot.processing?.prepareReferences).toMatchObject([{ jobId: prepare.id, inputDigest: prepare.payload.inputDigest, assetId: baseline.id, manifest: prepared.completion.manifest }]);
-                const response = await fetch(sceneOrigin + "/api/agent/runs/" + paused.id + "/resume", {
-                    method: "POST",
-                    headers: { cookie: boundary.cookie, "content-type": "application/json" },
-                    body: JSON.stringify({ conversationId: conversation.id, sceneSelection: { baselineAssetId: baseline.id, region: { x: 256, y: 256, width: 256, height: 256 } } }),
-                });
-                expect(response.status, "SETUP: actual authenticated Action must persist the native selection receipt").toBe(200);
-                const confirmed = await runs.getAgentRun(paused.id);
+                const confirmed = await persistFrozenSceneSelection(paused, { x: 256, y: 256, width: 256, height: 256 });
                 const receipt = confirmed?.ecommerceSnapshot?.processing?.sceneSelection;
                 assert.ok(confirmed && receipt);
                 expect(confirmed.tasks).toStrictEqual(paused.tasks);
@@ -3532,7 +3628,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const prepareBefore = await tasks.getStoredGenerationTaskRecord("image_processing", prepare.id);
                 assert.ok(prepareBefore?.resultPayload?.manifestDigest);
                 expect(prepareBefore).toMatchObject({ status: "success", executionPhase: "completed", resultPayload: { executionId: prepared.child.executionId, manifest: prepared.completion.manifest } });
-                const paused = await claimNativeSceneRun(initial.id, "fixture-4k-freeze-planning-parent", sceneOrigin);
+                const paused = await claimLegacyNativeSceneRun(initial.id, "fixture-4k-freeze-planning-parent", sceneOrigin);
                 expect(paused).toMatchObject({
                     status: "paused",
                     tasks: [{ id: "ecommerce-scene-edit", status: "needs_review", count: 2, attempts: 0, quality: "4k" }],
@@ -3548,13 +3644,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 assert.ok(snapshot?.referenceCheckpoint);
                 const referenceCheckpoint = snapshot.referenceCheckpoint;
                 expect(originalTask.sceneProtection).toBeUndefined();
-                const response = await fetch(sceneOrigin + "/api/agent/runs/" + paused.id + "/resume", {
-                    method: "POST",
-                    headers: { cookie: boundary.cookie, "content-type": "application/json" },
-                    body: JSON.stringify({ conversationId: conversation.id, sceneSelection: { baselineAssetId: baseline.id, region: { x: 256, y: 256, width: 256, height: 256 } } }),
-                });
-                expect(response.status, "SETUP: actual authenticated Action must retain the original 4k Run and persist its selection receipt").toBe(200);
-                const confirmed = await runs.getAgentRun(paused.id);
+                const confirmed = await persistFrozenSceneSelection(paused, { x: 256, y: 256, width: 256, height: 256 });
                 const receipt = confirmed?.ecommerceSnapshot?.processing?.sceneSelection;
                 assert.ok(confirmed && receipt);
                 expect(confirmed.tasks).toStrictEqual(paused.tasks);
@@ -4394,9 +4484,9 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                     qualityPolicy: "disabled",
                     referenceCheckpoint: { state: "resolved", analysisStage: { state: "completed" }, analysis: { analysisVersion: "ecommerce-visual-analysis.v4" } },
                     plan: {
-                        planVersion: "ecommerce-edit.v6",
+                        planVersion: "ecommerce-edit.v7",
                         operation: "scene_edit",
-                        strategy: "integrated_scene",
+                        strategy: "full_image",
                         source: { productAnchorId: null, currentSceneBaselineId: baseline.id, sceneReferenceIds: [] },
                         canvas: { mode: "exact", size: { width: 1024, height: 1024 }, allowReframe: false },
                         protection: { scope: "global", preserveOutsideMask: false, allowLightingChange: true },
@@ -4752,9 +4842,9 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                     qualityPolicy: "disabled",
                     referenceCheckpoint: { state: "resolved", analysisStage: { state: "completed" }, analysis: { analysisVersion: "ecommerce-visual-analysis.v4" } },
                     plan: {
-                        planVersion: "ecommerce-edit.v6",
+                        planVersion: "ecommerce-edit.v7",
                         operation: "scene_edit",
-                        strategy: "integrated_scene",
+                        strategy: "full_image",
                         source: { productAnchorId: null, currentSceneBaselineId: baseline.id, sceneReferenceIds: [] },
                         canvas: { mode: "exact", size: { width: 1024, height: 1024 }, allowReframe: false },
                         protection: { scope: "global", preserveOutsideMask: false, allowLightingChange: true },
@@ -5097,7 +5187,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                     expect(scenePrepareBefore).toMatchObject({ status: "success", executionPhase: "completed", resultPayload: { manifest: preparedScene.completion.manifest } });
                     const planning: { run?: AgentRun } = {};
                     const planningPixels = await observeNativeSceneQaPixels(async () => {
-                        planning.run = await claimNativeSceneRun(initial.id, "fixture-native-local-product-planning", referenceOrigin);
+                        planning.run = await claimLegacyNativeSceneRun(initial.id, "fixture-native-local-product-planning", referenceOrigin);
                     });
                     const planned = planning.run;
                     assert.ok(planned);
@@ -5543,7 +5633,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const prepared = await completeNativeSceneStage(prepare.id);
                 const prepareBefore = await tasks.getStoredGenerationTaskRecord("image_processing", prepare.id);
                 expect(prepareBefore).toMatchObject({ status: "success", executionPhase: "completed", resultPayload: { manifest: prepared.completion.manifest } });
-                const planned = await claimNativeSceneRun(initial.id, "fixture-native-product-planning-parent", referenceOrigin);
+                const planned = await claimLegacyNativeSceneRun(initial.id, "fixture-native-product-planning-parent", referenceOrigin);
                 const snapshot = planned.ecommerceSnapshot;
                 const qualification = JSON.stringify({ status: planned.status, failure: planned.failure, snapshot, tasks: planned.tasks, tools: boundary.model.mock.calls.map(([request]) => request.tool.name) });
                 expect(snapshot, "SETUP: accepted strict product planning must precede the result RED: " + qualification).toMatchObject({
@@ -5854,7 +5944,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 await claimNativeSceneRun(initial.id, "fixture-advisory-prepare-parent", referenceOrigin);
                 const prepare = await nativeSceneWaitingStage(initial.id, "prepare_reference", initial.id);
                 await completeNativeSceneStage(prepare.id);
-                const planned = await claimNativeSceneRun(initial.id, "fixture-advisory-planning-parent", referenceOrigin);
+                const planned = await claimLegacyNativeSceneRun(initial.id, "fixture-advisory-planning-parent", referenceOrigin);
                 expect(planned.ecommerceSnapshot, "SETUP: enable advisory before the real plan freezes").toMatchObject({
                     mode: "active",
                     qualityPolicy: "advisory",
@@ -6177,7 +6267,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const prepared = await completeNativeSceneStage(prepare.id);
                 const prepareBefore = await tasks.getStoredGenerationTaskRecord("image_processing", prepare.id);
                 expect(prepareBefore).toMatchObject({ status: "success", executionPhase: "completed", resultPayload: { manifest: prepared.completion.manifest } });
-                const planned = await claimNativeSceneRun(initial.id, "fixture-native-product-planning-parent", referenceOrigin);
+                const planned = await claimLegacyNativeSceneRun(initial.id, "fixture-native-product-planning-parent", referenceOrigin);
                 const snapshot = planned.ecommerceSnapshot;
                 const qualification = JSON.stringify({ status: planned.status, failure: planned.failure, snapshot, tasks: planned.tasks, tools: boundary.model.mock.calls.map(([request]) => request.tool.name) });
                 expect(snapshot, "SETUP: accepted strict product planning must precede the result RED: " + qualification).toMatchObject({

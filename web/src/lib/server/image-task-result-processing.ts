@@ -1,3 +1,4 @@
+import { isFullImageEcommerceExecution } from "./ecommerce-image-compiler";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { createReadStream } from "node:fs";
@@ -1337,8 +1338,8 @@ function completedImageResults(image: ImageTask, completion: CompletedResultInpu
             throw new Error("Ordinary 4k result changed its provider native bytes");
         const nativeUrl = ordinary4k ? url : resultMediaUrl(native.storageKey);
         const enhancementSkip =
-            enhanced && (layered || nativeProduct || protectedMask || isNativeGlobalSceneImageTaskResult(image))
-                ? imageEnhancementExclusion({ enabled: image.enhancementPolicy?.enabled ?? false, requested4k: true, protectedContract: !finalEnhancement && (nativeProduct || protectedMask), layered })
+            (!enhanced && isFullImageEcommerceExecution(image.ecommerceExecution)) || (enhanced && (layered || nativeProduct || protectedMask || isNativeGlobalSceneImageTaskResult(image)))
+                ? imageEnhancementExclusion({ enabled: image.enhancementPolicy?.enabled ?? false, requested4k: enhanced, protectedContract: !finalEnhancement && (nativeProduct || protectedMask), layered })
                 : undefined;
         return [
             {

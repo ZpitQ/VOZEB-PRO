@@ -11,7 +11,7 @@ import { taskResultItems } from "./agent-run-execution-helpers";
 export const ECOMMERCE_REVIEW_PREPARATION_VERSION = "ecommerce-review-preparation.v1" as const;
 
 export function independentAdvisoryReview(run: AgentRun) {
-    return run.status === "completed" && run.ecommerceSnapshot?.qualityPolicy === "advisory" && ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(run.ecommerceSnapshot.plan?.planVersion || "");
+    return run.status === "completed" && run.ecommerceSnapshot?.qualityPolicy === "advisory" && ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6", "ecommerce-edit.v7"].includes(run.ecommerceSnapshot.plan?.planVersion || "");
 }
 
 export function ecommerceReviewTasks(run: AgentRun) {

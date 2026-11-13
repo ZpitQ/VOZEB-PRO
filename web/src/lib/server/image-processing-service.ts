@@ -1,3 +1,4 @@
+import { isFullImageEcommerceExecution } from "./ecommerce-image-compiler";
 import { imageProcessingFailureIdentity, imageProcessingPauseMessage, type ClosedImageProcessingFailure } from "./image-processing-failure";
 import { repairAgentImageProcessingPause } from "./agent-run-image-processing-projection";
 import { readEnhancementProcessingTask, closeEnhancementProcessingFailure, type EnhancementProcessingPayload } from "./image-enhancement-processing-store";
@@ -3528,11 +3529,10 @@ export async function readCompletedEcommerceGlobalScene(run: AgentRun, image: Im
         !snapshot ||
         snapshot.mode !== "active" ||
         !plan ||
-        plan.operation !== "scene_edit" ||
-        plan.strategy !== "integrated_scene" ||
+        (isFullImageEcommerceExecution(image.ecommerceExecution)
+            ? plan.planVersion !== "ecommerce-edit.v7" || plan.strategy !== "full_image" || !(plan.source.currentSceneBaselineId || plan.source.productAnchorId)
+            : plan.operation !== "scene_edit" || plan.strategy !== "integrated_scene" || !plan.source.currentSceneBaselineId || Boolean(plan.source.productAnchorId)) ||
         plan.protection?.scope !== "global" ||
-        !plan.source.currentSceneBaselineId ||
-        plan.source.productAnchorId ||
         !checkpoint ||
         checkpoint.state !== "resolved" ||
         checkpoint.analysisStage.state !== "completed" ||
@@ -3560,7 +3560,7 @@ export async function readCompletedEcommerceGlobalScene(run: AgentRun, image: Im
         !nativeGlobalSceneResultTaskMatches(run, task, image) ||
         task.prompt !== execution.prompt ||
         image.references.length !== execution.referenceRoles.length ||
-        execution.referenceRoles[0]?.assetId !== plan.source.currentSceneBaselineId
+        execution.referenceRoles[0]?.assetId !== (plan.source.currentSceneBaselineId || plan.source.productAnchorId)
     )
         throw new ImageProcessingInputError("全局场景结果与原编译计划、copy或参考不符", 409);
     const references = [];
@@ -3572,7 +3572,7 @@ export async function readCompletedEcommerceGlobalScene(run: AgentRun, image: Im
         const prepared = reference && completedEcommerceReferencePrepare(run, reference.jobId, record);
         const sourceUrl = prepared && assetAccessUrl(prepared.current.asset);
         if (
-            role.role !== "scene" ||
+            (!isFullImageEcommerceExecution(execution) && role.role !== "scene") ||
             prepares.length !== 1 ||
             !prepared ||
             !record ||
@@ -3937,23 +3937,25 @@ function assertGenerationReferenceRequest(run: AgentRun, input: Extract<ImagePro
     const profile = route && resolveEcommerceImageProviderProfile(route);
     const generation = input.options.generationInput;
     const execution = plan && profile && compileEcommerceImageRequest(plan, profile);
-    const expectedParent = plan?.taskId || (plan?.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene");
+    const fullImage = plan?.planVersion === "ecommerce-edit.v7" && plan.strategy === "full_image";
+    const expectedParent = plan?.taskId || (fullImage ? "ecommerce-scene-edit" : plan?.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene");
     const previous = snapshot?.processing?.generationReferences?.find((item) => item.parentTaskId === input.parentTaskId && item.assetId === input.inputs[0].assetId);
     if (
         !snapshot ||
         snapshot.mode !== "active" ||
         !plan ||
-        !["local_edit", "product_to_scene"].includes(plan.operation) ||
+        (!fullImage && !["local_edit", "product_to_scene"].includes(plan.operation)) ||
         !checkpoint ||
         checkpoint.state !== "resolved" ||
         checkpoint.analysisStage.state !== "completed" ||
         !execution ||
         execution.state !== "ready" ||
         execution.compilerVersion !== snapshot.compilerVersion ||
+        (fullImage && (execution.mask || plan.protection?.scope !== "global" || snapshot.processing?.protection)) ||
         route?.imageEdit?.protocol !== "sub2api" ||
         !generation ||
         input.parentTaskId !== expectedParent ||
-        !execution.referenceRoles.slice(1).some((role) => role.assetId === input.inputs[0].assetId) ||
+        !(fullImage ? execution.referenceRoles : execution.referenceRoles.slice(1)).some((role) => role.assetId === input.inputs[0].assetId) ||
         run.cancellation ||
         !["running", "paused"].includes(run.status) ||
         run.tasks.some((task) => task.attempts || task.taskId || task.taskIds?.length || task.childTasks?.length)
@@ -3977,8 +3979,9 @@ export async function prepareEcommerceGenerationReferences(run: AgentRun, execut
     const quality = previous?.quality || (ecommerceImagePreferences(snapshot.plan!, run.generationPreferences?.image).quality || defaults.imageQuality).trim();
     const bounds = previous?.bounds || parseImageDimensions(resolveEcommerceCanvasRequestSize(execution.canvas, normalizeQuality(quality), defaults.imageSize) || "");
     if (!bounds) return true;
-    const parentTaskId = snapshot.plan?.taskId || (snapshot.plan?.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene");
-    for (const role of execution.referenceRoles.slice(1)) {
+    const fullImage = snapshot.plan?.planVersion === "ecommerce-edit.v7" && snapshot.plan.strategy === "full_image";
+    const parentTaskId = snapshot.plan?.taskId || (fullImage ? "ecommerce-scene-edit" : snapshot.plan?.operation === "local_edit" ? "ecommerce-local-edit" : "ecommerce-product-scene");
+    for (const role of fullImage ? execution.referenceRoles : execution.referenceRoles.slice(1)) {
         const reference = snapshot.referenceCheckpoint!.assets.find((item) => item.asset.id === role.assetId)!;
         if (reference.asset.width! <= bounds.width && reference.asset.height! <= bounds.height) continue;
         const stage = await enqueueImageProcessingTask({
@@ -4034,22 +4037,50 @@ export async function readEcommerceGenerationInput(image: ImageTask, quality: st
         })),
     };
     if (imageTaskResultSourceIdentityDigest(original) !== imageTaskResultSourceIdentityDigest(sourceImage)) throw new ImageProcessingInputError("生成输入副本与当前图片任务或父任务不一致", 409);
-    const completed = await readCompletedEcommerceProductProtection(run);
+    const fullImage = isFullImageEcommerceExecution(image.ecommerceExecution);
+    const snapshot = run.ecommerceSnapshot;
+    const plan = snapshot?.plan;
+    const checkpoint = snapshot?.referenceCheckpoint;
+    const route = snapshot?.modelRouteSnapshots?.image_generation;
+    const profile = route && resolveEcommerceImageProviderProfile(route);
+    const completed = fullImage ? undefined : await readCompletedEcommerceProductProtection(run);
+    const execution = completed?.execution || (plan && profile && compileEcommerceImageRequest(plan, profile));
+    const parentTaskId = completed?.stage.parentTaskId || plan?.taskId || "ecommerce-scene-edit";
+    if (
+        !execution ||
+        (fullImage &&
+            (snapshot?.mode !== "active" ||
+                plan?.planVersion !== "ecommerce-edit.v7" ||
+                plan.strategy !== "full_image" ||
+                plan.protection?.scope !== "global" ||
+                checkpoint?.state !== "resolved" ||
+                checkpoint.analysisStage.state !== "completed" ||
+                route?.imageEdit?.protocol !== "sub2api" ||
+                execution.state !== "ready" ||
+                execution.compilerVersion !== snapshot.compilerVersion ||
+                execution.mask ||
+                image.mask ||
+                image.productProtection ||
+                image.sceneProtection ||
+                snapshot.processing?.protection ||
+                snapshot.processing?.waitingFor))
+    )
+        throw new ImageProcessingInputError("生成输入副本缺少原整图计划或已完成参考检查点", 409);
     const frozen = primaryInput || run.ecommerceSnapshot?.processing?.generationReferences?.[0]?.generationInput;
     const bounds = parseImageDimensions(requestSize || "");
-    const task = run.tasks.find((item) => item.id === completed.stage.parentTaskId);
-    assertGenerationImageExecution(image, original, run, completed.stage.parentTaskId);
+    const task = run.tasks.find((item) => item.id === parentTaskId);
+    assertGenerationImageExecution(image, original, run, parentTaskId);
     if (
         !task ||
         !isDeepStrictEqual(task.ecommerceExecution, image.ecommerceExecution) ||
-        !isDeepStrictEqual(completed.execution, image.ecommerceExecution) ||
-        !isDeepStrictEqual(task.productProtectionRegions, completed.regions) ||
-        !isDeepStrictEqual(image.mask, completed.regions.editableBackground.mask?.reference) ||
+        !isDeepStrictEqual(execution, image.ecommerceExecution) ||
+        (completed && (!isDeepStrictEqual(task.productProtectionRegions, completed.regions) || !isDeepStrictEqual(image.mask, completed.regions.editableBackground.mask?.reference))) ||
         !bounds ||
+        (fullImage && !isDeepStrictEqual(bounds, parseImageDimensions(resolveEcommerceCanvasRequestSize(execution.canvas, quality, requestSize || "") || ""))) ||
         (frozen && (quality !== normalizeQuality(frozen.quality) || !isDeepStrictEqual(bounds, frozen.bounds))) ||
-        image.references.length !== completed.execution.referenceRoles.length ||
+        image.references.length !== execution.referenceRoles.length ||
         !image.references.every((reference, index) => {
-            const role = completed.execution.referenceRoles[index];
+            const role = execution.referenceRoles[index];
             const originalReference = run.ecommerceSnapshot?.referenceCheckpoint?.assets.find((item) => item.asset.id === role.assetId);
             return (
                 originalReference &&
@@ -4089,7 +4120,7 @@ export async function readEcommerceGenerationInput(image: ImageTask, quality: st
     const referenceBytes: Array<number | undefined> = references.map(() => undefined);
     let maskBytes: number | undefined;
     let mask = image.mask;
-    if (primaryInput) {
+    if (primaryInput && completed) {
         const pair = assertGenerationInputArtifacts(completed.manifest.artifacts, primaryInput, completed.source);
         await registeredArtifact(pair.reference, completed.stage.id);
         await registeredArtifact(pair.mask, completed.stage.id);
@@ -4098,17 +4129,17 @@ export async function readEcommerceGenerationInput(image: ImageTask, quality: st
         maskBytes = pair.mask.bytes;
         mask = reference(image.mask!, pair.mask);
     }
-    for (const [index, role] of completed.execution.referenceRoles.entries()) {
+    for (const [index, role] of execution.referenceRoles.entries()) {
         const asset = run.ecommerceSnapshot!.referenceCheckpoint!.assets.find((item) => item.asset.id === role.assetId)!;
         if (asset.asset.width! <= bounds.width && asset.asset.height! <= bounds.height) continue;
-        if (index === 0) {
+        if (index === 0 && !fullImage) {
             if (!primaryInput) throw new ImageProcessingInputError("主参考超出请求画布且缺少配套生成蒙版", 409);
             continue;
         }
         const generation = { bounds, quality: frozen?.quality || quality || "auto" };
         const input: Extract<ImageProcessingFrozenInput, { operation: "prepare_reference" }> = {
             runId: run.id,
-            parentTaskId: completed.stage.parentTaskId,
+            parentTaskId,
             operation: "prepare_reference",
             algorithmVersion: "generation-reference.v1",
             inputs: [{ assetId: asset.asset.id, assetVersion: asset.assetVersion, expectedSha256: asset.contentSha256 }],
@@ -4173,7 +4204,7 @@ export async function readEcommerceGenerationInput(image: ImageTask, quality: st
     const currentImage = await getStoredGenerationTask<ImageTask>("image", image.id);
     if (!currentRun || generationReferencePlanDigest(currentRun) !== generationReferencePlanDigest(run) || !currentImage || imageTaskResultSourceIdentityDigest(currentImage) !== imageTaskResultSourceIdentityDigest(original))
         throw new ImageProcessingInputError("生成输入读取期间原任务或计划已变化", 409);
-    assertGenerationImageExecution(image, currentImage, currentRun, completed.stage.parentTaskId);
+    assertGenerationImageExecution(image, currentImage, currentRun, parentTaskId);
     return { references, mask, referenceBytes, maskBytes };
 }
 

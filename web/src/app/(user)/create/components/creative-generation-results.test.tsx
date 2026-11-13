@@ -69,6 +69,28 @@ describe("creative generation results", () => {
         expect(markup).toContain("AI增强");
     });
 
+    it("shows a saved generated result without enhancement metadata as an unavailable version", () => {
+        const original = imageOriginal("native-one", "result-one");
+        const markup = renderToStaticMarkup(<CreativeMediaResult assets={[original]} renderActions={(active) => <div data-active={active.id} data-download={active.serverUrl} />} />);
+
+        expect(markup).toContain("本轮未生成AI增强");
+        expect(markup).toMatch(/<button[^>]* disabled=""[^>]*>AI增强<\/button>/);
+        expect(markup).toContain('data-active="native-one"');
+        expect(markup).toContain('data-download="/native-one.png"');
+        expect(markup).not.toContain("正在读取增强状态");
+        expect(markup).not.toContain("补做AI增强");
+        expect(markup).not.toContain("重试增强");
+    });
+
+    it("does not invent an enhancement state for an uploaded image", () => {
+        const original = { ...asset("uploaded-one", "image", 1024, 1024), sourceRunId: undefined, messageId: undefined, metadata: { source: "upload" } };
+        const markup = renderToStaticMarkup(<CreativeMediaResult assets={[original]} />);
+
+        expect(markup).not.toContain('aria-label="图像增强与版本"');
+        expect(markup).not.toContain("本轮未生成AI增强");
+        expect(markup).not.toContain(">AI增强</button>");
+    });
+
     it.each([
         [false, "native-one", "当前原图", "1254×1536"],
         [true, "native-one", "当前原图", "1254×1536"],

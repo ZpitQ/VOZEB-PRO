@@ -31,6 +31,7 @@ import { ensureImageTaskResultProcessing, consumeCompletedImageTaskResultProcess
 import { usesImageTaskResultProcessing } from "./image-task-result-contract";
 import { readCompletedEcommerceSceneProtection } from "./ecommerce-protection-preparation";
 import { verifyPreparedEcommerceReferenceSource, loadPreparedEcommerceReferenceSource } from "./ecommerce-reference-preparation";
+import { isFullImageEcommerceExecution } from "./ecommerce-image-compiler";
 
 export type ImageUpstreamStep =
     | { state: "pending"; upstream: NonNullable<ImageTask["upstream"]>; status: string }
@@ -357,7 +358,7 @@ async function frozenImageSubmissionReferences(task: ImageTask, origin: string, 
         )
             throw new EcommerceReferenceSourceChangedError();
         const original = { ...reference, dataUrl: "", url: originalImageSourceUrl(source), serverUrl: undefined, remoteUrl: undefined };
-        if (task.productProtection && task.ecommerceExecution?.modelSnapshot.imageEdit?.protocol === "sub2api") {
+        if ((task.productProtection || isFullImageEcommerceExecution(task.ecommerceExecution)) && task.ecommerceExecution?.modelSnapshot.imageEdit?.protocol === "sub2api") {
             const prepared = parent.ecommerceSnapshot?.processing?.prepareReferences.find((entry) => entry.assetId === reference.id)?.manifest?.sourceIdentities[0];
             if (!prepared || prepared.decodeError || prepared.sha256 !== item.contentSha256) throw new EcommerceReferenceSourceChangedError();
             await verifyPreparedEcommerceReferenceSource({ sourceUrl: original.url, sourceBytes: prepared.bytes, contentSha256: item.contentSha256 }, origin, authContext);

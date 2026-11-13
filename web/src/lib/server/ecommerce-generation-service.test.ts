@@ -1,3 +1,4 @@
+import { buildWhiteBackgroundProductProtection } from "./ecommerce-protection.test-fixtures";
 import sharp from "sharp";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
@@ -13,7 +14,7 @@ import { resolveImageEditProtocol } from "./image-edit-protocol";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
 import { createEcommerceSceneEditTask, createEcommerceLocalEditTask, decodeEcommerceCanvasSize, loadEcommercePlanningImage } from "./ecommerce-generation-service";
 import { authorizedWorkerUserId, maintenanceWorkerContext } from "./maintenance-auth";
-import { buildWhiteBackgroundProductProtection, createEcommerceProductSceneTask, ecommerceGenerationEnabled, ecommerceRolloutStage, publicEcommerceProgress, EcommerceProductSegmentationError } from "./ecommerce-generation-service";
+import { createEcommerceProductSceneTask, ecommerceGenerationEnabled, ecommerceRolloutStage, publicEcommerceProgress } from "./ecommerce-generation-service";
 
 describe("ecommerce generation service", () => {
     describe("original reference dimensions", () => {
@@ -200,179 +201,6 @@ describe("ecommerce generation service", () => {
         expect(ecommerceRolloutStage({ mode: "enabled" }, "user-b")).toBe("canary");
     });
 
-    it("builds an exact-size trusted mask from one isolated white-background product", async () => {
-        const source = await productImage({ background: "#ffffff", products: [{ left: 22, top: 10, width: 20, height: 28 }] });
-
-        const regions = await buildWhiteBackgroundProductProtection(source, analysis(), "product");
-
-        expect(regions.sourceSize).toEqual({ width: 64, height: 48 });
-        expect(regions.productCore.rectangles).toEqual([{ x: 22, y: 10, width: 20, height: 28 }]);
-        expect(regions.editableBackground.mask).toMatchObject({
-            trust: "trusted",
-            provider: "white-background-flood-fill.v1",
-            reference: { id: "product-background-mask", type: "image/png", width: 64, height: 48 },
-        });
-        const maskUrl = regions.editableBackground.mask?.reference.dataUrl || "";
-        const mask = await sharp(Buffer.from(maskUrl.split(",")[1], "base64"))
-            .ensureAlpha()
-            .raw()
-            .toBuffer({ resolveWithObject: true });
-        expect(mask.info).toMatchObject({ width: 64, height: 48, channels: 4 });
-        expect(mask.data[(2 * 64 + 2) * 4 + 3]).toBe(0);
-        expect(mask.data[(20 * 64 + 30) * 4 + 3]).toBe(255);
-    });
-
-    it.each([
-        { name: "white", background: "#ffffff", makeAnalysis: analysis },
-        { name: "transparent", background: "#00000000", makeAnalysis: transparentAnalysis },
-    ])("preserves original one-pixel rods and the open background channel on $name F07", async ({ background, makeAnalysis }) => {
-        const source = await sharp({ create: { width: 128, height: 128, channels: 4, background } })
-            .composite([{ input: Buffer.from('<svg width="128" height="128" xmlns="http://www.w3.org/2000/svg"><path d="M40 24H64V48H65V24H88V72H84V112H83V72H45V112H44V72H40Z" fill="#252525"/></svg>') }])
-            .png()
-            .toBuffer();
-        const input = makeAnalysis();
-        const before = structuredClone(input);
-
-        const regions = await buildWhiteBackgroundProductProtection(source, input, "product");
-
-        expect(regions.sourceSize).toEqual({ width: 128, height: 128 });
-        expect(regions.productCore.rectangles).toEqual([{ x: 40, y: 24, width: 48, height: 88 }]);
-        const mask = await sharp(Buffer.from(regions.editableBackground.mask!.reference.dataUrl!.split(",")[1], "base64"))
-            .ensureAlpha()
-            .raw()
-            .toBuffer({ resolveWithObject: true });
-        expect(mask.info).toMatchObject({ width: 128, height: 128, channels: 4 });
-        expect(mask.data[(100 * 128 + 44) * 4 + 3]).toBe(255);
-        expect(mask.data[(111 * 128 + 83) * 4 + 3]).toBe(255);
-        expect(mask.data[(100 * 128 + 45) * 4 + 3]).toBe(0);
-        expect(mask.data[(111 * 128 + 82) * 4 + 3]).toBe(0);
-        expect(mask.data[(30 * 128 + 64) * 4 + 3]).toBe(0);
-        expect(mask.data[(47 * 128 + 64) * 4 + 3]).toBe(0);
-        expect(mask.data[(48 * 128 + 64) * 4 + 3]).toBe(255);
-        expect(mask.data[(30 * 128 + 63) * 4 + 3]).toBe(255);
-        expect(mask.data[(30 * 128 + 65) * 4 + 3]).toBe(255);
-        expect(input).toEqual(before);
-    });
-
-    it.each([false, true])("builds protection only from the explicit anchor when an auxiliary detail has product regions (reversed=%s)", async (reversed) => {
-        const source = await productImage({ background: "white", products: [{ left: 22, top: 10, width: 20, height: 28 }] });
-        const input = analysis();
-        input.references.push({ ...structuredClone(input.references[0]), assetId: "detail", confidence: "medium", visualEvidence: { whiteBackground: false, transparentBackground: false, isolatedSubject: false, completeScene: false } });
-        if (reversed) input.references.reverse();
-        const before = structuredClone(input);
-
-        const regions = await buildWhiteBackgroundProductProtection(source, input, "product");
-
-        expect(regions).toMatchObject({ productAnchorId: "product", sourceAssetId: "product", sourceSize: { width: 64, height: 48 } });
-        expect(regions.productCore.rectangles).toEqual([{ x: 22, y: 10, width: 20, height: 28 }]);
-        expect(regions.editableBackground.mask?.reference.id).toBe("product-background-mask");
-        expect(input).toEqual(before);
-    });
-
-    it.each(["missing", "duplicate"])("rejects an ambiguous explicit protection anchor: %s", async (kind) => {
-        const input = analysis();
-        if (kind === "missing") input.references[0].assetId = "other";
-        else input.references.push(structuredClone(input.references[0]));
-        const before = structuredClone(input);
-        const source = await productImage({ background: "white", products: [{ left: 22, top: 10, width: 20, height: 28 }] });
-
-        await expect(buildWhiteBackgroundProductProtection(source, input, "product")).rejects.toThrow(/商品/);
-        expect(input).toEqual(before);
-    });
-
-    it("computes product bounds for production-size images without overflowing the call stack", async () => {
-        const source = await sharp({ create: { width: 1024, height: 1024, channels: 4, background: "#ffffff" } })
-            .composite([{ input: { create: { width: 800, height: 800, channels: 4, background: "#252525" } }, left: 112, top: 112 }])
-            .png()
-            .toBuffer();
-
-        const regions = await buildWhiteBackgroundProductProtection(source, analysis(), "product");
-
-        expect(regions.sourceSize).toEqual({ width: 1024, height: 1024 });
-        expect(regions.productCore.rectangles).toEqual([{ x: 112, y: 112, width: 800, height: 800 }]);
-    });
-
-    it("accepts a neutral near-white background used by uploaded product images", async () => {
-        const source = await productImage({ background: "#f5f5f4", products: [{ left: 22, top: 10, width: 20, height: 28 }] });
-
-        const regions = await buildWhiteBackgroundProductProtection(source, analysis(), "product");
-
-        expect(regions.productCore.rectangles).toEqual([{ x: 22, y: 10, width: 20, height: 28 }]);
-        expect(regions.editableBackground.mask?.trust).toBe("trusted");
-    });
-
-    it("accepts one isolated product on a transparent background", async () => {
-        const source = await productImage({ background: "#00000000", products: [{ left: 18, top: 8, width: 28, height: 32 }] });
-
-        const regions = await buildWhiteBackgroundProductProtection(source, transparentAnalysis(), "product");
-
-        expect(regions.productCore.rectangles).toEqual([{ x: 18, y: 8, width: 28, height: 32 }]);
-        expect(regions.editableBackground.mask?.trust).toBe("trusted");
-    });
-
-    it("keeps the fusion halo bounded for a tall narrow transparent product", async () => {
-        const source = await sharp({ create: { width: 64, height: 96, channels: 4, background: "#00000000" } })
-            .composite([{ input: { create: { width: 8, height: 80, channels: 4, background: "#252525" } }, left: 28, top: 8 }])
-            .png()
-            .toBuffer();
-
-        const regions = await buildWhiteBackgroundProductProtection(source, transparentAnalysis(), "product");
-
-        expect(regions.productCore.rectangles).toEqual([{ x: 28, y: 8, width: 8, height: 80 }]);
-        expect(regions.fusionHalo.rectangles).toEqual([
-            { x: 27, y: 1, width: 10, height: 7 },
-            { x: 27, y: 8, width: 1, height: 80 },
-            { x: 36, y: 8, width: 1, height: 80 },
-            { x: 27, y: 88, width: 10, height: 7 },
-        ]);
-    });
-
-    it.each([
-        ["non-white background", () => productImage({ background: "#6f91b8", products: [{ left: 22, top: 10, width: 20, height: 28 }] }), /白色或透明背景/],
-        [
-            "multiple subjects",
-            () =>
-                productImage({
-                    background: "#ffffff",
-                    products: [
-                        { left: 8, top: 12, width: 14, height: 24 },
-                        { left: 42, top: 12, width: 14, height: 24 },
-                    ],
-                }),
-            /多个独立主体/,
-        ],
-        ["edge uncertainty", () => productImage({ background: "#ffffff", products: [{ left: 0, top: 10, width: 24, height: 28 }] }), /接触图片边缘/],
-        ["empty subject", () => productImage({ background: "#ffffff", products: [] }), /没有检测到商品主体/],
-    ])("fails closed for %s", async (_name, makeSource, expected) => {
-        await expect(buildWhiteBackgroundProductProtection(await makeSource(), analysis(), "product")).rejects.toThrow(expected);
-    });
-
-    it.each([
-        { name: "a component below the minimum area", product: { left: 10, top: 10, width: 4, height: 4 }, noise: { left: 42, top: 10, width: 3, height: 5 } },
-        { name: "an eligible component below five percent", product: { left: 10, top: 10, width: 20, height: 28 }, noise: { left: 42, top: 10, width: 4, height: 4 } },
-    ])("keeps the single subject when ignoring $name", async ({ product, noise }) => {
-        const source = await productImage({ background: "#ffffff", products: [product, noise] });
-
-        const regions = await buildWhiteBackgroundProductProtection(source, analysis(), "product");
-
-        expect(regions.productCore.rectangles).toEqual([{ x: product.left, y: product.top, width: product.width, height: product.height }]);
-    });
-
-    it("rejects a second eligible subject at exactly five percent with the public segmentation error", async () => {
-        const source = await productImage({
-            background: "#ffffff",
-            products: [
-                { left: 10, top: 10, width: 20, height: 28 },
-                { left: 42, top: 10, width: 4, height: 7 },
-            ],
-        });
-
-        const result = buildWhiteBackgroundProductProtection(source, analysis(), "product");
-
-        await expect(result).rejects.toThrow(EcommerceProductSegmentationError);
-        await expect(result).rejects.toThrow("检测到多个独立主体，需要人工复核");
-    });
-
     it("creates a strict task with product first, scene second, and a western-home default", async () => {
         const source = await productImage({ background: "#ffffff", products: [{ left: 22, top: 10, width: 20, height: 28 }] });
         const regions = await buildWhiteBackgroundProductProtection(source, analysis(true), "product");
@@ -536,12 +364,6 @@ function analysis(withScene = false): EcommerceVisualAnalysis {
                 : []),
         ],
     };
-}
-
-function transparentAnalysis(): EcommerceVisualAnalysis {
-    const value = analysis();
-    value.references[0].visualEvidence = { whiteBackground: false, transparentBackground: true, isolatedSubject: true, completeScene: false };
-    return value;
 }
 
 function plan(withScene = false): EcommerceEditPlan {

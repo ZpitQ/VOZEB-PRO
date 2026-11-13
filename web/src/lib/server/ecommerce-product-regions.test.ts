@@ -1,9 +1,10 @@
+import { buildSceneEditProtection } from "./ecommerce-protection.test-fixtures";
 import { describe, expect, it } from "vitest";
 import sharp from "sharp";
 import { createHash } from "node:crypto";
 
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
-import { buildProductProtectionRegions, buildSceneEditProtection, compositeSceneEdit, compileStrictProductEdit, validateSceneEditProtection, validateProductProtectionRegions, type ProductProtectionRegions } from "./ecommerce-product-regions";
+import { buildProductProtectionRegions, compositeSceneEdit, compileStrictProductEdit, validateSceneEditProtection, validateProductProtectionRegions, type ProductProtectionRegions } from "./ecommerce-product-regions";
 import { emptyAdvancedConfig } from "@/lib/channel-protocol-registry";
 
 describe("local scene protection", () => {
@@ -157,9 +158,6 @@ describe("local scene protection", () => {
         await expect(compositeSceneEdit(source, native, { ...protection, sourceDigest: "a".repeat(64) })).rejects.toThrow("来源");
         await expect(compositeSceneEdit(source, native, { ...protection, mask: { ...protection.mask, dataUrl: "data:image/png;base64,YnJva2Vu" } })).rejects.toThrow();
     });
-    it("never promotes an automatic rectangle hint to a trusted mask", async () => {
-        await expect(buildSceneEditProtection(await png("white"), "scene", region, ["vase"], "analysis_hint")).rejects.toThrow("用户确认");
-    });
     it("rejects reverse, corrupt and wrong-size masks and native results", async () => {
         const source = await png("white");
         const protection = await buildSceneEditProtection(source, "scene", region, ["vase"], "user_selection");
@@ -171,7 +169,6 @@ describe("local scene protection", () => {
             await expect(validateSceneEditProtection(source, { ...protection, mask: { ...protection.mask, dataUrl: `data:image/png;base64,${bad.toString("base64")}` } })).rejects.toThrow();
         }
         await expect(compositeSceneEdit(source, await png("red", 5, 5), protection)).rejects.toThrow("原生");
-        await expect(buildSceneEditProtection(source, "scene", { ...region, x: 5 }, ["vase"], "user_selection")).rejects.toThrow("越界");
     });
 });
 
