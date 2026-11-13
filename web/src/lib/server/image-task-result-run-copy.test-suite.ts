@@ -3365,6 +3365,22 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
             });
         }, 120_000);
 
+        if (provider === "postgres")
+            it("claims a rearmed native at the exact millisecond returned by PostgreSQL", async () => {
+                await withDispatchedCopies(1, async (_run, _task, _executorId, origin, copies) => {
+                    const prepared = await prepareNativeCopy(copies[0].taskId, await solid("#778899"), origin);
+                    const { claim } = prepared;
+                    assert.ok(claim.workerId && claim.executionId);
+                    const released = await scheduler.releaseGenerationTaskLease("image", prepared.requested.id, claim.workerId, { executionPhase: "persisting", nextPollAt: Date.now() }, { executionId: claim.executionId });
+                    assert.ok(released);
+                    assert.ok(prepared.submitted.upstream?.id);
+                    const rearmed = await scheduler.rearmImageTaskForUser({ id: prepared.requested.id, upstreamTaskId: prepared.submitted.upstream.id, submittedAt: prepared.submitted.createdAt });
+                    assert.ok(rearmed?.nextPollAt);
+                    const leases = await scheduler.claimDueGenerationTasks({ workerId: "fixture-rearmed-native-millisecond", taskIds: [prepared.requested.id], now: rearmed.nextPollAt, limit: 1 });
+                    expect(leases).toMatchObject([{ id: prepared.requested.id, executionPhase: "persisting", workerId: "fixture-rearmed-native-millisecond" }]);
+                });
+            });
+
         it("defers a sealed native from the real POST-before-link window and recovers the same submission after actual membership is visible", async () => {
             const native = await solid("#778899");
             let original: Awaited<ReturnType<typeof prepareNativeCopy>> | undefined;

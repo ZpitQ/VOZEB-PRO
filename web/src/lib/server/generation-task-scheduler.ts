@@ -121,7 +121,7 @@ export async function rearmImageTaskForUser(input: { id: string; upstreamTaskId?
                  )
                  UPDATE generation_tasks AS task
                  SET execution_phase = CASE WHEN recovery.has_native THEN 'persisting' WHEN $2::text IS NULL THEN 'result_ready' ELSE 'polling' END,
-                     next_poll_at = recovery.checked_at,
+                     next_poll_at = date_trunc('milliseconds', recovery.checked_at),
                      upstream_task_id = CASE WHEN recovery.has_native THEN task.upstream_task_id ELSE COALESCE($2::text, task.upstream_task_id) END,
                      channel_id = CASE WHEN recovery.has_native THEN task.channel_id ELSE COALESCE($3::text, task.channel_id) END,
                      provider = CASE WHEN recovery.has_native THEN task.provider ELSE COALESCE($4::text, task.provider) END,
