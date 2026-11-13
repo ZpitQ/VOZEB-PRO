@@ -1,3 +1,4 @@
+import { isFullImageEcommerceExecution } from "./ecommerce-image-compiler";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { parseImageDimensions, resolveResultSize } from "@/app/api/image-tasks/image-task-size";
@@ -77,8 +78,7 @@ export function imageTaskEnhancementDelivery(task: ImageTask, result: NonNullabl
             protection.scope !== "global" ||
             protection.preserveOutsideMask ||
             protection.protectedObjectIds.length ||
-            task.ecommerceExecution?.referenceRoles.some((item) => item.role === "product") ||
-            task.references.some((item) => item.ecommerceRole === "product")
+            (!isFullImageEcommerceExecution(task.ecommerceExecution) && (task.ecommerceExecution?.referenceRoles.some((item) => item.role === "product") || task.references.some((item) => item.ecommerceRole === "product")))
         )
             return;
         const { provenance: _provenance, ...baseline } = source;

@@ -8,15 +8,36 @@ import sharp from "sharp";
 import { validateImageLayerOutputs } from "../src/lib/server/image-layer-output";
 import { assertTransparentImageOutput } from "../src/lib/server/image-transparent-output";
 import { ecommerceVisualAnalysisTool, ecommerceVisualAnalysisV4Tool, normalizeEcommerceVisualAnalysis } from "../src/lib/server/ecommerce-visual-analysis";
-import { ecommerceEditPlanningTool, ecommerceEditPlanningV6Tool } from "../src/lib/server/ecommerce-edit-planner";
+import { ecommerceEditPlanningTool as legacyEcommerceEditPlanningTool, ecommerceEditPlanningV7Tool } from "../src/lib/server/ecommerce-edit-planner";
 import { resolveEcommerceReferenceDecision } from "../src/lib/server/ecommerce-reference-purpose";
 import { normalizeEcommerceEditPlan } from "../src/lib/server/ecommerce-edit-plan";
+import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "../src/lib/server/ecommerce-image-compiler";
+import { resolveImageEditProtocol } from "../src/lib/server/image-edit-protocol";
 import { ecommerceQualityCheckTool, ECOMMERCE_QUALITY_CHECK_KEYS } from "../src/lib/server/ecommerce-quality-check";
 import { createProtocolFixtureServer } from "./protocol-fixture-server.mjs";
 
 let fixture;
 let origin;
 let temporaryDirectory;
+
+function protocolImageProfile() {
+    return resolveEcommerceImageProviderProfile({
+        logicalRole: "image_generation",
+        capability: "image",
+        logicalModelId: "image",
+        channelId: "fixture-image",
+        upstreamModel: "gpt-image-2.5-flare",
+        apiFormat: "openai",
+        imageEdit: resolveImageEditProtocol({ apiFormat: "openai", model: "gpt-image-2.5-flare" }),
+    });
+}
+
+function currentPlanningTool(operation) {
+    const tool = structuredClone(ecommerceEditPlanningV7Tool);
+    tool.parameters.properties.operation.enum = [operation];
+    tool.parameters.properties.strategy.enum = ["full_image"];
+    return tool;
+}
 
 beforeEach(async () => {
     fixture = createProtocolFixtureServer();
@@ -41,7 +62,7 @@ describe("protocol fixture server", () => {
         return JSON.parse(response.output[0].arguments);
     }
 
-    it("returns actual v4 reference evidence and v6 authorized source facts through the TCP fixture", async () => {
+    it("returns actual v4 reference evidence and v7 authorized source facts through the TCP fixture", async () => {
         const assets = [
             { id: "product", title: "product.png", width: 6, height: 4 },
             { id: "lighting", title: "lighting.png", width: 6, height: 4 },
@@ -75,7 +96,7 @@ describe("protocol fixture server", () => {
             ],
         });
         expect(referenceDecision.state).toBe("resolved");
-        const plan = await ecommerceTool(ecommerceEditPlanningV6Tool, {
+        const plan = await ecommerceTool(currentPlanningTool("product_to_scene"), {
             userRequest: planningInput.userRequest,
             sources: { productAnchorId: "product", currentSceneBaselineId: null, sceneReferenceIds: ["lighting"] },
             visualAnalysis: analysis,
@@ -83,21 +104,34 @@ describe("protocol fixture server", () => {
             requiredModelRoles: { visionAnalysis: "vision", editPlanning: "planning", generation: "image", qualityCheck: "quality" },
         });
         expect(normalizeEcommerceEditPlan(plan)).toMatchObject({
-            planVersion: "ecommerce-edit.v6",
+            planVersion: "ecommerce-edit.v7",
+            strategy: "full_image",
+            protection: { scope: "global", protectedObjectIds: [], preserveOutsideMask: false },
             baseline: { productFacts: analysis.references[0].productFacts, sceneFacts: null },
             referenceUses: [
-                { assetId: "product", purposes: ["edit_target", "product_identity"], usedCueIds: [] },
-                { assetId: "lighting", purposes: ["lighting"], usedCueIds: ["lighting-lighting"] },
+                { assetId: "product", alias: "图片1", purposes: ["edit_target", "product_identity"], usedCueIds: [] },
+                { assetId: "lighting", alias: "图片2", purposes: ["lighting"], usedCueIds: ["lighting-lighting"] },
             ],
         });
+        const execution = compileEcommerceImageRequest(plan, protocolImageProfile());
+        expect(execution).toMatchObject({
+            state: "ready",
+            compilerVersion: "ecommerce-openai-image-2.5.v5",
+            referenceMapping: [
+                { assetId: "product", userAlias: "图片1", providerIndex: 0, purposes: ["edit_target", "product_identity"] },
+                { assetId: "lighting", userAlias: "图片2", providerIndex: 1, purposes: ["lighting"] },
+            ],
+        });
+        expect(execution).not.toHaveProperty("mask");
+        expect(plan.delta).not.toHaveProperty("manualRegion");
     });
 
-    it("returns analysis v3 and plan v5 photography contracts for the actual structured schemas", async () => {
+    it("retains explicit legacy analysis v3 and plan v5 photography schema controls", async () => {
         const assets = [{ id: "cabinet", title: "white-product.png", width: 100, height: 80 }];
         const analysis = await ecommerceTool(ecommerceVisualAnalysisTool, { userRequest: "把三层抽屉柜放进客厅", assets });
         expect(analysis.analysisVersion).toBe("ecommerce-visual-analysis.v3");
         expect(normalizeEcommerceVisualAnalysis(analysis, assets)).toMatchObject({ references: [{ visibleStructure: [{ count: 3 }], photographyFacts: { materials: [{ objectId: "cabinet" }] } }] });
-        const plan = await ecommerceTool(ecommerceEditPlanningTool, {
+        const plan = await ecommerceTool(legacyEcommerceEditPlanningTool, {
             userRequest: "把三层抽屉柜放进客厅",
             sources: { productAnchorId: "cabinet", currentSceneBaselineId: null, sceneReferenceIds: [] },
             visualAnalysis: analysis,
@@ -140,15 +174,32 @@ describe("protocol fixture server", () => {
             return JSON.parse(protocol === "gemini" ? response.candidates[0].content.parts[0].text : response.output[0].arguments);
         };
         const assets = [{ id: "cabinet", title: "scene.png", width: 6, height: 4 }];
-        const analysis = await call(ecommerceVisualAnalysisTool, { assets, userRequest: "三层抽屉柜只加柜面花瓶" });
-        expect(analysis).toMatchObject({ analysisVersion: "ecommerce-visual-analysis.v3", references: [{ assetId: "cabinet", role: "scene", visibleStructure: [{ count: 3 }], photographyFacts: { materials: [{ objectId: "cabinet" }] } }] });
-        const plan = await call(ecommerceEditPlanningTool, {
+        const userRequest = "三层抽屉柜只加柜面花瓶";
+        const analysis = await call(ecommerceVisualAnalysisV4Tool, { assets, userRequest });
+        expect(analysis).toMatchObject({
+            analysisVersion: "ecommerce-visual-analysis.v4",
+            references: [{ assetId: "cabinet", contentType: "interior_scene", visibleStructure: [{ count: 3 }], cues: expect.arrayContaining([{ id: "cabinet-lighting", facet: "lighting", confidence: "high", description: "soft natural window light" }]) }],
+        });
+        const referenceDecision = resolveEcommerceReferenceDecision({
+            planningInput: { userRequest, assetCandidates: assets.map((asset) => ({ ...asset, type: "image" })), referenceAliases: [{ assetId: "cabinet", alias: "图片1" }] },
+            analysis,
+        });
+        expect(referenceDecision.state).toBe("resolved");
+        const plan = await call(currentPlanningTool("scene_edit"), {
             userRequest: "三层抽屉柜只加柜面花瓶",
             sources: { productAnchorId: null, currentSceneBaselineId: "cabinet", sceneReferenceIds: [] },
             visualAnalysis: analysis,
+            referenceDecision,
             requiredModelRoles: { visionAnalysis: "vision", editPlanning: "planning", generation: "image", qualityCheck: "quality" },
         });
-        expect(normalizeEcommerceEditPlan(plan)).toMatchObject({ planVersion: "ecommerce-edit.v5", operation: "scene_edit", photography: { materials: [{ objectId: "cabinet" }] }, protection: { scope: "local" } });
+        expect(normalizeEcommerceEditPlan(plan)).toMatchObject({
+            planVersion: "ecommerce-edit.v7",
+            operation: "scene_edit",
+            strategy: "full_image",
+            protection: { scope: "global", protectedObjectIds: [], preserveOutsideMask: false },
+            referenceUses: [{ assetId: "cabinet", alias: "图片1", purposes: ["edit_target"], usedCueIds: [] }],
+        });
+        expect(plan.delta).not.toHaveProperty("manualRegion");
         const quality = await call(ecommerceQualityCheckTool, { resultIds: ["result"], plan });
         expect(quality.baselineObservation.visibleStructure[0].count).toBe(3);
         expect(quality.results[0].checks.map((check) => check.key)).toEqual(ECOMMERCE_QUALITY_CHECK_KEYS);
@@ -176,9 +227,10 @@ describe("protocol fixture server", () => {
         await expect(sharp(Buffer.from(queried.data[0].b64_json, "base64")).metadata()).resolves.toMatchObject({ width: 6, height: 4 });
     });
 
-    it.each(["ecommerce-edit.v3", "ecommerce-edit.v4"])("keeps a named %s plan control without adding photography", async (version) => {
-        const tool = structuredClone(ecommerceEditPlanningTool);
+    it.each(["ecommerce-edit.v3", "ecommerce-edit.v4"])("keeps an explicit legacy %s schema and masked compiler without adding photography", async (version) => {
+        const tool = structuredClone(legacyEcommerceEditPlanningTool);
         tool.parameters.properties.planVersion.enum = [version];
+        tool.parameters.properties.strategy.enum = ["integrated_scene"];
         const plan = await ecommerceTool(tool, {
             userRequest: "三层抽屉柜只加柜面花瓶",
             sources: { productAnchorId: null, currentSceneBaselineId: "scene", sceneReferenceIds: [] },
@@ -186,6 +238,7 @@ describe("protocol fixture server", () => {
             visualAnalysis: {
                 references: [
                     {
+                        assetId: "scene",
                         role: "scene",
                         sceneFacts: { space: "room", composition: "front", lighting: "soft" },
                         visibleStructure: [{ objectId: "cabinet", feature: "drawers", count: 3, certainty: "confirmed", evidenceRegion: { x: 0, y: 0, width: 6, height: 4 } }],
@@ -196,6 +249,12 @@ describe("protocol fixture server", () => {
         expect(normalizeEcommerceEditPlan(plan)).toMatchObject({ planVersion: version, operation: "scene_edit", protection: { scope: "local", allowLightingChange: false } });
         expect(plan).not.toHaveProperty("photography");
         expect(Boolean(plan.visibleStructure)).toBe(version === "ecommerce-edit.v4");
+        expect(compileEcommerceImageRequest(plan, protocolImageProfile())).toMatchObject({
+            state: "ready",
+            compilerVersion: "ecommerce-openai-image-2.5.v2",
+            mask: { mode: "independent", required: true },
+            referenceRoles: [{ assetId: "scene", role: "scene" }],
+        });
     });
 
     it("serves a categorized model catalog and structured text tools", async () => {

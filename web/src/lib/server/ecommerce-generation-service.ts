@@ -2,25 +2,21 @@ import sharp from "sharp";
 
 import { CREATIVE_UPLOAD_MAX_BYTES } from "@/lib/creative-upload";
 import { extractImageSizeFromPrompt, normalizeImageSizeValue, parseImageDimensions } from "@/lib/image-size";
+import { parseImageRatio } from "@/lib/image-generation-size";
 import type { CreativeAsset, CreativeGenerationPreferences, CreativeSurface } from "@/lib/creative-runtime-contract";
 import { fetchInternalApi } from "@/lib/server/internal-origin";
 import { maintenanceWorkerContextHeaders } from "@/lib/server/maintenance-auth";
 import { fetchSafeOutbound } from "@/lib/server/safe-outbound-fetch";
-import { buildWhiteBackgroundProductMaskPixels, EcommerceProductSegmentationError } from "../image-processing/core";
-import { buildLocalEditMask } from "../image-processing/protection-masks";
+import { EcommerceProductSegmentationError } from "../image-processing/core";
 
 import { ecommerceCanvasSize, ecommerceImagePreferences, validateEcommerceDimensions, type EcommerceCanvasInput, type EcommerceDimensions, type EcommerceEditPlan } from "./ecommerce-edit-plan";
 import { normalizeGeneratedImageBytes } from "./generated-image-normalizer";
 import { ECOMMERCE_IMAGE_MAX_INPUT_PIXELS } from "./ecommerce-vision-image";
 import type { EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
-import type { EcommerceResolvedLocalEditTarget } from "./ecommerce-edit-planner";
-import { buildProductProtectionRegions, buildSceneProductProtectionRegions, type SceneEditProtection, type ProductProtectionRectangle, type ProductProtectionRegions } from "./ecommerce-product-regions";
-import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
+import type { SceneEditProtection, ProductProtectionRegions } from "./ecommerce-product-regions";
 import type { AgentRun, AgentRunTask } from "./agent-run-store";
 import { assetAccessUrl } from "./agent-run-surface-policy";
 import { assertEcommerceReferenceContent, EcommerceReferenceSourceReadError } from "./ecommerce-reference-recovery";
-
-const HALO_RATIO = 0.08;
 
 export type EcommerceProgressStage = "identifying_product" | "planning_scene" | "generating_image" | "checking_result";
 export type EcommerceRolloutStage = "default" | "shadow" | "internal" | "canary";
@@ -129,87 +125,27 @@ export async function decodeEcommerceCanvasSize(bytes: Buffer): Promise<Ecommerc
 export function ecommerceCanvasInputFromRequest(prompt: string, configuredSize?: string, baselineSize?: EcommerceDimensions): Omit<EcommerceCanvasInput, "operation"> {
     const requested = extractImageSizeFromPrompt(prompt);
     const exact = parseImageDimensions(requested);
-    const ratio = !exact && requested.includes(":") ? requested.split(":") : null;
-    const scale = ratio ? 10 ** Math.max(...ratio.map((part) => part.split(".")[1]?.length || 0)) : 1;
+    const ratio = !exact && canvasRatioSize(requested);
     const userRequest: EcommerceCanvasInput["userRequest"] = exact
         ? { mode: "exact", size: exact }
         : ratio
-          ? { mode: "ratio", size: { width: Math.round(Number(ratio[0]) * scale), height: Math.round(Number(ratio[1]) * scale) } }
+          ? { mode: "ratio", size: ratio }
           : /(?:保持|保留|维持|沿用|使用|不改变|不变更).{0,8}(?:原(?:图|始)?(?:的)?尺寸|原(?:图|始)?(?:的)?分辨率)|(?:尺寸|分辨率).{0,4}(?:保持不变|不变)|(?:preserve|keep|retain|maintain)\s+(?:the\s+)?original\s+(?:size|dimensions|resolution)|same\s+(?:size|dimensions|resolution)/i.test(
                   prompt,
               )
             ? { mode: "preserve" }
             : undefined;
-    const explicitSize = parseImageDimensions(normalizeImageSizeValue(configuredSize));
-    return { ...(userRequest ? { userRequest } : {}), ...(explicitSize ? { explicitSize } : {}), ...(baselineSize ? { baselineSize } : {}) };
+    const configured = normalizeImageSizeValue(configuredSize);
+    const explicitSize = parseImageDimensions(configured);
+    const explicitRatio = !explicitSize && canvasRatioSize(configured);
+    return { ...(userRequest ? { userRequest } : {}), ...(explicitSize ? { explicitSize } : {}), ...(explicitRatio ? { explicitRatio } : {}), ...(baselineSize ? { baselineSize } : {}) };
 }
 
-export async function buildWhiteBackgroundProductProtection(source: Buffer, analysis: EcommerceVisualAnalysis, productAssetId: string, sourceFraming?: EcommerceEditPlan["preserve"]["sourceFraming"]): Promise<ProductProtectionRegions> {
-    const anchors = analysis.references.filter((item) => item.assetId === productAssetId);
-    const reference = anchors.length === 1 && anchors[0].role === "product" ? anchors[0] : undefined;
-    const detailAnchorAllowed = reference?.role === "product" && reference.confidence === "medium" && reference.visualEvidence.isolatedSubject && (reference.visualEvidence.whiteBackground || reference.visualEvidence.transparentBackground);
-    if (!reference || (!detailAnchorAllowed && reference.confidence !== "high") || !reference.visualEvidence.isolatedSubject || (!reference.visualEvidence.whiteBackground && !reference.visualEvidence.transparentBackground)) {
-        throw new EcommerceProductSegmentationError("商品图不是高置信度白色或透明背景单主体");
-    }
-
-    let decoded: Awaited<ReturnType<typeof decodeProductPixels>>;
-    try {
-        decoded = await decodeProductPixels(source);
-    } catch {
-        throw new EcommerceProductSegmentationError("商品图片无法解码");
-    }
-    const { width, height, channels } = decoded.info;
-    if (!width || !height || channels !== 4) throw new EcommerceProductSegmentationError("商品图片像素格式无效");
-    const bounds = buildWhiteBackgroundProductMaskPixels(decoded.data, width, height, reference.visualEvidence.transparentBackground, sourceFraming);
-    const halo = expand(bounds, width, height);
-    const normalizedAnalysis: EcommerceVisualAnalysis = {
-        ...analysis,
-        references: [{ ...reference, productCore: normalize(bounds, width, height), fusionHalo: normalize(halo, width, height) }],
-    };
-    const regions = buildProductProtectionRegions(normalizedAnalysis, { width, height });
-    const mask = await sharp(decoded.data, { raw: { width, height, channels: 4 } })
-        .png()
-        .toBuffer();
-    regions.editableBackground.mask = {
-        trust: "trusted",
-        provider: "white-background-flood-fill.v1",
-        reference: {
-            id: productAssetId + "-background-mask",
-            name: "editable-background.png",
-            type: "image/png",
-            dataUrl: "data:image/png;base64," + mask.toString("base64"),
-            width,
-            height,
-        },
-    };
-    return regions;
-}
-
-export async function buildLocalEditProductProtection(source: Buffer, analysis: EcommerceVisualAnalysis, sourceAssetId: string, productAnchorId: string, target: EcommerceResolvedLocalEditTarget): Promise<ProductProtectionRegions> {
-    let decoded: Awaited<ReturnType<typeof decodeProductPixels>>;
-    try {
-        decoded = await decodeProductPixels(source);
-    } catch {
-        throw new EcommerceProductSegmentationError("当前场景图片无法解码");
-    }
-    const { width, height, channels } = decoded.info;
-    if (!width || !height || channels !== 4) throw new EcommerceProductSegmentationError("当前场景图片像素格式无效");
-    const regions = buildSceneProductProtectionRegions(analysis, sourceAssetId, productAnchorId, { width, height });
-    const protectedRectangles = [...regions.productCore.rectangles, ...regions.fusionHalo.rectangles];
-    const mask = await buildLocalEditMask({ width, height }, target.region, protectedRectangles);
-    regions.editableBackground.mask = {
-        trust: "trusted",
-        provider: "local-edit-target.v1",
-        reference: {
-            id: sourceAssetId + "-local-edit-mask",
-            name: "local-edit-mask.png",
-            type: "image/png",
-            dataUrl: "data:image/png;base64," + mask.toString("base64"),
-            width,
-            height,
-        },
-    };
-    return regions;
+function canvasRatioSize(value: string): EcommerceDimensions | undefined {
+    if (!value.includes(":")) return;
+    const { width, height } = parseImageRatio(value);
+    const scale = 10 ** Math.max(...value.split(":").map((part) => part.split(".")[1]?.length || 0));
+    return { width: Math.round(width * scale), height: Math.round(height * scale) };
 }
 
 export function createEcommerceProductSceneTask(
@@ -347,32 +283,20 @@ export function createEcommerceSceneEditTask(
     ecommerceExecution: EcommerceCompiledImageRequest,
     sceneProtection?: SceneEditProtection,
 ): AgentRunTask {
-    if (plan.operation !== "scene_edit" || plan.strategy !== "integrated_scene" || !plan.source.currentSceneBaselineId || plan.source.productAnchorId) {
-        throw new Error("场景编辑只允许无商品锚点的 scene_edit + integrated_scene");
-    }
+    const fullImage = plan.strategy === "full_image";
+    if (!fullImage && (plan.operation !== "scene_edit" || plan.strategy !== "integrated_scene" || !plan.source.currentSceneBaselineId || plan.source.productAnchorId)) throw new Error("场景编辑只允许无商品锚点的 scene_edit + integrated_scene");
     assertReadyEcommerceExecution(plan, ecommerceExecution);
+    if (fullImage && (plan.planVersion !== "ecommerce-edit.v7" || ecommerceExecution.mask || sceneProtection || plan.protection?.scope !== "global")) throw new Error("整图执行计划不能包含保护蒙版");
     if (plan.protection?.scope === "local" && (!sceneProtection || sceneProtection.sourceAssetId !== plan.source.currentSceneBaselineId)) throw new Error("局部场景编辑缺少用户确认的允许区域");
-    const scene = assets.find((asset) => asset.id === plan.source.currentSceneBaselineId);
-    const sceneUrl = scene ? assetAccessUrl(scene) : undefined;
-    if (!scene || scene.type !== "image" || !sceneUrl) throw new Error("当前场景基线不可用");
-    const references = [
-        {
-            assetId: scene.id,
-            url: sceneUrl,
-            type: "image" as const,
-            ecommerceRole: "scene" as const,
-            ...(Number.isFinite(scene.width) ? { width: scene.width } : {}),
-            ...(Number.isFinite(scene.height) ? { height: scene.height } : {}),
-        },
-        ...sceneReferenceAssets(plan, assets).map((asset) => ({
-            assetId: asset.id,
-            url: assetAccessUrl(asset)!,
-            type: "image" as const,
-            ecommerceRole: "scene" as const,
-            ...(Number.isFinite(asset.width) ? { width: asset.width } : {}),
-            ...(Number.isFinite(asset.height) ? { height: asset.height } : {}),
-        })),
-    ];
+    const references = ecommerceExecution.referenceRoles.map(({ assetId, role }) => {
+        const asset = assets.find((item) => item.id === assetId && item.type === "image" && item.status === "ready");
+        const url = asset && assetAccessUrl(asset);
+        if (!asset || !url) throw new Error("编辑参考图片不可用");
+        return { assetId, url, type: "image" as const, ecommerceRole: role, ...(Number.isFinite(asset.width) ? { width: asset.width } : {}), ...(Number.isFinite(asset.height) ? { height: asset.height } : {}) };
+    });
+    const scene = assets.find((asset) => asset.id === (plan.source.currentSceneBaselineId || plan.source.productAnchorId));
+    if (!scene || references[0]?.assetId !== scene.id) throw new Error("整图编辑目标与参考顺序不一致");
+    const sceneUrl = references[0].url;
     assertCompiledReferences(references, ecommerceExecution);
     const preferences = ecommerceImagePreferences(plan, run.generationPreferences?.image);
     return {
@@ -421,22 +345,4 @@ function assertCompiledReferences(references: NonNullable<AgentRunTask["referenc
     if (actual.length !== execution.referenceRoles.length || actual.some((reference, index) => reference.assetId !== execution.referenceRoles[index]?.assetId || reference.role !== execution.referenceRoles[index]?.role)) {
         throw new Error("生图编译器的参考图角色与实际任务不一致");
     }
-}
-
-function decodeProductPixels(source: Buffer) {
-    return sharp(source).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-}
-
-function expand(bounds: ProductProtectionRectangle, width: number, height: number) {
-    const horizontalPadding = Math.max(1, Math.ceil(bounds.width * HALO_RATIO));
-    const verticalPadding = Math.max(1, Math.ceil(bounds.height * HALO_RATIO));
-    const left = Math.max(0, bounds.x - horizontalPadding);
-    const top = Math.max(0, bounds.y - verticalPadding);
-    const right = Math.min(width, bounds.x + bounds.width + horizontalPadding);
-    const bottom = Math.min(height, bounds.y + bounds.height + verticalPadding);
-    return { x: left, y: top, width: right - left, height: bottom - top };
-}
-
-function normalize(bounds: ProductProtectionRectangle, width: number, height: number) {
-    return { x: bounds.x / width, y: bounds.y / height, width: bounds.width / width, height: bounds.height / height };
 }

@@ -1,5 +1,5 @@
 import type { ImageTask, ImageTaskConfig, ImageTaskReference } from "./image-task-store";
-import { resolveEcommerceImageProviderProfile, type EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
+import { isFullImageEcommerceExecution, resolveEcommerceImageProviderProfile, type EcommerceCompiledImageRequest } from "./ecommerce-image-compiler";
 import { routeEcommerceRole } from "./ecommerce-model-routing";
 import { compileStrictProductEdit, type ProductProtectionRegions } from "./ecommerce-product-regions";
 import { scheduleGenerationTask } from "./generation-task-scheduler";
@@ -32,7 +32,11 @@ export function assertEcommerceImageExecutionSnapshot(settings: EcommerceSetting
         (frozenEdit && (!exactRoute.snapshot.imageEdit || !sameImageEditProtocol(frozenEdit, exactRoute.snapshot.imageEdit))) ||
         exactProfile.profileId !== execution.providerProfileId ||
         exactProfile.modelSnapshot.apiFormat !== execution.modelSnapshot.apiFormat ||
-        compilerVersionForProfile(exactProfile.compilerFamily, Boolean(execution.protection), Boolean(execution.photography), Boolean(execution.referenceMapping)) !== execution.compilerVersion
+        (isFullImageEcommerceExecution(execution)
+            ? exactProfile.compilerFamily === "openai-image-2.5"
+                ? "ecommerce-openai-image-2.5.v5"
+                : "ecommerce-nano-banana-2.v5"
+            : compilerVersionForProfile(exactProfile.compilerFamily, Boolean(execution.protection), Boolean(execution.photography), Boolean(execution.referenceMapping))) !== execution.compilerVersion
     ) {
         throw new EcommerceImageTaskPreparationError("电商生图执行快照已失效，请重新发起任务", 409);
     }
@@ -139,7 +143,8 @@ function validExecutionShape(value: EcommerceCompiledImageRequest) {
         (value.protection === undefined || Boolean(normalizeEcommerceEditProtection(value.protection))) &&
         (value.photography === undefined || Boolean(normalizeEcommercePhotographyPlan(value.photography))) &&
         Array.isArray(value.referenceRoles) &&
-        validReferenceMapping(value)
+        validReferenceMapping(value) &&
+        (!isFullImageEcommerceExecution(value) || (!value.mask && value.protection?.scope === "global" && !value.protection.preserveOutsideMask && value.protection.protectedObjectIds.length === 0))
     );
 }
 
@@ -159,7 +164,7 @@ function compilerVersionForProfile(family: "openai-image-2.5" | "nano-banana-2",
 }
 
 function validReferenceMapping(execution: EcommerceCompiledImageRequest) {
-    if (!execution.compilerVersion?.endsWith(".v4")) return execution.referenceMapping === undefined;
+    if (!isFullImageEcommerceExecution(execution) && !execution.compilerVersion?.endsWith(".v4")) return execution.referenceMapping === undefined;
     const mapping = execution.referenceMapping;
     if (!Array.isArray(mapping) || !mapping.length || mapping.length !== execution.referenceRoles.length || new Set(mapping.map((item) => item.assetId)).size !== mapping.length) return false;
     const aliases = mapping.flatMap((item) => (item.userAlias === null ? [] : [item.userAlias]));

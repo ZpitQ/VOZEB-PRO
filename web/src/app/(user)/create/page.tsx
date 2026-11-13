@@ -624,7 +624,7 @@ export default function CreatePage() {
                                 onMaterializeProject={agent.materializeProject}
                                 onRetryMessage={retryRound}
                                 onAdjustRequest={adjustQualityReview}
-                                onConfirmSceneSelection={agent.confirmSceneSelection}
+                                onRegenerateFullImage={agent.retryRun}
                                 onRecoverReference={agent.recoverReference}
                                 onCheckStatus={agent.checkStatus}
                                 onResumeImageProcessing={agent.resumeImageProcessing}

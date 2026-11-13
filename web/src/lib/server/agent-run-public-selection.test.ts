@@ -290,14 +290,13 @@ describe("owned public scene selection action", () => {
         taskRecords.list.mockResolvedValue([storedPreparation]);
         mocks.fetch.mockImplementation(async () => new Response(sceneOriginal, { headers: { "content-type": "image/png" } }));
     });
-    it.each(["ecommerce-edit.v3", "ecommerce-edit.v4", "ecommerce-edit.v5"])("offers native prepared dimensions and a readable owned original for a legal %s pause", async (version) => {
+    it.each(["ecommerce-edit.v3", "ecommerce-edit.v4", "ecommerce-edit.v5"])("offers explicit full-image regeneration for an unsubmitted %s pause", async (version) => {
         const run = waitingRun(version);
         const before = structuredClone(run);
         const storedBefore = structuredClone(storedPreparation);
-        const expected = { action: "confirm_scene_selection", baselineAssetId: "scene", url: "/api/reference-assets/scene.png", width: 6, height: 4 };
+        const expected = { action: "regenerate_full_image" };
         expect(await publicAgentRunForRequest(run, request)).toMatchObject({ ecommerceSceneSelection: expected });
         expect(await publicAgentRunSnapshotForRequest(run, request)).toMatchObject({ id: "run", ecommerceSceneSelection: expected });
-        expect(mocks.assets).toHaveBeenCalledWith(["scene"], "user");
         expect(run).toEqual(before);
         expect(storedPreparation).toEqual(storedBefore);
         expect(JSON.stringify(await publicAgentRunForRequest(run, request))).not.toMatch(/compiledPrompt|manualRegion|private-marker|photography-private|scene-prepare-private|scene-execution-private|scene-analysis-private|manifestDigest/);
@@ -305,7 +304,7 @@ describe("owned public scene selection action", () => {
     it("projects only a stable media pathname and drops unrelated private URL parameters", async () => {
         mocks.assets.mockResolvedValue([{ ...asset, serverUrl: "/api/reference-assets/scene.png?format=webp&width=2&private=private-marker#private" }]);
         const projected = await publicAgentRunForRequest(waitingRun(), request);
-        expect(projected.ecommerceSceneSelection?.url).toBe("/api/reference-assets/scene.png");
+        expect(projected.ecommerceSceneSelection).toEqual({ action: "regenerate_full_image" });
         expect(JSON.stringify(projected)).not.toContain("private-marker");
     });
     it.each(["v1", "v2", "running", "child", "taskIds", "attempted", "confirmed", "qa", "other_pause", "global", "cancelled", "legacy"])("does not expose an action for %s", async (state) => {
@@ -325,27 +324,11 @@ describe("owned public scene selection action", () => {
         expect(mocks.assets).not.toHaveBeenCalled();
         expect(mocks.fetch).not.toHaveBeenCalled();
     });
-    it.each(["owner", "conversation", "unreadable", "canvas", "remote"])("hides the action when baseline %s cannot be proved", async (state) => {
+    it("offers an explicit restart when the requested canvas differs from the original", async () => {
         const run = waitingRun();
-        if (state === "owner") mocks.assets.mockResolvedValue([{ ...asset, userId: "other" }]);
-        if (state === "conversation") mocks.assets.mockResolvedValue([{ ...asset, conversationId: "other" }]);
-        if (state === "unreadable") mocks.fetch.mockRejectedValue(new Error("private-fetch-error"));
-        if (state === "canvas") run.ecommerceSnapshot!.plan!.canvas!.size.width = 8;
-        if (state === "remote") mocks.assets.mockResolvedValue([{ ...asset, serverUrl: undefined, remoteUrl: "https://private.example/asset" }]);
-        expect((await publicAgentRunForRequest(run, request)).ecommerceSceneSelection).toBeUndefined();
-        expect(JSON.stringify(await publicAgentRunForRequest(run, request))).not.toContain("private-fetch-error");
-    });
-    it("hides selection when the current original path differs from its prepared checkpoint", async () => {
-        mocks.assets.mockResolvedValue([{ ...asset, serverUrl: "/api/reference-assets/replaced.png" }]);
-        const run = waitingRun();
-        expect((await publicAgentRunForRequest(run, request)).ecommerceSceneSelection).toBeUndefined();
-        expect((await publicAgentRunSnapshotForRequest(run, request)).ecommerceSceneSelection).toBeUndefined();
-    });
-    it("hides selection when the original stream differs from the completed native receipt", async () => {
-        mocks.fetch.mockImplementation(async () => new Response(sceneOriginal.subarray(0, -1), { headers: { "content-type": "image/png" } }));
-        const run = waitingRun();
-        expect((await publicAgentRunForRequest(run, request)).ecommerceSceneSelection).toBeUndefined();
-        expect((await publicAgentRunSnapshotForRequest(run, request)).ecommerceSceneSelection).toBeUndefined();
+        run.ecommerceSnapshot!.plan!.canvas!.size.width = 8;
+        expect((await publicAgentRunForRequest(run, request)).ecommerceSceneSelection).toEqual({ action: "regenerate_full_image" });
+        expect(JSON.stringify(await publicAgentRunSnapshotForRequest(run, request))).not.toContain("private-marker");
     });
 });
 

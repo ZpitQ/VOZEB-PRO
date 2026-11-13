@@ -4,6 +4,7 @@ import { hasSystemAiCharge, readSystemAiBilling, systemAiBillingHeaders, systemA
 import { parseValidatedAgentFunctionCall } from "./agent-function-call";
 import {
     ECOMMERCE_EDIT_PLAN_V6_VERSION,
+    ECOMMERCE_EDIT_PLAN_V7_VERSION,
     ECOMMERCE_EDIT_PLAN_VERSION,
     ecommercePhotographySchema,
     ecommerceVisibleStructureSchema,
@@ -115,7 +116,7 @@ export async function planEcommerceEdit(input: EcommerceEditPlanningRequest, vis
     const hasSceneBaseline = Boolean(input.sources.currentSceneBaselineId);
     if (input.sources.status !== "resolved" || (!input.sources.productAnchorId && !hasSceneBaseline)) throw new EcommerceEditPlanningError("图片参考角色尚未解析完成", 409);
     assertReferenceCueEvidence(input, visualAnalysis);
-    const unsupportedProductEdit = unsupportedEcommerceProductEditMessage(input.planningInput.userRequest, input.sources.productAnchorId);
+    const unsupportedProductEdit = !input.referenceDecision && unsupportedEcommerceProductEditMessage(input.planningInput.userRequest, input.sources.productAnchorId);
     if (unsupportedProductEdit) throw new EcommerceEditPlanningError(unsupportedProductEdit, 409);
     let latestError: unknown;
     for (const candidate of rankTextPlanningCandidates(candidates)) {
@@ -127,7 +128,7 @@ export async function planEcommerceEdit(input: EcommerceEditPlanningRequest, vis
                 cookie: input.cookie,
                 candidate,
                 messages,
-                tool: input.referenceDecision ? executableEditPlanningTool(input.sources, executionReferenceUses(input.sources, input.referenceDecision), visualAnalysis) : ecommerceEditPlanningTool,
+                tool: input.referenceDecision ? executableEditPlanningTool(input.sources, executionReferenceUses(input.sources, input.referenceDecision)) : ecommerceEditPlanningTool,
                 headers: systemAiBillingHeaders(candidate.logicalModelId, idempotencyKey, candidate.upstreamModel),
                 preferNativeTools: true,
                 validateArguments: (argumentsText) => validPlanArguments(argumentsText, input, visualAnalysis, candidate.logicalModelId),
@@ -179,7 +180,7 @@ export function resolveLocalEditTarget(plan: EcommerceEditPlan, analysis: Ecomme
 }
 
 export function normalizePlannedEdit(value: unknown, input: EcommerceEditPlanningRequest, visualAnalysis: EcommercePlannerVisualAnalysis, planningLogicalModelId: string): EcommerceEditPlan | null {
-    const unsupportedProductEdit = unsupportedEcommerceProductEditMessage(input.planningInput.userRequest, input.sources.productAnchorId);
+    const unsupportedProductEdit = !input.referenceDecision && unsupportedEcommerceProductEditMessage(input.planningInput.userRequest, input.sources.productAnchorId);
     if (unsupportedProductEdit) throw new EcommerceEditPlanningError(unsupportedProductEdit, 409);
     if (!isRecord(value)) return null;
     const compatible = normalizePlannerOutput(value, input, visualAnalysis, planningLogicalModelId);
@@ -205,10 +206,16 @@ export function normalizePlannedEdit(value: unknown, input: EcommerceEditPlannin
                 binding.usedCueIds = [...use.usedCueIds];
             }
         }
-        compatible.planVersion = ECOMMERCE_EDIT_PLAN_V6_VERSION;
+        compatible.planVersion = ECOMMERCE_EDIT_PLAN_V7_VERSION;
         compatible.referenceUses = expected;
     }
-    if (isRecord(compatible) && compatible.operation === "product_to_scene") {
+    if (input.referenceDecision) {
+        compatible.protection = { scope: "global", protectedObjectIds: [], preserveOutsideMask: false, allowLightingChange: true };
+        const delta = plannerRecord(compatible.delta);
+        const fullImageDelta: Record<string, unknown> = { ...delta, requestedChanges: [...new Set([input.planningInput.userRequest, ...plannerStrings(delta.requestedChanges)])] };
+        delete fullImageDelta.manualRegion;
+        compatible.delta = fullImageDelta;
+    } else if (isRecord(compatible) && compatible.operation === "product_to_scene") {
         // Product-to-scene replaces the background and therefore has global scope.
         // The model must not be allowed to turn the global operation into an invalid
         // outside-mask promise by returning preserveOutsideMask=true.
@@ -220,7 +227,7 @@ export function normalizePlannedEdit(value: unknown, input: EcommerceEditPlannin
             allowLightingChange: true,
         };
     }
-    if (isRecord(compatible) && ["scene_edit", "local_edit"].includes(String(compatible.operation))) {
+    if (!input.referenceDecision && isRecord(compatible) && ["scene_edit", "local_edit"].includes(String(compatible.operation))) {
         const requestedChange = sceneEditChangeInstructions(input.planningInput.userRequest).join("\n");
         const lightingChange =
             /(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make|relight)[^，,。.;；\n]*(?:光线|光照|灯光|阳光|日光|自然光|照明|主光|补光|白平衡|lighting)|(?:光线|光照|灯光|阳光|日光|自然光|照明|主光|补光|白平衡|lighting)[^，,。.;；\n]*(?:改(?:为|成)?|换成|调整|改变|变成|切换|change|adjust|make|relight)|(?:光线|光照|灯光|自然光|照明|主光|补光)[^，,。.;；\n]*(?:再|更|调|提|变(?:得)?)[^，,。.;；\n]*(?:亮|暗)/i.test(
@@ -246,18 +253,12 @@ export function normalizePlannedEdit(value: unknown, input: EcommerceEditPlannin
     if (!plan) return null;
     const canonicalPlan = canonicalizeVisualBaseline(plan, input, visualAnalysis);
     if (input.referenceDecision?.state === "resolved") {
-        canonicalPlan.planVersion = ECOMMERCE_EDIT_PLAN_V6_VERSION;
+        canonicalPlan.planVersion = ECOMMERCE_EDIT_PLAN_V7_VERSION;
         if (!input.referenceDecision.currentSceneBaselineId) canonicalPlan.baseline.sceneFacts = null;
-        if (canonicalPlan.operation === "local_edit") {
-            const targetIds = new Set(localEditTargetIds(input.sources, visualAnalysis));
-            for (const field of ["targetObjects", "targetRegions"] as const) {
-                if (canonicalPlan.delta[field].some((id) => !targetIds.has(id))) throw planBoundaryError(`delta.${field}`, "局部编辑目标必须使用当前基线 editableTargets 中的精确 ID，区域描述应放在 requestedChanges 中");
-            }
-        }
     } else {
         canonicalPlan.planVersion = ECOMMERCE_EDIT_PLAN_VERSION;
     }
-    const canvas = resolveEcommerceCanvasConstraint({ ...input.canvasInput, operation: canonicalPlan.operation });
+    const canvas = resolveEcommerceCanvasConstraint({ ...input.canvasInput, operation: canonicalPlan.operation, strategy: canonicalPlan.strategy });
     delete canonicalPlan.canvas;
     if (canvas) canonicalPlan.canvas = canvas;
     delete canonicalPlan.preserve.sourceFraming;
@@ -321,8 +322,8 @@ function normalizePlannerOutput(value: unknown, input: EcommerceEditPlanningRequ
     if (!isRecord(value)) return null;
     const planner = unwrapPlannerEnvelope(value);
     if (input.referenceDecision) {
-        if (planner.planVersion !== ECOMMERCE_EDIT_PLAN_V6_VERSION) throw planBoundaryError("planVersion", "当前编辑计划必须返回已声明的 v6 版本契约，不能使用旧格式适配器");
-        if (!Array.isArray(planner.referenceUses)) throw planBoundaryError("referenceUses", "v6 编辑计划必须返回完整的 referenceUses 参考用途");
+        if (planner.planVersion !== ECOMMERCE_EDIT_PLAN_V7_VERSION) throw planBoundaryError("planVersion", "当前编辑计划必须返回已声明的 v7 版本契约，不能使用旧格式适配器");
+        if (!Array.isArray(planner.referenceUses)) throw planBoundaryError("referenceUses", "v7 编辑计划必须返回完整的 referenceUses 参考用途");
         const capability = executableEditCapability(input.sources);
         if (planner.operation !== capability.operation) throw planBoundaryError("operation", `当前来源仅支持 ${capability.operation}，不得改写为其他编辑操作`);
         if (planner.strategy !== capability.strategy) throw planBoundaryError("strategy", `当前来源仅支持 ${capability.strategy}，不得改变商品保护策略`);
@@ -521,6 +522,7 @@ function boundPhotographyTargets(plan: EcommerceEditPlan, analysis: EcommercePla
     const materialFacts = (anchor || baseline)?.photographyFacts;
     if (!materialFacts || (plan.protection?.scope === "local" && !baseline?.photographyFacts)) throw new EcommerceEditPlanningError("缺少可信的原图摄影事实，不能规划材质与摄影变化");
     if (plan.photography.materials.some((target) => !materialFacts.materials.some((fact) => fact.objectId === target.objectId))) throw new EcommerceEditPlanningError("摄影材质对象必须来自商品锚点或主基线的可见事实");
+    if (plan.strategy === "full_image") return;
     // Material goals are preservation constraints. Scene style never supplies product material.
     plan.photography.materials = materialFacts.materials.map((fact) => ({
         objectId: fact.objectId,
@@ -580,12 +582,12 @@ function validatePlanBoundary(plan: EcommerceEditPlan, input: EcommerceEditPlann
 }
 
 function editPlanningMessages(input: EcommerceEditPlanningRequest, analysis: EcommercePlannerVisualAnalysis, planningLogicalModelId: string) {
-    const systemPrompt =
-        "你是电商图片编辑规划模型。把用户一句话转换为基线加增量的 EcommerceEditPlan。商品主参考、场景参考和连续编辑来源由服务端确定，不得交换。当 sources.productAnchorId 为空且 currentSceneBaselineId 有效时，必须使用 scene_edit、strategy=integrated_scene、baseline.productFacts=null、preserve.productCore=[]；不得输出 local_edit 或 strict_product。local_edit 的 targetObjects 和 targetRegions 都只能填写当前基线 editableTargets 中的精确 ID，targetRegions 可以为空，区域文字描述写入 requestedChanges；没有唯一候选时不得猜测坐标或目标。新增到商品旁边或周围的道具属于场景增量，不得写入 product_core 或商品本体。默认 strict_product；此策略下 preserve.productCore 必须是字符串数组，并逐项包含且只能依赖以下六个商品保护项：outline、brand_text、color、material、scale、view。即使某项看似未变化，也必须保留该项。photography 为可选摄影目标，必须依据 photographyFacts 逐项规划；事实不可确认时省略，不填空壳。材质目标只保持受保护商品的纹理方向/尺度、粗糙度/光泽；场景参考只借鉴空间、光线和风格。用户只加摆件时保留现有主光/补光/白平衡/构图，接触阴影与光影融合仅作用于允许区域；不得新增台灯照明、改变柜体颜色或重画木纹。白底商品到场景允许规划环境主光方向与面积、补光、白平衡、接触阴影、商品明度层次、留白与纵深。已有场景全局优化必须有本轮明确意图及对应 scope。禁止统一暖黄滤镜、油亮高光、过锐化和夸张豪华装饰。摄影目标不能改变商品身份或受保护材质。";
+    const systemPrompt = input.referenceDecision
+        ? "你是图片编辑规划模型。以完整参考图和本轮要求规划整张图片重新生成，strategy 固定 full_image。商品锚点、编辑目标、参考用途和连续编辑关系由服务端确定，不得交换。只执行用户本轮明确要求及参考绑定用途下的已选线索，其余内容尽量保持。preserve 只包含未被要求修改的属性，不得同时要求换角度和保持原视角；用户明确修改颜色、材质或结构时也不得强制保留该属性。targetObjects/targetRegions 可以用语义描述或为空，不输出 manualRegion，不要求人工框选或像素保护。无商品锚点时 baseline.productFacts=null、preserve.productCore=[]；无场景基线时 baseline.sceneFacts=null。photography 可选，仅使用已确认事实，不能与用户要求冲突。"
+        : "你是电商图片编辑规划模型。把用户一句话转换为基线加增量的 EcommerceEditPlan。商品主参考、场景参考和连续编辑来源由服务端确定，不得交换。当 sources.productAnchorId 为空且 currentSceneBaselineId 有效时，必须使用 scene_edit、strategy=integrated_scene、baseline.productFacts=null、preserve.productCore=[]；不得输出 local_edit 或 strict_product。local_edit 的 targetObjects 和 targetRegions 都只能填写当前基线 editableTargets 中的精确 ID，targetRegions 可以为空，区域文字描述写入 requestedChanges；没有唯一候选时不得猜测坐标或目标。新增到商品旁边或周围的道具属于场景增量，不得写入 product_core 或商品本体。默认 strict_product；此策略下 preserve.productCore 必须是字符串数组，并逐项包含且只能依赖以下六个商品保护项：outline、brand_text、color、material、scale、view。即使某项看似未变化，也必须保留该项。photography 为可选摄影目标，必须依据 photographyFacts 逐项规划；事实不可确认时省略，不填空壳。材质目标只保持受保护商品的纹理方向/尺度、粗糙度/光泽；场景参考只借鉴空间、光线和风格。用户只加摆件时保留现有主光/补光/白平衡/构图，接触阴影与光影融合仅作用于允许区域；不得新增台灯照明、改变柜体颜色或重画木纹。白底商品到场景允许规划环境主光方向与面积、补光、白平衡、接触阴影、商品明度层次、留白与纵深。已有场景全局优化必须有本轮明确意图及对应 scope。禁止统一暖黄滤镜、油亮高光、过锐化和夸张豪华装饰。摄影目标不能改变商品身份或受保护材质。";
     const capability = input.referenceDecision ? executableEditCapability(input.sources) : null;
-    const targetIds = input.referenceDecision ? localEditTargetIds(input.sources, analysis) : undefined;
     const executablePrompt = capability
-        ? `${systemPrompt} 当前已解析来源仅支持 operation=${capability.operation}、strategy=${capability.strategy}。操作名称只表示可执行的保护路径，不授权额外变更；用户未要求新场景时不得新增房间或陈设，delta 只保留本轮请求和获准线索，baseline.sceneFacts 只来自实际场景基线，没有场景基线时必须为 null。不能执行的要求必须保留并报告限制，不得改写为其他需求。`
+        ? `${systemPrompt} 当前已解析来源仅支持 operation=${capability.operation}、strategy=${capability.strategy}。操作名称只描述编辑来源，整图执行不授权额外变更，不授权额外变更；用户未要求新场景时不得新增房间或陈设，delta 只保留本轮请求和获准线索，baseline.sceneFacts 只来自实际场景基线，没有场景基线时必须为 null。不能执行的要求必须保留并报告限制，不得改写为其他需求。`
         : systemPrompt;
     return [
         {
@@ -608,7 +610,6 @@ function editPlanningMessages(input: EcommerceEditPlanningRequest, analysis: Eco
                     conversationContext: input.planningInput.conversationContext,
                     sources: input.sources,
                     visualAnalysis: plannerVisualAnalysis(analysis, input.referenceDecision),
-                    ...(targetIds ? { allowedLocalEditTargetIds: targetIds } : {}),
                     ...(input.referenceDecision ? { referenceDecision: input.referenceDecision, requiredReferenceUses: executionReferenceUses(input.sources, input.referenceDecision) } : {}),
                     requiredModelRoles: {
                         visionAnalysis: analysis.modelRole.logicalModelId,
@@ -625,8 +626,7 @@ function editPlanningMessages(input: EcommerceEditPlanningRequest, analysis: Eco
 }
 
 function executableEditCapability(sources: EcommerceSources): Pick<EcommerceEditPlan, "operation" | "strategy"> {
-    if (!sources.productAnchorId) return { operation: "scene_edit", strategy: "integrated_scene" };
-    return { operation: sources.currentSceneBaselineId ? "local_edit" : "product_to_scene", strategy: "strict_product" };
+    return { operation: !sources.productAnchorId ? "scene_edit" : sources.currentSceneBaselineId ? "local_edit" : "product_to_scene", strategy: "full_image" };
 }
 
 function executionReferenceUses(sources: EcommerceSources, decision: EcommerceReferenceDecision) {
@@ -634,39 +634,24 @@ function executionReferenceUses(sources: EcommerceSources, decision: EcommerceRe
     return referenceUsesFromEcommerceDecision({ decision, sourceOrder });
 }
 
-function localEditTargetIds(sources: EcommerceSources, analysis: EcommercePlannerVisualAnalysis) {
-    if (executableEditCapability(sources).operation !== "local_edit") return;
-    return analysis.references.filter((reference) => reference.assetId === sources.currentSceneBaselineId).flatMap((reference) => reference.editableTargets.map((target) => target.id));
-}
-
-function executableEditPlanningTool(sources: EcommerceSources, referenceUses: ReturnType<typeof executionReferenceUses>, analysis: EcommercePlannerVisualAnalysis) {
+function executableEditPlanningTool(sources: EcommerceSources, referenceUses: ReturnType<typeof executionReferenceUses>) {
     const capability = executableEditCapability(sources);
-    const targetIds = localEditTargetIds(sources, analysis);
-    const targets = targetIds?.length ? { ...stringArray, items: { type: "string", enum: targetIds } } : { ...stringArray, maxItems: 0 };
     return {
-        ...ecommerceEditPlanningV6Tool,
+        ...ecommerceEditPlanningV7Tool,
         parameters: {
-            ...ecommerceEditPlanningV6Tool.parameters,
+            ...ecommerceEditPlanningV7Tool.parameters,
             properties: {
-                ...ecommerceEditPlanningV6Tool.parameters.properties,
+                ...ecommerceEditPlanningV7Tool.parameters.properties,
                 operation: { type: "string", enum: [capability.operation] },
                 strategy: { type: "string", enum: [capability.strategy] },
-                ...(targetIds
-                    ? {
-                          delta: {
-                              ...ecommerceEditPlanningV6Tool.parameters.properties.delta,
-                              properties: { ...ecommerceEditPlanningV6Tool.parameters.properties.delta.properties, targetObjects: targets, targetRegions: targets },
-                          },
-                      }
-                    : {}),
                 referenceUses: {
-                    ...ecommerceEditPlanningV6Tool.parameters.properties.referenceUses,
+                    ...ecommerceEditPlanningV7Tool.parameters.properties.referenceUses,
                     minItems: referenceUses.length,
                     maxItems: referenceUses.length,
                     items: {
-                        ...ecommerceEditPlanningV6Tool.parameters.properties.referenceUses.items,
+                        ...ecommerceEditPlanningV7Tool.parameters.properties.referenceUses.items,
                         properties: {
-                            ...ecommerceEditPlanningV6Tool.parameters.properties.referenceUses.items.properties,
+                            ...ecommerceEditPlanningV7Tool.parameters.properties.referenceUses.items.properties,
                             assetId: { type: "string", enum: referenceUses.map((use) => use.assetId) },
                         },
                     },
@@ -916,14 +901,14 @@ export const ecommerceEditPlanningTool = {
     },
 };
 
-export const ecommerceEditPlanningV6Tool = {
+export const ecommerceEditPlanningV7Tool = {
     ...ecommerceEditPlanningTool,
     description: "依据 referenceDecision 的绑定用途、已选线索和目标/商品锚点事实生成 EcommerceEditPlan，不扩展辅助参考授权",
     parameters: {
         ...ecommerceEditPlanningTool.parameters,
         properties: {
             ...ecommerceEditPlanningTool.parameters.properties,
-            planVersion: { type: "string", enum: [ECOMMERCE_EDIT_PLAN_V6_VERSION] },
+            planVersion: { type: "string", enum: [ECOMMERCE_EDIT_PLAN_V7_VERSION] },
             baseline: { ...ecommerceEditPlanningTool.parameters.properties.baseline, properties: { ...ecommerceEditPlanningTool.parameters.properties.baseline.properties, sceneFacts: { anyOf: [sceneFacts, { type: "null" }] } } },
             referenceUses: {
                 type: "array",

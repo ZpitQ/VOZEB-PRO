@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { ecommerceCanvasSize, normalizeEcommerceEditPlan, planPublicSummary, resolveEcommerceCanvasConstraint, validateEcommerceEditPlan, type EcommerceEditPlan } from "./ecommerce-edit-plan";
+import { ecommerceCanvasSize, matchesEcommerceCanvasDimensions, normalizeEcommerceEditPlan, planPublicSummary, resolveEcommerceCanvasConstraint, validateEcommerceEditPlan, type EcommerceEditPlan } from "./ecommerce-edit-plan";
 import { assertCapabilityConstraints } from "./capability-constraints";
 
 describe("deterministic ecommerce canvas", () => {
+    it("accepts integer pixel rounding only when ratio rounding is enabled", () => {
+        const canvas = { mode: "ratio" as const, size: { width: 16, height: 9 }, source: "user_text" as const, allowReframe: true };
+        expect(matchesEcommerceCanvasDimensions(canvas, { width: 1672, height: 941 }, true)).toBe(true);
+        expect(matchesEcommerceCanvasDimensions(canvas, { width: 1672, height: 941 })).toBe(false);
+        expect(matchesEcommerceCanvasDimensions(canvas, { width: 8, height: 5 })).toBe(true);
+        expect(matchesEcommerceCanvasDimensions(canvas, { width: 1672, height: 1000 }, true)).toBe(false);
+        expect(matchesEcommerceCanvasDimensions({ ...canvas, mode: "exact", size: { width: 1672, height: 940 } }, { width: 1672, height: 941 }, true)).toBe(false);
+    });
     it("accepts a disabled null quality role while requiring the other model roles", () => {
         const plan = validPlan();
         plan.modelRoles.qualityCheck = null;

@@ -364,7 +364,7 @@ export function directGenerationPreferences(preferences?: CreativeGenerationPref
     };
 }
 
-function directModelAllocations(models: DirectAgentModelOption[], preferences?: CreativeGenerationPreferences) {
+export function directModelAllocations(models: DirectAgentModelOption[], preferences?: CreativeGenerationPreferences) {
     const counts = new Map<string, number>();
     for (const capability of ["image", "video", "audio"] as const) {
         const peers = models.filter((model) => model.capability === capability);

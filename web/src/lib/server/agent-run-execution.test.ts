@@ -1,3 +1,4 @@
+import { buildSceneEditProtection } from "./ecommerce-protection.test-fixtures";
 import assert from "node:assert/strict";
 import { prepareAdvisoryReview, recoverAdvisoryReview } from "./ecommerce-visual-review.test-fixture";
 import { completeClaimedImageProcessingFixture, completeImageTaskResultFixture, readImageTaskResultBytesFixture } from "./image-processing.test-fixture";
@@ -15,7 +16,6 @@ import type { ImageTask } from "./image-task-store";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import { routeEcommerceRole } from "./ecommerce-model-routing";
 import { toSystemGenerationChannel } from "./generation-channel";
-import { buildSceneEditProtection } from "./ecommerce-product-regions";
 
 const textPlanningActual = vi.hoisted((): { module?: typeof import("./text-planning-runtime") } => ({}));
 const boundary = vi.hoisted(() => ({ request: vi.fn(), outbound: vi.fn(), create: vi.fn(), submit: vi.fn(), poll: vi.fn(), structured: vi.fn(), refund: vi.fn(), settings: {} as AuthSettings }));

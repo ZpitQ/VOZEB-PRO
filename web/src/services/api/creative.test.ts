@@ -42,7 +42,7 @@ describe("统一创作 Agent 事件流", () => {
     ] satisfies CreativeReferenceRecovery[])("submits typed $action reference recovery to the original run and conversation", async (referenceRecovery) => {
         const fetch = vi.fn(async () => Response.json({ code: 0, data: { run: { id: "run" } }, msg: "OK" }));
         vi.stubGlobal("fetch", fetch);
-        await controlCreativeAgentRun("run", "resume", "conversation", undefined, referenceRecovery);
+        await controlCreativeAgentRun("run", "resume", "conversation", referenceRecovery);
         expect(fetch).toHaveBeenCalledExactlyOnceWith("/api/agent/runs/run/resume", expect.objectContaining({ method: "POST", cache: "no-store", body: JSON.stringify({ conversationId: "conversation", referenceRecovery }) }));
     });
 
@@ -130,18 +130,11 @@ describe("统一创作 Agent 事件流", () => {
         }
     });
 
-    it("submits confirmed source pixels to the same resume route and conversation", async () => {
-        const fetch = vi.fn(async () => new Response(JSON.stringify({ code: 0, data: { run: { id: "run" } }, msg: "OK" })));
-        vi.stubGlobal("fetch", fetch);
-        const selection = { baselineAssetId: "scene", region: { x: 201, y: 101, width: 403, height: 202 } };
-        await controlCreativeAgentRun("run", "resume", "conversation", selection);
-        expect(fetch).toHaveBeenCalledWith("/api/agent/runs/run/resume", expect.objectContaining({ method: "POST", cache: "no-store", body: JSON.stringify({ conversationId: "conversation", sceneSelection: selection }) }));
-    });
-    it("carries acceptance and selection in SSE snapshots through pause and resume", () => {
+    it("carries full-image regeneration in SSE snapshots through pause and resume", () => {
         vi.stubGlobal("EventSource", FakeEventSource);
         const onSnapshot = vi.fn();
         watchCreativeAgentRun("run", { onProgress: vi.fn(), onTerminal: vi.fn(), onConnectionError: vi.fn(), onSnapshot });
-        const ecommerceSceneSelection = { action: "confirm_scene_selection", baselineAssetId: "scene", url: "/api/reference-assets/scene.png", width: 1254, height: 1254 };
+        const ecommerceSceneSelection = { action: "regenerate_full_image" };
         FakeEventSource.instance.emit("run.snapshot", { id: "run", status: "paused", ecommerceSceneSelection, compiledPrompt: "private" });
         FakeEventSource.instance.emit("run.snapshot", { id: "run", status: "running" });
         FakeEventSource.instance.emit("run.snapshot", { id: "run", status: "completed", ecommerceQualityStatus: "needs_adjustment" });

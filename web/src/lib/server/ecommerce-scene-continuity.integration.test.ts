@@ -34,9 +34,7 @@ let registerCreativeAssets: typeof import("./creative-runtime-store").registerCr
 let createImageTask: typeof import("./image-task-store").createImageTask;
 let getImageTask: typeof import("./image-task-store").getImageTask;
 let ECOMMERCE_QUALITY_CHECK_KEYS: typeof import("./ecommerce-quality-check").ECOMMERCE_QUALITY_CHECK_KEYS;
-let createEcommerceSceneEditTask: typeof import("./ecommerce-generation-service").createEcommerceSceneEditTask;
 let compileEcommerceImageRequest: typeof import("./ecommerce-image-compiler").compileEcommerceImageRequest;
-let buildSceneEditProtection: typeof import("./ecommerce-product-regions").buildSceneEditProtection;
 let referenceUsesFromEcommerceDecision: typeof import("./ecommerce-reference-purpose").referenceUsesFromEcommerceDecision;
 import { settings } from "./agent-run-executor.test-fixtures";
 
@@ -96,9 +94,7 @@ describe("scene continuity with real services and file persistence", () => {
         ({ createCreativeConversation, getCreativeAssetsByIds, listCreativeRunEvents, registerCreativeAssets } = await import("./creative-runtime-store"));
         ({ createImageTask, getImageTask } = await import("./image-task-store"));
         ({ ECOMMERCE_QUALITY_CHECK_KEYS } = await import("./ecommerce-quality-check"));
-        ({ createEcommerceSceneEditTask } = await import("./ecommerce-generation-service"));
         ({ compileEcommerceImageRequest } = await import("./ecommerce-image-compiler"));
-        ({ buildSceneEditProtection } = await import("./ecommerce-product-regions"));
         ({ referenceUsesFromEcommerceDecision } = await import("./ecommerce-reference-purpose"));
         [scheduler, tasks, mediaRegistry, mediaStorage, processing] = await Promise.all([
             import("./generation-task-scheduler"),
@@ -143,7 +139,7 @@ describe("scene continuity with real services and file persistence", () => {
                     }
                     const child = await completeImageTaskResultFixture(url.split("/").at(-1)!, { origin: "http://fixture.local", cookie: "session=fixture", directory });
                     const parent = child.runId ? await getAgentRun(child.runId) : null;
-                    if (parent?.ecommerceSnapshot?.plan?.planVersion === "ecommerce-edit.v6") {
+                    if (parent?.ecommerceSnapshot?.plan?.planVersion === "ecommerce-edit.v7") {
                         expect(child.nativeResults?.slots).toMatchObject([{ status: "stored" }]);
                         assert.ok(child.resultProcessing);
                         expect(await tasks.getStoredGenerationTaskRecord("image_processing", child.resultProcessing.jobId)).toMatchObject({
@@ -193,7 +189,7 @@ describe("scene continuity with real services and file persistence", () => {
                 else if (tool === "plan_ecommerce_edit") {
                     const local = payload.userRequest.includes("花瓶");
                     argumentsValue = {
-                        planVersion: "ecommerce-edit.v6",
+                        planVersion: "ecommerce-edit.v7",
                         operation: "scene_edit",
                         source: { productAnchorId: null, currentSceneBaselineId: payload.sources.currentSceneBaselineId, sceneReferenceIds: payload.sources.sceneReferenceIds },
                         referenceUses: referenceUsesFromEcommerceDecision({ decision: payload.referenceDecision, sourceOrder: [payload.sources.currentSceneBaselineId, ...payload.sources.sceneReferenceIds] }),
@@ -204,10 +200,10 @@ describe("scene continuity with real services and file persistence", () => {
                             targetRegions: [local ? "cabinet-top" : "whole-scene"],
                         },
                         preserve: { productCore: [], sceneElements: ["layout", "camera"] },
-                        protection: { scope: local ? "local" : "global", protectedObjectIds: ["cabinet"], preserveOutsideMask: local, allowLightingChange: !local },
+                        protection: { scope: "global", protectedObjectIds: [], preserveOutsideMask: false, allowLightingChange: !local },
                         visibleStructure: structure,
                         photography,
-                        strategy: "integrated_scene",
+                        strategy: "full_image",
                         modelRoles: payload.requiredModelRoles,
                         continuity: payload.continuity,
                         validation: { requiredChecks: ["requested_edit", "scene_preservation", "composition_lighting"] },
@@ -357,7 +353,12 @@ describe("scene continuity with real services and file persistence", () => {
             await completePrepare(waiting.jobId);
             current = await claimAndExecute(run.id);
         }
-        if (current.status === "running") await completeLinkedResults(current);
+        expect(current.ecommerceSnapshot?.plan).toMatchObject({ planVersion: "ecommerce-edit.v7", strategy: "full_image" });
+        expect(current.tasks[0].ecommerceExecution).toMatchObject({ compilerVersion: "ecommerce-openai-image-2.5.v5", state: "ready" });
+        expect(current.tasks[0].ecommerceExecution).not.toHaveProperty("mask");
+        expect(current.tasks[0]).not.toHaveProperty("sceneProtection");
+        expect(current.ecommerceSnapshot?.processing?.protection).toBeUndefined();
+        return current;
     }
 
     async function completeLinkedResults(run: AgentRun) {
@@ -370,36 +371,6 @@ describe("scene continuity with real services and file persistence", () => {
         const current = await getAgentRun(run.id);
         assert.ok(current);
         await executeAgentRun(current, "http://fixture.local", "session=fixture");
-    }
-
-    async function confirmLocalScene(runId: string) {
-        const waiting = (await getAgentRun(runId))!;
-        expect(waiting).toMatchObject({
-            status: "paused",
-            ecommerceSnapshot: { fallback: { reason: "scene_selection_required" }, plan: { planVersion: "ecommerce-edit.v6", protection: { scope: "local" } } },
-            tasks: [{ attempts: 0, status: "needs_review" }],
-        });
-        // Controlled post-confirmation continuity fixture. This uses the Web builder
-        // and does not qualify the new receipt or native protection lifecycle.
-        const plan = waiting.ecommerceSnapshot?.plan;
-        const original = waiting.tasks[0];
-        const execution = original.ecommerceExecution;
-        const baselineId = plan?.source.currentSceneBaselineId;
-        if (!plan || !execution || !baselineId) throw new Error("scene continuity fixture missing");
-        const assets = await getCreativeAssetsByIds(
-            execution.referenceRoles.map((reference) => reference.assetId),
-            waiting.userId,
-        );
-        const baseline = assets.find((asset) => asset.id === baselineId);
-        if (!baseline?.serverUrl) throw new Error("scene continuity baseline missing");
-        const sceneBytes = (await readFixtureMedia(baseline.serverUrl)).bytes;
-        const protection = await buildSceneEditProtection(sceneBytes, baselineId, { x: 40, y: 5, width: 20, height: 20 }, plan.delta.requestedChanges, "user_selection");
-        protection.confirmation = { actorUserId: "scene-user", confirmedAt: Date.now() };
-        const executable = createEcommerceSceneEditTask(waiting, plan, assets, execution, protection);
-        const tasks = [{ ...executable, id: original.id, count: original.count, attempts: original.attempts }];
-        const confirmed = (await updateAgentRunById(runId, { status: "running", tasks }, undefined, ["paused"], undefined, waiting.tasks))!;
-        expect(confirmed.tasks[0]).toMatchObject({ id: waiting.tasks[0].id, attempts: 0, sceneProtection: { selectionSource: "user_selection", confirmation: { actorUserId: "scene-user" } } });
-        return confirmed;
     }
 
     it("preserves an explicit historical scene while applying its authorized new style reference", async () => {
@@ -420,7 +391,7 @@ describe("scene continuity with real services and file persistence", () => {
             },
         ]);
         const first = (await createAgentRun("scene-user", { clientRequestId: "old-scene", conversationId: conversation.id, surface: "chat", prompt: "改成午后阳光", assetIds: [root.id], skillIds: [], modelIds: [] })).run;
-        await executeWithPreparedReferences(first);
+        await completeLinkedResults(await executeWithPreparedReferences(first));
         const completedFirst = (await getAgentRun(first.id))!;
         expect(completedFirst.status, completedFirst.ecommerceSnapshot?.qualityCheck?.internalReason).toBe("completed");
         expect(completedFirst).toMatchObject({ status: "completed", ecommerceSnapshot: { qualityPolicy: "disabled", technicalCheck: { status: "passed" } } });
@@ -439,7 +410,7 @@ describe("scene continuity with real services and file persistence", () => {
             })
         ).run;
 
-        await executeWithPreparedReferences(branch);
+        await completeLinkedResults(await executeWithPreparedReferences(branch));
 
         const completedBranch = (await getAgentRun(branch.id))!;
         expect(completedBranch).toMatchObject({ status: "completed", tasks: [{ status: "completed", attempts: 1, taskIds: [submissions[1].id] }], ecommerceSnapshot: { qualityPolicy: "disabled", technicalCheck: { status: "passed" } } });
@@ -450,11 +421,12 @@ describe("scene continuity with real services and file persistence", () => {
             continuity: { sceneRootAssetId: root.id, parentResultId: oldResultId },
             visualAnalysis: { analysisVersion: "ecommerce-visual-analysis.v4", references: [{ assetId: oldResultId }, { assetId: style.id }] },
             plan: {
-                planVersion: "ecommerce-edit.v6",
+                planVersion: "ecommerce-edit.v7",
+                strategy: "full_image",
                 operation: "scene_edit",
                 source: { productAnchorId: null, currentSceneBaselineId: oldResultId, sceneReferenceIds: [style.id] },
                 continuity: { parentResultId: oldResultId },
-                canvas: { mode: "exact", source: "baseline", size: { width: 100, height: 80 }, allowReframe: false },
+                canvas: { mode: "ratio", source: "baseline", size: { width: 100, height: 80 }, allowReframe: false },
             },
         });
         expect(completedBranch.ecommerceSnapshot!.referenceDecision).toMatchObject({
@@ -472,7 +444,7 @@ describe("scene continuity with real services and file persistence", () => {
         ]);
         expect((submissions[1].body.references as Array<{ id: string }>).map((reference) => reference.id)).toEqual([oldResultId, style.id]);
         expect(submissions[1].body.ecommerceExecution).toMatchObject({
-            compilerVersion: "ecommerce-openai-image-2.5.v4",
+            compilerVersion: "ecommerce-openai-image-2.5.v5",
             referenceMapping: [
                 { assetId: oldResultId, userAlias: "图片1", providerIndex: 0, purposes: ["edit_target"] },
                 { assetId: style.id, userAlias: "图片2", providerIndex: 1, purposes: ["style", "lighting"] },
@@ -499,7 +471,7 @@ describe("scene continuity with real services and file persistence", () => {
         ]);
         const create = async (prompt: string, ids: string[] = []) => (await createAgentRun("scene-user", { clientRequestId: prompt, conversationId: conversation.id, surface: "chat", prompt, assetIds: ids, skillIds: [], modelIds: [] })).run;
         const first = await create("改成午后阳光", [root.id]);
-        await executeWithPreparedReferences(first);
+        await completeLinkedResults(await executeWithPreparedReferences(first));
         await prepareAdvisoryReview(first.id, { origin: "http://fixture.local", cookie: "session=fixture", directory });
         await recoverAdvisoryReview(first.id);
         const completedFirst = (await getAgentRun(first.id))!;
@@ -507,7 +479,7 @@ describe("scene continuity with real services and file persistence", () => {
             status: "completed",
             ecommerceSnapshot: {
                 visualAnalysis: { analysisVersion: "ecommerce-visual-analysis.v4" },
-                plan: { planVersion: "ecommerce-edit.v6", photography: { materials: [{ objectId: "cabinet", textureDirection: expect.stringContaining("vertical") }], lighting: { keyLight: "daylight" } } },
+                plan: { planVersion: "ecommerce-edit.v7", strategy: "full_image", photography: { materials: [{ objectId: "cabinet", textureDirection: expect.stringContaining("vertical") }], lighting: { keyLight: "daylight" } } },
                 continuity: { sceneRootAssetId: root.id, parentResultId: null },
                 qualityCheck: { version: "ecommerce-quality.v2", status: "passed" },
             },
@@ -516,11 +488,8 @@ describe("scene continuity with real services and file persistence", () => {
         expect(firstAsset.metadata).toMatchObject({ ecommerceContinuity: { sceneRootAssetId: root.id } });
         const unchangedFirst = JSON.stringify(completedFirst.ecommerceSnapshot);
         const second = await create("再加一个花瓶");
-        await executeWithPreparedReferences(second);
-        expect(submissions).toHaveLength(1);
-        const confirmedSecond = await confirmLocalScene(second.id);
         interruptAfterSubmission = true;
-        await executeAgentRun(confirmedSecond, "http://fixture.local", "session=fixture");
+        await executeWithPreparedReferences(second);
         const waiting = (await getAgentRun(second.id))!;
         expect(waiting).toMatchObject({ status: "running", tasks: [{ taskIds: [submissions[1].id] }] });
         expect(submissions).toHaveLength(2);
@@ -536,8 +505,8 @@ describe("scene continuity with real services and file persistence", () => {
             status: "completed",
             ecommerceSnapshot: {
                 continuity: { sceneRootAssetId: root.id, parentResultId: firstAsset.id },
-                plan: { planVersion: "ecommerce-edit.v6", delta: { targetObjects: ["vase"], targetRegions: ["cabinet-top"] } },
-                qualityCheck: { version: "ecommerce-quality.v2", status: "needs_adjustment", sceneProtectionEvidence: [{ evidence: { compositeOutsideChangedPixels: 0 } }] },
+                plan: { planVersion: "ecommerce-edit.v7", strategy: "full_image", delta: { targetObjects: ["vase"], targetRegions: ["cabinet-top"] } },
+                qualityCheck: { version: "ecommerce-quality.v2", status: "needs_adjustment", sceneProtectionEvidence: [] },
             },
         });
         expect(submissions[1].body.references).toMatchObject([{ id: firstAsset.id }]);
@@ -547,16 +516,13 @@ describe("scene continuity with real services and file persistence", () => {
         expect(JSON.stringify(secondAsset.metadata)).not.toContain("vase is too large");
         const branch = await create("修改图片1，继续调整花瓶", [secondAsset.id]);
         adjustment = false;
-        await executeWithPreparedReferences(branch);
+        await completeLinkedResults(await executeWithPreparedReferences(branch));
         expect((await getAgentRun(branch.id))!.ecommerceSnapshot!.referenceDecision).toMatchObject({
             state: "resolved",
             editTargetId: secondAsset.id,
             currentSceneBaselineId: secondAsset.id,
             bindings: [{ assetId: secondAsset.id, alias: "图片1", purposes: ["edit_target"], source: "explicit" }],
         });
-        const confirmedBranch = await confirmLocalScene(branch.id);
-        await executeAgentRun(confirmedBranch, "http://fixture.local", "session=fixture");
-        await completeLinkedResults((await getAgentRun(branch.id))!);
         await prepareAdvisoryReview(branch.id, { origin: "http://fixture.local", cookie: "session=fixture", directory });
         await recoverAdvisoryReview(branch.id);
         const completedBranch = (await getAgentRun(branch.id))!;
@@ -573,9 +539,7 @@ describe("scene continuity with real services and file persistence", () => {
             expect(submissions.filter((submission) => current.tasks[0].taskIds!.includes(submission.id))).toHaveLength(1);
             const events = await listCreativeRunEvents(current.id);
             const stages = events.filter((event) => event.type === "ecommerce.progress").map((event) => (event.data as { stage: string }).stage);
-            // Selection pauses before the planner's generating_image event;
-            // resumed local execution records the real same-task creation.
-            expect(stages).toEqual(expect.arrayContaining(current.id === completedFirst.id ? ["identifying_product", "planning_scene", "generating_image", "checking_result"] : ["identifying_product", "planning_scene", "checking_result"]));
+            expect(stages).toEqual(expect.arrayContaining(["identifying_product", "planning_scene", "generating_image", "checking_result"]));
             expect(events.filter((event) => event.type === "task.created")).toHaveLength(1);
             expect((await getImageTask(current.tasks[0].taskIds![0]))?.ecommerceTrace).toMatchObject({ runId: current.id, imageTaskIds: current.tasks[0].taskIds });
         }
@@ -601,13 +565,15 @@ describe("scene continuity with real services and file persistence", () => {
             },
         ]);
         const first = (await createAgentRun("scene-user", { clientRequestId: "current-seed", conversationId: conversation.id, surface: "chat", prompt: "改成午后阳光", assetIds: [root.id], skillIds: [], modelIds: [] })).run;
-        await executeWithPreparedReferences(first);
+        await completeLinkedResults(await executeWithPreparedReferences(first));
         const completedFirst = (await getAgentRun(first.id))!;
         expect(completedFirst.status).toBe("completed");
         const legacy = (await createAgentRun("scene-user", { clientRequestId: "started-v1-fixture", conversationId: conversation.id, surface: "chat", prompt: "恢复旧任务", assetIds: [], skillIds: [], modelIds: [] })).run;
         const legacySnapshot = structuredClone(completedFirst.ecommerceSnapshot!);
         legacySnapshot.runId = legacy.id;
         legacySnapshot.plan!.planVersion = "ecommerce-edit.v1";
+        legacySnapshot.plan!.strategy = "integrated_scene";
+        delete legacySnapshot.plan!.referenceUses;
         delete legacySnapshot.plan!.canvas;
         delete legacySnapshot.plan!.protection;
         delete legacySnapshot.plan!.visibleStructure;
@@ -628,6 +594,8 @@ describe("scene continuity with real services and file persistence", () => {
             supportsIndependentMask: true,
             modelSnapshot: legacyTask.ecommerceExecution!.modelSnapshot,
         });
+        expect(legacyTask.ecommerceExecution).toMatchObject({ compilerVersion: "ecommerce-openai-image-2.5.v1", state: "ready" });
+        expect(legacyTask.ecommerceExecution).not.toHaveProperty("mask");
         legacyTask.prompt = legacyTask.ecommerceExecution.prompt;
         const seed = (await getImageTask(submissions[0].id))!;
         const original = await createImageTask({

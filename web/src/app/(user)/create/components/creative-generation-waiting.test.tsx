@@ -35,16 +35,16 @@ describe("creative generation waiting", () => {
         expect(markup).not.toContain("animate-pulse");
     });
 
-    it("offers owned scene selection without pretending a paused run is still generating", () => {
-        const run = { id: "run", status: "paused", tasks: [], ecommerceSceneSelection: { action: "confirm_scene_selection", baselineAssetId: "scene", url: "/api/reference-assets/scene.png", width: 1254, height: 1254 } } as unknown as CreativeAgentRun;
+    it("offers full-image regeneration for a historical unsubmitted selection pause", () => {
+        const run: CreativeAgentRun = { id: "run", conversationId: "conversation", inputMessageId: "input", assistantMessageId: "assistant", status: "paused", assetIds: [], tasks: [], ecommerceSceneSelection: { action: "regenerate_full_image" } };
         const markup = renderToStaticMarkup(
             <App>
-                <CreativeGenerationWaiting run={run} message={{ content: "任务已暂停", createdAt: 1 }} onConfirmSceneSelection={async () => undefined} />
+                <CreativeGenerationWaiting run={run} message={{ content: "任务已暂停", createdAt: 1 }} onRegenerateFullImage={async () => undefined} />
             </App>,
         );
-        expect(markup).toContain("选择修改位置");
-        expect(markup).toContain("待修改的原图");
-        expect(markup).toContain("/api/reference-assets/scene.png");
+        expect(markup).toContain("按原要求重新生成");
+        expect(markup).not.toContain("选择修改位置");
+        expect(markup).not.toContain("待修改的原图");
         expect(markup).not.toContain("已等待");
         expect(markup).not.toContain("animate-pulse");
     });

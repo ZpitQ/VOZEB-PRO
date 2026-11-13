@@ -8,6 +8,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 
 import sharp from "sharp";
 
@@ -23,11 +24,10 @@ async function freePort() {
     return String(address.port);
 }
 
+const { values } = parseArgs({ options: { m7: { type: "boolean" } } });
+const m7 = values.m7 === true;
 const data = await mkdtemp(join(tmpdir(), "vozeb-m5-business-"));
 const runId = randomUUID();
-const m7 = process.argv.includes("--m7");
-const m8 = process.argv.includes("--m8");
-assert.ok(!(m7 && m8), "Select one isolated enhancement suite");
 const source = join(data, "native-source.png");
 const storageState = join(data, "admin-state.json");
 const output = join(process.cwd(), ".e2e-artifacts", `image-enhancement-${runId}`);
@@ -68,8 +68,9 @@ const child = spawn(process.execPath, [fileURLToPath(import.meta.resolve("@playw
         VOZEB_PRO_M5_BROWSER_OUTPUT: output,
         VOZEB_PRO_M5_BUSINESS_FAULTS: "1",
         VOZEB_PRO_M5_F13_BUSINESS: "1",
+        VOZEB_PRO_GENERATION_WORKER_MEMORY_MB: "8192",
+        VOZEB_PRO_IMAGE_PROCESS_BUDGET_MB: "6144",
         VOZEB_PRO_M7_PRODUCT_BUSINESS: m7 ? "1" : "",
-        VOZEB_PRO_M8_SCENE_BUSINESS: m8 ? "1" : "",
         VOZEB_PRO_M5_BUSINESS_RUN_ID: runId,
         VOZEB_PRO_M5_BUSINESS_DATA_DIR: data,
         VOZEB_PRO_M5_BUSINESS_NATIVE_SOURCE: source,

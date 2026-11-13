@@ -77,13 +77,13 @@ export function evaluateEcommerceCanvas(constraint: EcommerceCanvasConstraint, n
     return { hardFailures: nativeMatches && storedMatches ? [] : ["canvas_geometry"], nativeMatches, storedMatches };
 }
 
-function matchesEcommerceCanvas(constraint: EcommerceCanvasConstraint, size: EcommerceDimensions) {
+function matchesEcommerceCanvas(constraint: EcommerceCanvasConstraint, size: EcommerceDimensions, allowRatioRounding = false) {
     try {
         validateEcommerceDimensions(size);
     } catch {
         return false;
     }
-    return matchesEcommerceCanvasDimensions(constraint, size);
+    return matchesEcommerceCanvasDimensions(constraint, size, allowRatioRounding);
 }
 export type EcommerceQualityCheckItem = {
     resultId: string;
@@ -194,6 +194,7 @@ async function collectEcommerceTechnicalEvidence(input: EcommerceQualityCheckReq
     const protectionChecks = await qualityProtectionChecks(input, completedImages);
     if (input.plan.canvas) {
         const constraint = input.plan.canvas;
+        const allowRatioRounding = input.plan.planVersion === "ecommerce-edit.v7" && input.plan.strategy === "full_image";
         validateEcommerceDimensions(constraint.size);
         const slots = [
             ...(input.batchEvidence || []).map((evidence) => ({ evidence, result: input.resultImages.find((result) => result.resultId === evidence.resultId) })),
@@ -207,8 +208,8 @@ async function collectEcommerceTechnicalEvidence(input: EcommerceQualityCheckReq
                 ]);
                 const nativeSize = native.status === "fulfilled" ? native.value : (evidence?.nativeStatus === "readable" ? evidence.nativeSize : undefined) || result?.nativeSize;
                 const storedSize = stored.status === "fulfilled" ? stored.value : undefined;
-                const nativeMatches = nativeSize ? matchesEcommerceCanvas(constraint, nativeSize) : null;
-                const storedMatches = storedSize ? matchesEcommerceCanvas(constraint, storedSize) : null;
+                const nativeMatches = nativeSize ? matchesEcommerceCanvas(constraint, nativeSize, allowRatioRounding) : null;
+                const storedMatches = storedSize ? matchesEcommerceCanvas(constraint, storedSize, allowRatioRounding) : null;
                 const mappingVerified =
                     native.status === "fulfilled" &&
                     stored.status === "fulfilled" &&
@@ -255,7 +256,7 @@ export async function checkEcommerceResult(input: EcommerceQualityCheckRequest, 
     let protectionChecks: EcommerceQualityCheckItem[] = [];
     let visionEvidence: EcommerceQualityCheck["visionEvidence"];
     let sceneProtectionEvidence: EcommerceQualityCheck["sceneProtectionEvidence"] = [];
-    const independent = ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(input.plan.planVersion);
+    const independent = ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6", "ecommerce-edit.v7"].includes(input.plan.planVersion);
     try {
         assertQualityRequest(input, candidate);
         const technical = technicalCheck || (await collectEcommerceTechnicalEvidence(input));
@@ -422,7 +423,7 @@ export function ecommerceQualityGate(check: EcommerceQualityCheck) {
 }
 
 async function qualityCheckMessages(input: EcommerceQualityCheckRequest, preparedViews?: readonly PreparedEcommerceQualityView[]) {
-    const independent = ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(input.plan.planVersion);
+    const independent = ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6", "ecommerce-edit.v7"].includes(input.plan.planVersion);
     const evidence: NonNullable<EcommerceQualityCheck["visionEvidence"]> = { imageCount: 0, transmissions: [], images: [] };
     const regionHints = [...new Map((input.plan.visibleStructure || []).map((fact) => [JSON.stringify(fact.evidenceRegion), fact.evidenceRegion])).values()];
     const appendImage = async (content: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>, source: string, url: string, crop: boolean) => {
@@ -773,7 +774,7 @@ function validSceneProtectionGeometry(proof: SceneEditProtectionEvidence, assetI
 
 async function qualityProtectionChecks(input: EcommerceQualityCheckRequest, completedImages = new Map<string, CompletedImageRead>()): Promise<EcommerceQualityCheckItem[]> {
     if (input.plan.protection?.scope !== "local")
-        return ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6"].includes(input.plan.planVersion)
+        return ["ecommerce-edit.v4", "ecommerce-edit.v5", "ecommerce-edit.v6", "ecommerce-edit.v7"].includes(input.plan.planVersion)
             ? input.resultImages.map((result) => ({ resultId: result.resultId, key: "unmodified_region", status: "not_applicable", source: "protection", reason: "当前全局编辑没有局部选区外像素不变承诺" }))
             : [];
     return Promise.all(

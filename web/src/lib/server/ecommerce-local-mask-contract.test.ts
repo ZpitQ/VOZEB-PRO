@@ -1,3 +1,4 @@
+import { buildSceneEditProtection } from "./ecommerce-protection.test-fixtures";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 
@@ -6,7 +7,7 @@ import type { SystemChannelProtocol } from "@/lib/auth/store-types";
 import { compileEcommerceImageCandidates, compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import { assertEcommerceImageExecutionSnapshot, prepareEcommerceImageTask } from "./ecommerce-image-task-orchestration";
 import { resolveEcommerceRoleCandidates, routeEcommerceRole, type EcommerceModelRoutingSettings } from "./ecommerce-model-routing";
-import { buildSceneEditProtection } from "./ecommerce-product-regions";
+
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import type { ImageTaskConfig } from "./image-task-store";
 

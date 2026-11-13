@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import type { CreativeAsset } from "@/lib/creative-runtime-contract";
-import { planEcommerceEdit, type EcommerceEditPlanningRequest } from "./ecommerce-edit-planner";
+import { normalizePlannedEdit, planEcommerceEdit, type EcommerceEditPlanningRequest } from "./ecommerce-edit-planner";
 import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } from "./ecommerce-image-compiler";
 import { resolveImageEditProtocol } from "./image-edit-protocol";
@@ -14,11 +14,21 @@ import { validateEcommerceVisualAnalysisV4, type EcommerceReferenceCue, type Eco
 vi.mock("@/lib/auth/store", () => ({ refundUserPoints: vi.fn(async () => undefined) }));
 
 describe("active ecommerce edit planning TCP contract", () => {
+    it("accepts a full-image request without forcing product pixel protection", () => {
+        const fixture = projectionFixture("style-only");
+        fixture.plan.planVersion = "ecommerce-edit.v7";
+        fixture.plan.strategy = "full_image";
+        fixture.plan.delta.requestedChanges = ["把商品改成红色，其他保持不变"];
+        fixture.input.planningInput.userRequest = "把商品改成红色，其他保持不变";
+        const normalized = normalizePlannedEdit(fixture.plan, fixture.input, fixture.analysis, "planner");
+        expect(normalized).toMatchObject({ planVersion: "ecommerce-edit.v7", strategy: "full_image", protection: { scope: "global", preserveOutsideMask: false, protectedObjectIds: [] } });
+        expect(normalized?.delta.requestedChanges).toContain("把商品改成红色，其他保持不变");
+    });
     it.each(["openai", "gemini"].flatMap((apiFormat) => ["operation", "strategy"].map((field) => ({ apiFormat: apiFormat as "openai" | "gemini", field: field as "operation" | "strategy" }))))(
         "repairs an unexecutable product-only $field through the existing $apiFormat budget",
         async ({ apiFormat, field }) => {
             const fixture = projectionFixture("style-only");
-            fixture.plan.strategy = "strict_product";
+            fixture.plan.strategy = "full_image";
             fixture.input.planningInput.userRequest = "参考图片1的风格，修改图片2";
             fixture.plan.delta.requestedChanges = ["Match the authorized style without adding a room"];
             delete fixture.plan.photography;
@@ -32,9 +42,10 @@ describe("active ecommerce edit planning TCP contract", () => {
                 expect(JSON.stringify(capture.requests[2])).toContain(field);
                 const first = capture.requests[0] as { tools: Array<{ function?: { parameters: unknown }; functionDeclarations?: Array<{ parameters: unknown }> }> };
                 const schema = apiFormat === "gemini" ? first.tools[0].functionDeclarations![0].parameters : first.tools[0].function!.parameters;
-                expect(schema).toMatchObject({ properties: { operation: { enum: ["product_to_scene"] }, strategy: { enum: ["strict_product"] } } });
-                expect(capture.result.plan).toMatchObject({ operation: "product_to_scene", strategy: "strict_product", source: fixture.plan.source, baseline: { sceneFacts: null }, referenceUses: fixture.plan.referenceUses });
+                expect(schema).toMatchObject({ properties: { operation: { enum: ["product_to_scene"] }, strategy: { enum: ["full_image"] } } });
+                expect(capture.result.plan).toMatchObject({ operation: "product_to_scene", strategy: "full_image", source: fixture.plan.source, baseline: { sceneFacts: null }, referenceUses: fixture.plan.referenceUses });
                 expect(capture.result.plan.delta.requestedChanges).toEqual([
+                    fixture.input.planningInput.userRequest,
                     ...fixture.plan.delta.requestedChanges,
                     ...fixture.analysis.references.flatMap((reference) =>
                         "cues" in reference ? reference.cues.filter((cue) => fixture.input.referenceDecision!.appliedCues.some((use) => use.assetId === reference.assetId && use.cueIds.includes(cue.id))).map((cue) => cue.description) : [],
@@ -53,10 +64,10 @@ describe("active ecommerce edit planning TCP contract", () => {
     );
 
     const cases = ["openai", "gemini"].flatMap((apiFormat) => ["cue", "version", "uses", "operation", "strategy"].map((failure) => ({ apiFormat: apiFormat as "openai" | "gemini", failure })));
-    it.each(cases)("uses the actual v6 contract and repairs $failure through $apiFormat", async ({ apiFormat, failure }) => {
+    it.each(cases)("uses the actual v7 contract and repairs $failure through $apiFormat", async ({ apiFormat, failure }) => {
         const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
         const plan: EcommerceEditPlan = {
-            planVersion: "ecommerce-edit.v6",
+            planVersion: "ecommerce-edit.v7",
             operation: "scene_edit",
             source: { productAnchorId: null, currentSceneBaselineId: "target", sceneReferenceIds: ["style"] },
             baseline: { productFacts: null, sceneFacts: null },
@@ -66,7 +77,7 @@ describe("active ecommerce edit planning TCP contract", () => {
             ],
             delta: { requestedChanges: ["调整灯光"], targetObjects: [], targetRegions: [] },
             preserve: { productCore: [], sceneElements: [] },
-            strategy: "integrated_scene",
+            strategy: "full_image",
             modelRoles: { visionAnalysis: "vision", editPlanning: "planner", generation: "image", qualityCheck: "qa" },
             continuity: { branchId: "branch", parentResultId: null },
             validation: { requiredChecks: ["scene_intent"] },
@@ -149,15 +160,15 @@ describe("active ecommerce edit planning TCP contract", () => {
                 snapshot: { logicalRole: "edit_planning", capability: "text", logicalModelId: "planner", channelId: apiFormat, upstreamModel: "fixture-model", apiFormat },
             };
             const result = await planEcommerceEdit(input, analysis, [candidate]);
-            expect(result.plan).toMatchObject({ planVersion: "ecommerce-edit.v6", baseline: { sceneFacts: null }, referenceUses: plan.referenceUses });
+            expect(result.plan).toMatchObject({ planVersion: "ecommerce-edit.v7", baseline: { sceneFacts: null }, referenceUses: plan.referenceUses });
             expect(requests).toHaveLength(3);
             const first = requests[0].body as { tools: Array<{ function?: { parameters: unknown }; functionDeclarations?: Array<{ parameters: unknown }> }> };
             const schema = apiFormat === "gemini" ? first.tools[0].functionDeclarations![0].parameters : first.tools[0].function!.parameters;
             expect(schema).toMatchObject({
                 properties: {
-                    planVersion: { enum: ["ecommerce-edit.v6"] },
+                    planVersion: { enum: ["ecommerce-edit.v7"] },
                     operation: { enum: ["scene_edit"] },
-                    strategy: { enum: ["integrated_scene"] },
+                    strategy: { enum: ["full_image"] },
                     referenceUses: { type: "array" },
                     baseline: { properties: { sceneFacts: { anyOf: [expect.anything(), { type: "null" }] } } },
                 },
@@ -170,7 +181,7 @@ describe("active ecommerce edit planning TCP contract", () => {
             expect(warnings).toHaveBeenCalledTimes(2);
             for (const [message, detail] of warnings.mock.calls) {
                 expect(message).toBe("[ecommerce-edit-planner] planner contract rejected");
-                expect(JSON.parse(String(detail))).toMatchObject({ error: expect.stringContaining(failure === "cue" ? "可靠视觉线索" : failure === "version" ? "v6 版本契约" : failure === "uses" ? "referenceUses" : "仅支持") });
+                expect(JSON.parse(String(detail))).toMatchObject({ error: expect.stringContaining(failure === "cue" ? "可靠视觉线索" : failure === "version" ? "v7 版本契约" : failure === "uses" ? "referenceUses" : "仅支持") });
             }
             expect(errors).toHaveBeenCalledTimes(2);
             for (const [message, detail] of errors.mock.calls) {
@@ -254,7 +265,7 @@ describe("authorized ecommerce planner input projection", () => {
             const selectedDescriptions = fixture.analysis.references.flatMap((reference) =>
                 reference.cues.filter((cue) => decision.appliedCues.some((item) => item.assetId === reference.assetId && item.cueIds.includes(cue.id))).map((cue) => cue.description),
             );
-            expect.soft(capture.result.plan.delta.requestedChanges).toEqual([...fixture.plan.delta.requestedChanges, ...selectedDescriptions]);
+            expect.soft(capture.result.plan.delta.requestedChanges).toEqual([fixture.input.planningInput.userRequest, ...fixture.plan.delta.requestedChanges, ...selectedDescriptions]);
             expect(capture.result.plan.referenceUses).toEqual(fixture.plan.referenceUses);
             expect(capture.result.plan.source).toEqual(fixture.plan.source);
             expect(capture.result.plan.continuity).toEqual(fixture.plan.continuity);
@@ -278,7 +289,7 @@ describe("authorized ecommerce planner input projection", () => {
                 const requiresMask = fixture.plan.strategy === "strict_product" || (fixture.plan.operation === "scene_edit" && capture.result.plan.protection?.scope === "local");
                 if (requiresMask && !profile.supportsIndependentMask) expect(output).toMatchObject({ state: "needs_review", reason: "independent_mask_unsupported" });
                 else expect(output.state).toBe("ready");
-                expect(output.compilerVersion).toMatch(/\.v4$/);
+                expect(output.compilerVersion).toMatch(/\.v5$/);
                 expect(output.referenceMapping).toEqual(fixture.plan.referenceUses!.map((use, providerIndex) => ({ assetId: use.assetId, userAlias: use.alias, providerIndex, purposes: use.purposes })));
                 expect(output.prompt).toContain(fixture.plan.delta.requestedChanges[0]);
                 for (const description of selectedDescriptions) expect(output.prompt).toContain(description);
@@ -306,6 +317,7 @@ describe("authorized ecommerce planner input projection", () => {
         };
         const legacyPlan = structuredClone(fixture.plan);
         legacyPlan.planVersion = "ecommerce-edit.v5";
+        legacyPlan.strategy = "strict_product";
         legacyPlan.baseline.sceneFacts = legacyAnalysis.references.find((reference) => reference.assetId === "aux")!.sceneFacts;
         delete legacyPlan.referenceUses;
         const legacyFixture = { ...fixture, analysis: legacyAnalysis, input: { ...fixture.input, referenceDecision: undefined }, plan: legacyPlan };
@@ -433,9 +445,9 @@ function projectionFixture(scenario: ProjectionScenario) {
     const anchor = analysis.references.find((item) => item.assetId === sources.productAnchorId);
     const scene = analysis.references.find((item) => item.assetId === sources.currentSceneBaselineId);
     const plan: EcommerceEditPlan = {
-        planVersion: "ecommerce-edit.v6",
+        planVersion: "ecommerce-edit.v7",
         operation: inherited ? "local_edit" : hasScene ? "scene_edit" : "product_to_scene",
-        strategy: sources.productAnchorId ? "strict_product" : "integrated_scene",
+        strategy: "full_image",
         source: { productAnchorId: sources.productAnchorId, currentSceneBaselineId: sources.currentSceneBaselineId, sceneReferenceIds: [...sources.sceneReferenceIds] },
         baseline: { productFacts: anchor?.productFacts || null, sceneFacts: scene?.sceneFacts || null },
         referenceUses: referenceUsesFromEcommerceDecision({ decision, sourceOrder }),

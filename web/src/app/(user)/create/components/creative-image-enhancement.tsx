@@ -24,6 +24,7 @@ export function CreativeImageEnhancement({
 }) {
     const skipLabel = imageEnhancementSkipLabel(original.metadata.enhancementSkip);
     const enhancementId = !skipLabel && typeof original.metadata.enhancementId === "string" ? original.metadata.enhancementId.trim() : "";
+    const unenhancedResult = !enhancementId && !skipLabel && !enhanced && Boolean(original.sourceRunId && typeof original.metadata.resultId === "string" && original.metadata.resultId.trim());
     const [task, setTask] = useState<PublicImageEnhancement>();
     const [check, setCheck] = useState(0);
     const [reading, setReading] = useState(false);
@@ -115,7 +116,7 @@ export function CreativeImageEnhancement({
         }
     };
 
-    if (!enhancementId && !skipLabel && !enhanced) return null;
+    if (!enhancementId && !skipLabel && !enhanced && !unenhancedResult) return null;
     const activeAsset = activeAssetId === original.id ? original : enhanced?.id === activeAssetId ? enhanced : undefined;
     const currentDimensions =
         activeAsset && Number.isInteger(activeAsset.width) && Number(activeAsset.width) > 0 && Number.isInteger(activeAsset.height) && Number(activeAsset.height) > 0
@@ -128,7 +129,7 @@ export function CreativeImageEnhancement({
           ? "增强操作未完成，请检查增强状态，原图仍可用"
           : refreshError
             ? "增强图片暂时不可用，原图仍可用"
-            : skipLabel || imageEnhancementStatus(task, Boolean(enhanced), refreshingAssets, localEdit);
+            : skipLabel || (unenhancedResult ? "本轮未生成AI增强，原图仍可用" : imageEnhancementStatus(task, Boolean(enhanced), refreshingAssets, localEdit));
     const buttonClass =
         "inline-flex h-7 items-center justify-center gap-1 rounded-md border border-[#e4e7ec] bg-white px-2 text-[11px] font-medium text-[#667085] transition hover:border-[#cfd4dc] hover:bg-[#f8f9fb] hover:text-[#344054] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-45 dark:border-[#343a43] dark:bg-[#181b20] dark:text-[#aab2bc] dark:hover:border-[#4a525c] dark:hover:bg-[#22262c] dark:hover:text-white";
     return (

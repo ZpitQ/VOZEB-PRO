@@ -131,11 +131,12 @@ export async function mediaSnapshot(root, taskId) {
     const registrations = registry.assets.filter((asset) => asset.taskId === taskId).sort((a, b) => a.storageKey.localeCompare(b.storageKey));
     return Promise.all(
         registrations.map(async (registration) => {
-            assert.equal(registration.scope, "generation");
-            assert.equal(registration.storageClass, "permanent");
+            assert.ok(["generation", "reference"].includes(registration.scope));
+            assert.ok(["permanent", "temporary"].includes(registration.storageClass));
             assert.notEqual(registration.storageProvider, "object");
-            const file = path.resolve(root, "generation-assets", registration.storageKey);
-            assert.ok(within(path.join(root, "generation-assets"), file));
+            const mediaRoot = path.join(root, registration.scope === "reference" ? "reference-assets" : "generation-assets");
+            const file = path.resolve(mediaRoot, registration.storageKey);
+            assert.ok(within(mediaRoot, file));
             const [bytes, metadata] = await Promise.all([readFile(file), stat(file)]);
             assert.equal(bytes.length, registration.bytes);
             return { registration, sha256: sha256(bytes), size: metadata.size, mtimeMs: metadata.mtimeMs, birthtimeMs: metadata.birthtimeMs };
@@ -177,7 +178,7 @@ export function upstreamCounts(requests) {
     return { counts, calls };
 }
 
-export async function createBusinessFaultFixture({ root, caseId, imagePath, model = fixtureModel, owner = caseId, controlledExecutor = false, sceneOutputs = false, native4xDelivery = false, protectedBaselineInput = false }) {
+export async function createBusinessFaultFixture({ root, caseId, imagePath, model = fixtureModel, owner = caseId, controlledExecutor = false, sceneOutputs = false, native4xDelivery = false }) {
     const directory = path.join(controlDirectory(root), caseId);
     await mkdir(directory, { recursive: false });
     assert.equal(typeof imagePath, "string", "Supply the staged native PNG path");
@@ -207,7 +208,7 @@ export async function createBusinessFaultFixture({ root, caseId, imagePath, mode
     const expected = artifact(ai, 5016, 5016);
     const workerTarget = native4xDelivery ? { width: 5016, height: 5016, format: "png" } : { width: 4096, height: 4096, format: "png" };
     const budgets = {
-        input: { maxBytes: protectedBaselineInput ? Math.max(native.length, delivery.length, ai.length) : native.length, maxPixels: 1254 ** 2 },
+        input: { maxBytes: native.length, maxPixels: 1254 ** 2 },
         ai: { maxBytes: ai.length, maxPixels: 5016 ** 2 },
         delivery: { maxBytes: Math.max(delivery.length, native4xDelivery ? ai.length : 0), maxPixels: workerTarget.width * workerTarget.height },
     };
@@ -416,16 +417,8 @@ export async function createBusinessFaultFixture({ root, caseId, imagePath, mode
                 const submitted = JSON.parse(String(form.get("plan")));
                 const input = Buffer.from(await form.get("image").arrayBuffer());
                 const inputSha256 = sha256(input);
-                let inputSize = { width: 1254, height: 1254 };
-                if (protectedBaselineInput) {
-                    const image = sharp(input, { failOn: "warning", limitInputPixels: budgets.input.maxPixels });
-                    const [metadata, pixels, statistics] = await Promise.all([image.metadata(), image.clone().raw().toBuffer({ resolveWithObject: true }), image.clone().stats()]);
-                    assert.equal(metadata.format, "png");
-                    assert.equal(statistics.isOpaque, true);
-                    inputSize = { width: pixels.info.width, height: pixels.info.height };
-                    assert.deepEqual(inputSize, { width: 1254, height: 1254 });
-                    assert.ok(input.length <= budgets.input.maxBytes);
-                } else assert.equal(inputSha256, sha256(native));
+                const inputSize = { width: 1254, height: 1254 };
+                assert.equal(inputSha256, sha256(native));
                 assert.equal(submitted.sourceSha256, inputSha256);
                 assert.deepEqual(submitted.target, workerTarget);
                 assert.equal(submitted.modelId, model.id);
@@ -462,18 +455,10 @@ export async function createBusinessFaultFixture({ root, caseId, imagePath, mode
                         executionCount: controlledExecutor ? 0 : 1,
                         retained: true,
                     };
-                    if (protectedBaselineInput) {
-                        const file = path.join(directory, `${job.jobId}-input.png`);
-                        await writeFile(file, input, { flag: "wx" });
-                        job.input = { file, ...inputSize, format: "png", byteLength: input.length, sha256: inputSha256 };
-                        job.engineInput.sha256 = inputSha256;
-                    }
                     ledger.jobs.push(job);
                 }
                 assert.equal(job.source.sha256, inputSha256, "An idempotent replay must retain its original input");
-                if (protectedBaselineInput) assert.equal((await readFile(job.input.file)).equals(input), true);
                 Object.assign(call, { jobId: job.jobId, key, modelId: model.id, strategyFingerprint: submitted.expectedStrategyFingerprint });
-                if (protectedBaselineInput) Object.assign(call, { input: job.input });
                 await persist();
                 if (controlledExecutor) await launchExecutor(job);
                 if (beforeSubmitReply) {

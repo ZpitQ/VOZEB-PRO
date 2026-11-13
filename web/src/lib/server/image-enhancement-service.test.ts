@@ -40,7 +40,7 @@ import type { EcommerceEnhancementDelivery } from "./image-enhancement-delivery"
 let compositeProductEnhancement: (typeof import("./image-enhancement-product-protection"))["compositeProductEnhancement"];
 import type { ProductEnhancementProtection } from "./image-enhancement-product-protection";
 import type { EcommerceResultTechnicalCheck } from "./ecommerce-quality-check";
-let buildSceneEditProtection: (typeof import("./ecommerce-product-regions"))["buildSceneEditProtection"];
+let buildSceneEditProtection: (typeof import("./ecommerce-protection.test-fixtures"))["buildSceneEditProtection"];
 let compositeSceneEdit: (typeof import("./ecommerce-product-regions"))["compositeSceneEdit"];
 let createCreativeConversation: (typeof import("./creative-runtime-store"))["createCreativeConversation"];
 let getCreativeAssetsByIds: (typeof import("./creative-runtime-store"))["getCreativeAssetsByIds"];
@@ -206,7 +206,8 @@ for (const provider of ["file", "postgres"] as const) {
             ({ publicImageEnhancement } = await import("./image-enhancement-public"));
             ({ planImageTaskEnhancement } = await import("./image-enhancement-enqueue"));
             ({ compositeProductEnhancement } = await import("./image-enhancement-product-protection"));
-            ({ buildSceneEditProtection, compositeSceneEdit } = await import("./ecommerce-product-regions"));
+            ({ buildSceneEditProtection } = await import("./ecommerce-protection.test-fixtures"));
+            ({ compositeSceneEdit } = await import("./ecommerce-product-regions"));
             ({ createCreativeConversation, getCreativeAssetsByIds, listCreativeAssets, registerCreativeAssets } = await import("./creative-runtime-store"));
             ({ initializePostgresSchema, postgresQuery } = await import("./database/postgres"));
             ({ prepareImageTaskResults } = await import("./image-task-result-service"));

@@ -19,7 +19,9 @@ export type EcommerceCompiledImageRequest = {
         | "ecommerce-openai-image-2.5.v3"
         | "ecommerce-nano-banana-2.v3"
         | "ecommerce-openai-image-2.5.v4"
-        | "ecommerce-nano-banana-2.v4";
+        | "ecommerce-nano-banana-2.v4"
+        | "ecommerce-openai-image-2.5.v5"
+        | "ecommerce-nano-banana-2.v5";
     providerProfileId: EcommerceImageProviderProfile["profileId"];
     prompt: string;
     referenceRoles: Array<{ assetId: string; role: "product" | "scene" }>;
@@ -33,6 +35,10 @@ export type EcommerceCompiledImageRequest = {
     parameters: { variant: EcommerceImageProviderProfile["profileId"]; size?: string };
     modelSnapshot: EcommerceRoleRouteSnapshot;
 };
+
+export function isFullImageEcommerceExecution(execution: EcommerceCompiledImageRequest | undefined) {
+    return execution?.compilerVersion === "ecommerce-openai-image-2.5.v5" || execution?.compilerVersion === "ecommerce-nano-banana-2.v5";
+}
 
 export function resolveEcommerceImageProviderProfile(snapshot: EcommerceRoleRouteSnapshot): EcommerceImageProviderProfile | null {
     if (snapshot.logicalRole !== "image_generation" || snapshot.capability !== "image") return null;
@@ -70,30 +76,40 @@ export function compileEcommerceImageCandidates(plan: EcommerceEditPlan, candida
 
 export function compileEcommerceImageRequest(plan: EcommerceEditPlan, profile: EcommerceImageProviderProfile): EcommerceCompiledImageRequest {
     const referenceRoles = plan.operation === "local_edit" ? localEditReferences(plan) : plan.operation === "scene_edit" ? sceneEditReferences(plan) : productSceneReferences(plan);
-    const referenceMapping = plan.planVersion === "ecommerce-edit.v6" ? mapReferenceUses(referenceRoles, plan.referenceUses || []) : undefined;
+    const referenceMapping = ["ecommerce-edit.v6", "ecommerce-edit.v7"].includes(plan.planVersion) ? mapReferenceUses(referenceRoles, plan.referenceUses || []) : undefined;
     const compilerVersion: EcommerceCompiledImageRequest["compilerVersion"] =
-        plan.planVersion === "ecommerce-edit.v6"
+        plan.planVersion === "ecommerce-edit.v7"
             ? profile.compilerFamily === "openai-image-2.5"
-                ? "ecommerce-openai-image-2.5.v4"
-                : "ecommerce-nano-banana-2.v4"
-            : profile.compilerFamily === "openai-image-2.5"
-              ? plan.photography
-                  ? "ecommerce-openai-image-2.5.v3"
+                ? "ecommerce-openai-image-2.5.v5"
+                : "ecommerce-nano-banana-2.v5"
+            : ["ecommerce-edit.v6", "ecommerce-edit.v7"].includes(plan.planVersion)
+              ? profile.compilerFamily === "openai-image-2.5"
+                  ? "ecommerce-openai-image-2.5.v4"
+                  : "ecommerce-nano-banana-2.v4"
+              : profile.compilerFamily === "openai-image-2.5"
+                ? plan.photography
+                    ? "ecommerce-openai-image-2.5.v3"
+                    : plan.protection
+                      ? "ecommerce-openai-image-2.5.v2"
+                      : "ecommerce-openai-image-2.5.v1"
+                : plan.photography
+                  ? "ecommerce-nano-banana-2.v3"
                   : plan.protection
-                    ? "ecommerce-openai-image-2.5.v2"
-                    : "ecommerce-openai-image-2.5.v1"
-              : plan.photography
-                ? "ecommerce-nano-banana-2.v3"
-                : plan.protection
-                  ? "ecommerce-nano-banana-2.v2"
-                  : "ecommerce-nano-banana-2.v1";
+                    ? "ecommerce-nano-banana-2.v2"
+                    : "ecommerce-nano-banana-2.v1";
     const canvas = plan.canvas ? { ...plan.canvas, size: { ...plan.canvas.size } } : undefined;
     const prompt = [
         profile.compilerFamily === "openai-image-2.5" ? compileOpenAiPrompt(plan, referenceRoles) : compileNanoBananaPrompt(plan, referenceRoles),
         ...compilePhotography(plan),
         ...(plan.selectedSkills?.length ? [`执行本轮明确选择的 Skill，且不得突破上述参考用途和保护约束：\n${plan.selectedSkills.map((skill) => skill.instructions).join("\n\n")}`] : []),
         ...(plan.preserve.sourceFraming === "visible_extent" ? ["取景保护：保留原照片已可见的商品范围、拍摄角度与边缘截断，不得补全画面外的商品结构，不得新增或删除可见部件，不得拉伸或再次裁切商品。"] : []),
-        ...(canvas ? [`画布硬约束：${ecommerceCanvasSize(canvas)}（${canvas.mode}）；${canvas.allowReframe ? "只按此尺寸或比例执行" : "保持原机位和构图，不得裁切、补边或改变画幅"}。尺寸以此约束为准。`] : []),
+        ...(canvas
+            ? [
+                  plan.strategy === "full_image"
+                      ? `画布硬约束：${ecommerceCanvasSize(canvas)}（${canvas.mode}）；尺寸以此约束为准，按本轮要求调整视角与内容。`
+                      : `画布硬约束：${ecommerceCanvasSize(canvas)}（${canvas.mode}）；${canvas.allowReframe ? "只按此尺寸或比例执行" : "保持原机位和构图，不得裁切、补边或改变画幅"}。尺寸以此约束为准。`,
+              ]
+            : []),
     ].join("\n");
     const common = {
         compilerVersion,
@@ -167,7 +183,8 @@ function uniqueReferences(references: Array<{ assetId: string; role: "product" |
 }
 
 function compileOpenAiPrompt(plan: EcommerceEditPlan, references: Array<{ assetId: string; role: "product" | "scene" }>) {
-    const usage = plan.planVersion === "ecommerce-edit.v6" && plan.referenceUses ? new Map(plan.referenceUses.map((use) => [use.assetId, use])) : undefined;
+    if (plan.strategy === "full_image") return compileFullImagePrompt(plan, references);
+    const usage = ["ecommerce-edit.v6", "ecommerce-edit.v7"].includes(plan.planVersion) && plan.referenceUses ? new Map(plan.referenceUses.map((use) => [use.assetId, use])) : undefined;
     return [
         `执行 ${plan.operation}，策略 ${plan.strategy}。`,
         `参考图角色：${references.map((reference, index) => `${reference.assetId}=${reference.role}${usage?.get(reference.assetId)?.alias ? `（${usage.get(reference.assetId)!.alias}，providerIndex=${index}）` : `（providerIndex=${index}）`}`).join("；")}。`,
@@ -183,7 +200,7 @@ function compileOpenAiPrompt(plan: EcommerceEditPlan, references: Array<{ assetI
         plan.operation === "local_edit"
             ? "只重绘独立蒙版允许的目标区域；商品核心、融合边缘和其他场景像素保持不变。"
             : plan.operation === "scene_edit"
-              ? plan.planVersion === "ecommerce-edit.v6"
+              ? ["ecommerce-edit.v6", "ecommerce-edit.v7"].includes(plan.planVersion)
                   ? plan.protection?.scope === "local"
                       ? "以场景基线为编辑目标，并按绑定用途使用辅助参考；只执行独立蒙版允许的变化，选区外像素按原坐标从基线恢复。"
                       : "以场景基线为编辑目标，并按绑定用途使用辅助参考；不承诺选区外像素保持不变。"
@@ -197,7 +214,8 @@ function compileOpenAiPrompt(plan: EcommerceEditPlan, references: Array<{ assetI
 }
 
 function compileNanoBananaPrompt(plan: EcommerceEditPlan, references: Array<{ assetId: string; role: "product" | "scene" }>) {
-    const usage = plan.planVersion === "ecommerce-edit.v6" && plan.referenceUses ? new Map(plan.referenceUses.map((use) => [use.assetId, use])) : undefined;
+    if (plan.strategy === "full_image") return compileFullImagePrompt(plan, references);
+    const usage = ["ecommerce-edit.v6", "ecommerce-edit.v7"].includes(plan.planVersion) && plan.referenceUses ? new Map(plan.referenceUses.map((use) => [use.assetId, use])) : undefined;
     return [
         `任务：${plan.operation}；策略：${plan.strategy}。`,
         ...references.map(
@@ -208,6 +226,22 @@ function compileNanoBananaPrompt(plan: EcommerceEditPlan, references: Array<{ as
         `场景事实：${sceneFacts(plan)}。`,
         `只执行本轮变化：${changes(plan)}。`,
         `禁止改变：${[...plan.preserve.productCore, ...plan.preserve.sceneElements].join("、")}。`,
+    ].join("\n");
+}
+
+function compileFullImagePrompt(plan: EcommerceEditPlan, references: EcommerceCompiledImageRequest["referenceRoles"]) {
+    const uses = new Map(plan.referenceUses!.map((use) => [use.assetId, use]));
+    return [
+        "根据完整参考图和本轮文字要求生成一张完整图片。第一张参考是本轮修改目标；保留未要求改变的内容与商品身份，不执行像素拼接。",
+        ...references.map((reference, index) => {
+            const use = uses.get(reference.assetId)!;
+            return `参考图${index + 1}：${reference.assetId}，角色=${reference.role}，用户编号=${use.alias || "历史参考"}，用途=${use.purposes.join("/")}，线索=${use.usedCueIds.join(",")}。`;
+        }),
+        ...(plan.baseline.productFacts ? [`商品事实：${productFacts(plan)}。`] : []),
+        `场景事实：${sceneFacts(plan)}。`,
+        `本轮要求：${changes(plan)}。`,
+        `其余保留目标：${[...plan.preserve.productCore, ...plan.preserve.sceneElements].join("、")}。`,
+        "修改要求优先于参考图原有的视角、颜色和构图；仅改变用户明确要求的属性，辅助参考只提供绑定用途和已选线索。",
     ].join("\n");
 }
 

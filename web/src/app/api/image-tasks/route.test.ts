@@ -1,7 +1,8 @@
+import { buildSceneEditProtection } from "@/lib/server/ecommerce-protection.test-fixtures";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import sharp from "sharp";
-import { buildSceneEditProtection } from "@/lib/server/ecommerce-product-regions";
+
 import { EcommerceReferenceDispatchConflict } from "@/lib/server/ecommerce-reference-dispatch";
 
 const mocks = vi.hoisted(() => ({

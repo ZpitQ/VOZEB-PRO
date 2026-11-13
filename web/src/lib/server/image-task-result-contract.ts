@@ -1,3 +1,4 @@
+import { isFullImageEcommerceExecution } from "./ecommerce-image-compiler";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { canvasProviderDimensions, parseImageDimensions, resolveResultSize } from "@/app/api/image-tasks/image-task-size";
@@ -117,8 +118,11 @@ export function isNativeGlobalSceneImageTaskResult(image: ImageTask) {
         execution.protection?.scope !== "global" ||
         execution.mask ||
         !execution.canvas ||
+        (isFullImageEcommerceExecution(execution) && image.references.length !== execution.referenceRoles.length) ||
         !image.references.length ||
-        !image.references.every((reference) => reference.ecommerceRole === "scene")
+        !image.references.every((reference, index) =>
+            isFullImageEcommerceExecution(execution) ? reference.id === execution.referenceRoles[index]?.assetId && reference.ecommerceRole === execution.referenceRoles[index]?.role : reference.ecommerceRole === "scene",
+        )
     )
         return false;
     if (resolveResultSize(image.config.quality, "1:1") !== resolveResultSize("4k", "1:1")) return !image.enhancementDelivery;
@@ -127,7 +131,7 @@ export function isNativeGlobalSceneImageTaskResult(image: ImageTask) {
         !execution.protection.preserveOutsideMask &&
         Array.isArray(execution.protection.protectedObjectIds) &&
         execution.protection.protectedObjectIds.length === 0 &&
-        !execution.referenceRoles.some((reference) => reference.role === "product") &&
+        (isFullImageEcommerceExecution(execution) || !execution.referenceRoles.some((reference) => reference.role === "product")) &&
         isDeepStrictEqual(image.enhancementDelivery, { version: "ecommerce-delivery.v2", scope: "full_image", canvas: execution.canvas })
     );
 }

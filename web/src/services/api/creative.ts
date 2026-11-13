@@ -47,7 +47,7 @@ export type CreativeAgentRun = {
         >;
         message?: string;
     };
-    ecommerceSceneSelection?: { action: "confirm_scene_selection"; baselineAssetId: string; url: string; width: number; height: number };
+    ecommerceSceneSelection?: { action: "regenerate_full_image" };
     ecommerceReferenceReview?: CreativeReferenceReview | null;
     canCheckStatus?: boolean;
     imageProcessingRecovery?: { reason: "resource_failure" | "input_rejected"; canResume: boolean; message: string };
@@ -75,7 +75,6 @@ export type CreativeAgentRun = {
     cancellation?: { pendingCount: number };
 };
 
-export type CreativeSceneSelection = { baselineAssetId: string; region: { x: number; y: number; width: number; height: number } };
 export type CreativeAgentRunSnapshot = Pick<CreativeAgentRun, "id" | "status"> &
     Partial<Pick<CreativeAgentRun, "tasks" | "assetIds" | "ecommerceQualityStatus" | "ecommerceQualityReview" | "ecommerceSceneSelection" | "ecommerceReferenceReview" | "canCheckStatus" | "imageProcessingRecovery" | "cancellation" | "updatedAt">>;
 
@@ -124,12 +123,10 @@ export function createCreativeAgentRun(input: CreativeRunRequest) {
     return request<{ run: CreativeAgentRun; conversation?: CreativeConversation; created: boolean }>("/api/agent/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
 }
 
-export function controlCreativeAgentRun(runId: string, action: "cancel" | "pause" | "resume" | "retry", expectedConversationId?: string, sceneSelection?: CreativeSceneSelection, referenceRecovery?: CreativeReferenceRecovery) {
+export function controlCreativeAgentRun(runId: string, action: "cancel" | "pause" | "resume" | "retry", expectedConversationId?: string, referenceRecovery?: CreativeReferenceRecovery) {
     return request<{ run: CreativeAgentRun }>(`/api/agent/runs/${encodeURIComponent(runId)}/${action}`, {
         method: "POST",
-        ...(expectedConversationId
-            ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ conversationId: expectedConversationId, ...(sceneSelection ? { sceneSelection } : {}), ...(referenceRecovery ? { referenceRecovery } : {}) }) }
-            : {}),
+        ...(expectedConversationId ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ conversationId: expectedConversationId, ...(referenceRecovery ? { referenceRecovery } : {}) }) } : {}),
     });
 }
 

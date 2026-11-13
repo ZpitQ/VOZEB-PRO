@@ -1,3 +1,4 @@
+import { isFullImageEcommerceExecution } from "./ecommerce-image-compiler";
 import type { EcommerceCanvasConstraint } from "./ecommerce-edit-plan";
 import { resolveResultSize } from "@/app/api/image-tasks/image-task-size";
 import { createHash } from "node:crypto";
@@ -115,8 +116,7 @@ export async function freezeEcommerceEnhancementDelivery(
         protection.preserveOutsideMask ||
         !Array.isArray(protection.protectedObjectIds) ||
         protection.protectedObjectIds.length ||
-        execution.referenceRoles.some((item) => item.role === "product") ||
-        input.references.some((item) => item.ecommerceRole === "product")
+        (!isFullImageEcommerceExecution(execution) && (execution.referenceRoles.some((item) => item.role === "product") || input.references.some((item) => item.ecommerceRole === "product")))
     )
         return;
     return { version: "ecommerce-delivery.v2", scope: "full_image", canvas };
