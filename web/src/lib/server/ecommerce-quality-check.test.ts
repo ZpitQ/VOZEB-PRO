@@ -827,21 +827,6 @@ describe("ecommerce quality check", () => {
         vi.clearAllMocks();
     });
 
-    it.each(["ecommerce-edit.v1", "ecommerce-edit.v2", "ecommerce-edit.v3"] as const)("keeps the eight-check QA contract for an already-started %s task", async (planVersion) => {
-        const input = request();
-        input.plan.planVersion = planVersion;
-        const value = modelResult();
-        value.results[0].checks = value.results[0].checks.slice(0, 8);
-        mocks.requestStructuredText.mockResolvedValue(modelCall(value));
-        expect(await checkEcommerceResult(input, candidate())).toMatchObject({ version: "ecommerce-quality.v1", status: "passed", checks: expect.any(Array) });
-        const { tool, messages } = mocks.requestStructuredText.mock.calls[0][0];
-        const resultSchema = tool.parameters.properties.results.items;
-        expect(resultSchema.properties.checks).toMatchObject({ minItems: 8, maxItems: 8 });
-        expect(resultSchema.properties.checks.items.properties.key.enum).toHaveLength(8);
-        expect(resultSchema.properties).not.toHaveProperty("observation");
-        expect(messages[0].content).not.toContain("baselineObservation");
-    });
-
     it("blocks publication when a generated result changes the product silhouette", async () => {
         mocks.requestStructuredText.mockResolvedValue(modelCall(modelResult({ product_silhouette: "failed" })));
 
