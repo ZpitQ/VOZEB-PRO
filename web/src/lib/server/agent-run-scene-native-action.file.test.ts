@@ -1060,8 +1060,11 @@ describe("archived scene receipts recover through native mask and image stages",
         const actualPost = imageRoute.POST;
         const posted = Promise.withResolvers<string>();
         const released = Promise.withResolvers<void>();
-        const post = vi.spyOn(imageRoute, "POST").mockImplementationOnce(async (request) => {
+        const post = vi.spyOn(imageRoute, "POST").mockImplementation(async (request) => {
+            const body: CreateImageTaskBody = await request.clone().json();
             const response = await actualPost(request);
+            // Copies are posted concurrently; hold copy 1 by its stable request identity.
+            if (!body.context?.clientRequestId?.endsWith(":1:1")) return response;
             const envelope: { task?: { id?: string } } = await response.clone().json();
             assert(envelope.task?.id);
             posted.resolve(envelope.task.id);
