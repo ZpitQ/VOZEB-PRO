@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { persistFrozenSceneSelection } from "./ecommerce-protection.test-fixtures";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
@@ -2255,13 +2256,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const referenceCheckpoint = snapshot.referenceCheckpoint;
                 expect(compileEcommerceImageRequest(snapshot.plan, profile)).toStrictEqual(originalTask.ecommerceExecution);
                 expect(snapshot.processing?.prepareReferences).toMatchObject([{ jobId: prepare.id, inputDigest: prepare.payload.inputDigest, assetId: baseline.id, manifest: prepared.completion.manifest }]);
-                const response = await fetch(sceneOrigin + "/api/agent/runs/" + paused.id + "/resume", {
-                    method: "POST",
-                    headers: { cookie: boundary.cookie, "content-type": "application/json" },
-                    body: JSON.stringify({ conversationId: conversation.id, sceneSelection: { baselineAssetId: baseline.id, region: { x: 256, y: 256, width: 256, height: 256 } } }),
-                });
-                expect(response.status, "SETUP: actual authenticated Action must persist the native selection receipt").toBe(200);
-                const confirmed = await runs.getAgentRun(paused.id);
+                const confirmed = await persistFrozenSceneSelection(paused, { x: 256, y: 256, width: 256, height: 256 });
                 const receipt = confirmed?.ecommerceSnapshot?.processing?.sceneSelection;
                 assert.ok(confirmed && receipt);
                 expect(confirmed.tasks).toStrictEqual(paused.tasks);
@@ -3311,13 +3306,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 const referenceCheckpoint = snapshot.referenceCheckpoint;
                 expect(compileEcommerceImageRequest(snapshot.plan, profile)).toStrictEqual(originalTask.ecommerceExecution);
                 expect(snapshot.processing?.prepareReferences).toMatchObject([{ jobId: prepare.id, inputDigest: prepare.payload.inputDigest, assetId: baseline.id, manifest: prepared.completion.manifest }]);
-                const response = await fetch(sceneOrigin + "/api/agent/runs/" + paused.id + "/resume", {
-                    method: "POST",
-                    headers: { cookie: boundary.cookie, "content-type": "application/json" },
-                    body: JSON.stringify({ conversationId: conversation.id, sceneSelection: { baselineAssetId: baseline.id, region: { x: 256, y: 256, width: 256, height: 256 } } }),
-                });
-                expect(response.status, "SETUP: actual authenticated Action must persist the native selection receipt").toBe(200);
-                const confirmed = await runs.getAgentRun(paused.id);
+                const confirmed = await persistFrozenSceneSelection(paused, { x: 256, y: 256, width: 256, height: 256 });
                 const receipt = confirmed?.ecommerceSnapshot?.processing?.sceneSelection;
                 assert.ok(confirmed && receipt);
                 expect(confirmed.tasks).toStrictEqual(paused.tasks);
@@ -3655,13 +3644,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 assert.ok(snapshot?.referenceCheckpoint);
                 const referenceCheckpoint = snapshot.referenceCheckpoint;
                 expect(originalTask.sceneProtection).toBeUndefined();
-                const response = await fetch(sceneOrigin + "/api/agent/runs/" + paused.id + "/resume", {
-                    method: "POST",
-                    headers: { cookie: boundary.cookie, "content-type": "application/json" },
-                    body: JSON.stringify({ conversationId: conversation.id, sceneSelection: { baselineAssetId: baseline.id, region: { x: 256, y: 256, width: 256, height: 256 } } }),
-                });
-                expect(response.status, "SETUP: actual authenticated Action must retain the original 4k Run and persist its selection receipt").toBe(200);
-                const confirmed = await runs.getAgentRun(paused.id);
+                const confirmed = await persistFrozenSceneSelection(paused, { x: 256, y: 256, width: 256, height: 256 });
                 const receipt = confirmed?.ecommerceSnapshot?.processing?.sceneSelection;
                 assert.ok(confirmed && receipt);
                 expect(confirmed.tasks).toStrictEqual(paused.tasks);

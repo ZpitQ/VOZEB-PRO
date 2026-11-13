@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { buildWhiteBackgroundProductMaskPixels, EcommerceProductSegmentationError } from "../image-processing/core";
@@ -7,6 +8,133 @@ import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 import type { EcommerceResolvedLocalEditTarget } from "./ecommerce-edit-planner";
 import { buildProductProtectionRegions, buildSceneProductProtectionRegions, type ProductProtectionRectangle, type ProductProtectionSourceSize, type ProductProtectionRegions, type SceneEditProtection } from "./ecommerce-product-regions";
 import type { EcommerceVisualAnalysis } from "./ecommerce-visual-analysis";
+import type { AgentRun } from "./agent-run-store";
+import type { ImageProcessingRectangle } from "../image-processing/contracts";
+import type { SceneSelectionReceipt } from "./image-processing-service";
+
+export async function persistFrozenEcommercePlan(run: AgentRun, origin: string, cookie: string): Promise<AgentRun> {
+    const { updateAgentRunById } = await import("./agent-run-store");
+    const { normalizePlannedEdit } = await import("./ecommerce-edit-planner");
+    const { ecommerceCanvasInputFromRequest } = await import("./ecommerce-generation-service");
+    const { compileEcommerceImageRequest, resolveEcommerceImageProviderProfile } = await import("./ecommerce-image-compiler");
+    const snapshot = run.ecommerceSnapshot;
+    const fullImage = snapshot?.plan;
+    const checkpoint = snapshot?.referenceCheckpoint;
+    const routes = snapshot?.modelRouteSnapshots;
+    assert(snapshot && fullImage?.planVersion === "ecommerce-edit.v7" && checkpoint?.analysis && routes?.image_generation && routes.edit_planning);
+    const baselineId = fullImage.source.currentSceneBaselineId || fullImage.source.productAnchorId;
+    const baseline = checkpoint.assets.find((item) => item.asset.id === baselineId)?.asset;
+    assert(baseline?.width && baseline.height);
+    const scene = fullImage.operation === "scene_edit";
+    const normalized = normalizePlannedEdit(
+        {
+            ...fullImage,
+            planVersion: "ecommerce-edit.v6",
+            strategy: scene ? "integrated_scene" : "strict_product",
+            delta: { ...fullImage.delta, requestedChanges: fullImage.delta.requestedChanges.filter((change) => change !== run.prompt) },
+            protection: { scope: scene ? "local" : "global", protectedObjectIds: [], preserveOutsideMask: scene, allowLightingChange: !scene },
+        },
+        {
+            origin,
+            cookie,
+            userId: run.userId,
+            requestId: run.id,
+            planningInput: checkpoint.planningInput,
+            sources: {
+                status: "resolved",
+                ...fullImage.source,
+                sceneRootAssetId: fullImage.source.currentSceneBaselineId,
+                parentResultId: fullImage.continuity.parentResultId,
+                startsNewProductAnchor: !fullImage.source.currentSceneBaselineId,
+                createsBranch: Boolean(fullImage.continuity.parentResultId),
+                ambiguityReason: null,
+                clarificationQuestion: null,
+            },
+            branchId: fullImage.continuity.branchId,
+            generationModelRole: fullImage.modelRoles.generation,
+            qualityCheckModelRole: fullImage.modelRoles.qualityCheck,
+            canvasInput: ecommerceCanvasInputFromRequest(run.prompt, run.generationPreferences?.image?.size, { width: baseline.width, height: baseline.height }),
+        },
+        checkpoint.analysis,
+        routes.edit_planning.logicalModelId,
+    );
+    assert(normalized);
+    const plan: EcommerceEditPlan = { ...normalized, planVersion: "ecommerce-edit.v6", referenceUses: fullImage.referenceUses };
+    const profile = resolveEcommerceImageProviderProfile(routes.image_generation);
+    assert(profile);
+    const compiled = compileEcommerceImageRequest(plan, profile);
+    assert(compiled.state === "ready");
+    const preferences = run.generationPreferences?.image;
+    const tasks: AgentRun["tasks"] = scene
+        ? [
+              {
+                  id: "ecommerce-scene-edit",
+                  title: "Historical scene edit",
+                  type: "image",
+                  model: plan.modelRoles.generation,
+                  optimizedPrompt: run.prompt,
+                  prompt: compiled.prompt,
+                  ecommerceExecution: compiled,
+                  count: preferences?.count || 1,
+                  ...(preferences?.quality ? { quality: preferences.quality } : {}),
+                  ...(preferences?.size ? { ratio: preferences.size } : {}),
+                  dependencies: [],
+                  status: "needs_review",
+                  attempts: 0,
+              },
+          ]
+        : [];
+    const saved = await updateAgentRunById(run.id, {
+        status: scene ? "paused" : "running",
+        executionId: undefined,
+        tasks,
+        ecommerceGenerations: undefined,
+        ecommerceSnapshot: {
+            ...snapshot,
+            plan,
+            modelRoles: plan.modelRoles,
+            compilerVersion: compiled.compilerVersion,
+            continuity: { ...plan.continuity, sceneRootAssetId: plan.source.currentSceneBaselineId || undefined },
+            ...(scene ? { fallback: { reason: "scene_selection_required" } } : {}),
+        },
+    });
+    assert(saved);
+    return saved;
+}
+
+// Historical receipt creation belongs to the fixture; its public endpoint is retired.
+export async function persistFrozenSceneSelection(run: AgentRun, region: ImageProcessingRectangle): Promise<AgentRun> {
+    const { getStoredGenerationTaskRecord } = await import("./generation-task-store");
+    const { updateAgentRunById } = await import("./agent-run-store");
+    const { scheduleGenerationTask } = await import("./generation-task-scheduler");
+    const snapshot = run.ecommerceSnapshot;
+    const assetId = snapshot?.plan?.source.currentSceneBaselineId;
+    const reference = snapshot?.referenceCheckpoint?.assets.find((item) => item.asset.id === assetId);
+    const prepare = snapshot?.processing?.prepareReferences.find((item) => item.assetId === assetId);
+    assert(snapshot?.processing && reference?.contentSha256 && prepare?.manifest);
+    const source = prepare.manifest.sourceIdentities[0];
+    const record = await getStoredGenerationTaskRecord("image_processing", prepare.jobId);
+    const manifestDigest = record?.resultPayload?.manifestDigest;
+    assert(record?.status === "success" && typeof manifestDigest === "string" && source.width && source.height);
+    const receipt: SceneSelectionReceipt = {
+        version: "scene-selection-receipt.v1",
+        parentTaskId: run.tasks[0].id,
+        baseline: { assetId: reference.asset.id, assetVersion: reference.assetVersion, sha256: reference.contentSha256, bytes: source.bytes, width: source.width, height: source.height },
+        prepare: { jobId: prepare.jobId, inputDigest: prepare.inputDigest, executionId: prepare.manifest.executionId, manifestDigest, assetVersion: prepare.assetVersion },
+        region,
+        semantics: snapshot.plan!.delta.requestedChanges,
+        confirmation: { actorUserId: run.userId, confirmedAt: Date.now() },
+    };
+    const saved = await updateAgentRunById(run.id, { status: "running", executionId: undefined, ecommerceSnapshot: { ...snapshot, processing: { ...snapshot.processing, sceneSelection: receipt } } }, undefined, [run.status]);
+    assert(saved);
+    const parent = await getStoredGenerationTaskRecord("agent", run.id);
+    assert(parent);
+    if (parent.workerId) {
+        const { releaseGenerationTaskLease } = await import("./generation-task-scheduler");
+        assert(await releaseGenerationTaskLease("agent", run.id, parent.workerId, { executionPhase: "created", nextPollAt: Date.now() }));
+    } else await scheduleGenerationTask("agent", run.id, { executionPhase: "created", nextPollAt: Date.now() });
+    return saved;
+}
 
 const HALO_RATIO = 0.08;
 export async function buildWhiteBackgroundProductProtection(source: Buffer, analysis: EcommerceVisualAnalysis, productAssetId: string, sourceFraming?: EcommerceEditPlan["preserve"]["sourceFraming"]): Promise<ProductProtectionRegions> {

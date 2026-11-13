@@ -261,13 +261,13 @@ export const agentReferenceRecoverySuite = (provider: "file" | "postgres") =>
                 const scene = input.visualAnalysis.references.find((reference) => reference.assetId === input.sources.currentSceneBaselineId);
                 assert(product?.productFacts, "The real planner must receive a confirmed product anchor");
                 return modelReply({
-                    planVersion: "ecommerce-edit.v6",
+                    planVersion: "ecommerce-edit.v7",
                     operation,
                     source: { productAnchorId: input.sources.productAnchorId, currentSceneBaselineId: input.sources.currentSceneBaselineId, sceneReferenceIds: input.sources.sceneReferenceIds },
                     baseline: { productFacts: product.productFacts, sceneFacts: scene?.sceneFacts ?? null },
                     delta: { requestedChanges: ["把背景换成厨房"], targetObjects: ["background-main"], targetRegions: [] },
                     preserve: { productCore: ["outline", "brand_text", "color", "material", "scale", "view"], sceneElements: [] },
-                    strategy: "strict_product",
+                    strategy: "full_image",
                     modelRoles: input.requiredModelRoles,
                     continuity: input.continuity,
                     referenceUses: input.visualAnalysis.references.map((reference) => ({ assetId: reference.assetId, alias: reference.alias, purposes: reference.purposes, usedCueIds: [] })),
@@ -559,7 +559,7 @@ export const agentReferenceRecoverySuite = (provider: "file" | "postgres") =>
             },
         ])(
             "accepts $action with only its real completed prepare children and continues the same public turn",
-            async ({ action, arrange, beforeTools, afterTools, operation, parentTaskId, check }) => {
+            async ({ action, arrange, beforeTools, afterTools, operation, check }) => {
                 const fixture = await arrange();
                 const before = fixture.paused;
                 const checkpoint = before.ecommerceSnapshot?.referenceCheckpoint;
@@ -594,15 +594,14 @@ export const agentReferenceRecoverySuite = (provider: "file" | "postgres") =>
                     conversationId: fixture.run.conversationId,
                     inputMessageId: fixture.run.inputMessageId,
                     assistantMessageId: fixture.run.assistantMessageId,
-                    ecommerceSnapshot: { plan: { planVersion: "ecommerce-edit.v6", operation }, compilerVersion: "ecommerce-openai-image-2.5.v4" },
+                    ecommerceSnapshot: { plan: { planVersion: "ecommerce-edit.v7", strategy: "full_image", operation }, compilerVersion: "ecommerce-openai-image-2.5.v5" },
                 });
                 expect(planned.ecommerceSnapshot?.referenceCheckpoint?.assets).toEqual(checkpoint.assets);
                 expect(planned.ecommerceSnapshot?.processing?.prepareReferences).toEqual(before.ecommerceSnapshot.processing.prepareReferences);
                 expect(await prepareRecords(fixture.run.id)).toEqual(prepared);
-                const protection = await waitingStage(fixture.run.id, "build_protection", 1, parentTaskId);
-                expect(protection.payload).toMatchObject({ inputs: [{ assetId: fixture.baseline.asset.id, expectedSha256: fixture.baseline.sourceSha256 }] });
+                expect(planned.ecommerceSnapshot?.processing?.protection).toBeUndefined();
                 expect(boundary.model.mock.calls.map(([request]) => request.tool.name)).toEqual(afterTools);
-                expect(boundary.request.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+                expect(boundary.request.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
                 check(before, consumed, planned);
                 await assertOriginalMessages(fixture.run);
                 const publicRun = await readPublicRun(planned);

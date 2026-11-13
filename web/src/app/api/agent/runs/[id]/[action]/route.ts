@@ -97,8 +97,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
                             planningRequestId: `${run.id}:planning:${randomUUID()}`,
                             executionId: undefined,
                             tasks: [],
-                            ecommerceSnapshot: undefined,
-                            ecommerceGenerations: undefined,
                             foundation: undefined,
                             projectHandoff: undefined,
                             projectHandoffEmitted: undefined,
