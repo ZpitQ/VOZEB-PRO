@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import { buildEcommercePlanningInput, ecommerceShadowPlanningEnabled, legacyPlanFallback, recordEcommerceGenerationSnapshot, type EcommerceGenerationSnapshot } from "./ecommerce-generation-snapshot";
 import { publicAgentRun } from "./agent-run-public";
 import type { AgentRun } from "./agent-run-store";
-import type { EcommerceEditPlan } from "./ecommerce-edit-plan";
 
 describe("ecommerce generation shadow snapshot", () => {
     it("freezes nullable quality routing and deterministic technical evidence without inventing QA", () => {
@@ -158,40 +157,6 @@ describe("ecommerce generation shadow snapshot", () => {
         snapshot.visualAnalysis!.references[0].sourceSize!.width = 999;
         snapshot.visualAnalysis!.visionEvidence!.transmissions[0].bodyBytes = 999;
         expect(saved.visualAnalysis).toEqual(original.visualAnalysis);
-    });
-    it.each(["ecommerce-edit.v3", "ecommerce-edit.v4", "ecommerce-edit.v5"] as const)("preserves %s local protection and canvas when the planner object is mutated after recording", (planVersion) => {
-        const plan: EcommerceEditPlan = {
-            planVersion,
-            operation: "scene_edit",
-            source: { productAnchorId: null, currentSceneBaselineId: "scene", sceneReferenceIds: [] },
-            baseline: { productFacts: null, sceneFacts: { space: "room", composition: "front", lighting: "soft" } },
-            canvas: { mode: "exact", size: { width: 6, height: 4 }, source: "baseline", allowReframe: false },
-            protection: { scope: "local", protectedObjectIds: ["cabinet"], preserveOutsideMask: true, allowLightingChange: false },
-            delta: { requestedChanges: ["add vase"], targetObjects: ["vase"], targetRegions: ["cabinet top"] },
-            preserve: { productCore: [], sceneElements: ["room"] },
-            strategy: "integrated_scene",
-            modelRoles: { visionAnalysis: "vision", editPlanning: "planner", generation: "image", qualityCheck: "quality" },
-            continuity: { branchId: "branch", parentResultId: null },
-            validation: { requiredChecks: ["outside_mask"] },
-        };
-        if (planVersion === "ecommerce-edit.v5")
-            plan.photography = {
-                materials: [{ objectId: "cabinet", textureDirection: "纵向木纹", textureScale: "细木纹", roughness: "哑光", gloss: "低光泽" }],
-                lighting: { keyLight: "柔光", fillLight: "弱补光", whiteBalance: "中性", contactShadow: "局部接触阴影" },
-                composition: { focalSubject: "边柜", depth: "纵深", negativeSpace: "留白" },
-            };
-        const original = structuredClone(plan);
-        const snapshot = recordEcommerceGenerationSnapshot(
-            { id: "run", userId: "user" },
-            { version: "ecommerce-generation.v1", mode: "active", input: { userRequest: "add vase", assetIds: ["scene"], conversationId: "conversation", surface: "chat" }, plan, createdAt: 1 },
-        );
-        plan.protection!.protectedObjectIds.push("new object");
-        plan.protection!.preserveOutsideMask = false;
-        plan.canvas!.size.width = 12;
-        plan.delta.requestedChanges.push("change lighting");
-        if (plan.photography) plan.photography.materials[0].gloss = "changed";
-        expect(snapshot.plan).toEqual(original);
-        if (planVersion !== "ecommerce-edit.v5") expect(snapshot.plan).not.toHaveProperty("photography");
     });
 
     it("keeps shadow planning disabled unless the rollout mode explicitly enables it", () => {

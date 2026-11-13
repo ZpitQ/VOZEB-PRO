@@ -96,7 +96,7 @@ describe("release workflow contract", () => {
     });
 
     it.each([
-        ["quality.yml", "web-postgres", "web-chromium", "web", 6],
+        ["quality.yml", "web-postgres", "web-chromium", "web", 5],
         ["docker-image.yml", "quality-postgres", "quality-chromium", "quality", 4],
     ])("runs isolated serial PostgreSQL integration tests in %s", (file, job, browser, gate, fileCount) => {
         const document = parseDocument(workflow(file));
@@ -110,7 +110,12 @@ describe("release workflow contract", () => {
         expect(jobs[browser].steps.some((item) => item.name === "PostgreSQL integration tests")).toBe(false);
         const step = postgres.steps.find((item) => item.name === "PostgreSQL integration tests");
         expect(step.if).toBeUndefined();
-        const command = step.run.trim().split(/\s+/);
+        const command = step.run
+            .replace(/\\\r?\n/g, " ")
+            .trim()
+            .split("\n")[0]
+            .trim()
+            .split(/\s+/);
         expect(command.slice(0, 5)).toEqual(["pnpm", "test", "--no-file-parallelism", "--config", "vitest.postgres.config.ts"]);
         expect(command.slice(5)).toHaveLength(fileCount);
         expect(command.slice(5)).toEqual(
@@ -129,7 +134,7 @@ describe("release workflow contract", () => {
         expect(check.run).toContain('test "$POSTGRES_RESULT" = "success"');
     });
 
-    it("includes ecommerce isolated PostgreSQL process regressions without dropping existing gates", () => {
+    it("includes current image result PostgreSQL regressions without dropping existing gates", () => {
         const step = parseDocument(workflow("quality.yml"))
             .toJS()
             .jobs["web-postgres"].steps.find((item) => item.name === "PostgreSQL integration tests");
@@ -139,11 +144,12 @@ describe("release workflow contract", () => {
             "points-wallet-idempotency.postgres.test.ts",
             "database/work-community-postgres.test.ts",
             "database/create-overview-quality.postgres.test.ts",
-            "ecommerce-selection-recovery.postgres.test.ts",
+            "image-task-result-run-copy.postgres.test.ts",
         ])
             expect(step.run).toContain(`src/lib/server/${file}`);
         expect(step.env.VOZEB_PRO_RUN_ECOMMERCE_POSTGRES_INTEGRATION).toBe("1");
         expect(step.env.VOZEB_PRO_ECOMMERCE_ISOLATED_DATABASE).toBe("1");
+        expect(step.run).toContain("VOZEB_PRO_DATABASE_POOL_MAX=1 pnpm test");
         expect(step.run).toContain("--no-file-parallelism");
     });
 
