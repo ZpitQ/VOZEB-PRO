@@ -1,6 +1,6 @@
 "use client";
 
-import { Button, Input, Popover, Tooltip } from "antd";
+import { Button, Image, Input, Popover, Tooltip } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import { ArrowUp, AtSign, Boxes, Check, ChevronLeft, ChevronRight, FileAudio, FileVideo, ImageIcon, Plus, Sparkles, Square, WandSparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type MouseEventHandler, type PointerEventHandler, type RefObject, type WheelEvent } from "react";
@@ -11,6 +11,7 @@ import { clipboardImageFiles } from "@/lib/clipboard-image-files";
 import { imagePreviewUrl } from "@/lib/media-image-url";
 import { cn } from "@/lib/utils";
 
+import { agentMediaPreviewPopupStyles, getAgentMediaPreviewContainer } from "@/components/agent/agent-media-preview";
 import { creativeComposerPopoverOverflow, useCreativeComposerPopoverPlacement } from "@/components/creative-composer-popover";
 import { creativeComposerToolButtonClass } from "@/components/creative-composer-styles";
 import {
@@ -567,7 +568,14 @@ function ComposerMediaThumbnail({ asset, compact = false, onRemove }: { asset: C
         >
             <div className="size-full overflow-hidden rounded-[7px]">
                 {asset.type === "image" ? (
-                    <img src={imagePreviewUrl(previewUrl, 320)} alt={asset.title} className="size-full object-cover" />
+                    <Image
+                        src={imagePreviewUrl(previewUrl, 320)}
+                        alt={asset.title}
+                        className="!size-full object-cover"
+                        classNames={{ root: "!block !size-full cursor-zoom-in", popup: { root: "agent-media-image-preview" } }}
+                        styles={agentMediaPreviewPopupStyles}
+                        preview={{ src: imagePreviewUrl(previewUrl, 4096), getContainer: getAgentMediaPreviewContainer, cover: false }}
+                    />
                 ) : (
                     <video src={previewUrl} muted playsInline preload="metadata" aria-label={asset.title} className="size-full object-cover" />
                 )}

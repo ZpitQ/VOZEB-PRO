@@ -1,6 +1,6 @@
 "use client";
 
-import { App, Button, Dropdown, Popover, Tooltip } from "antd";
+import { App, Button, Dropdown, Image, Popover, Tooltip } from "antd";
 import { AlertTriangle, Check, Clapperboard, Clock3, Copy, Download, ExternalLink, FileAudio2, Film, Info, Link2, MoreHorizontal, PanelsTopLeft, PencilLine, RotateCw } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -9,7 +9,7 @@ import { downloadAgentMedia, type AgentMediaDownload } from "@/components/agent/
 import { AgentMarkdown } from "@/components/agent/agent-markdown";
 import { AgentMessageActions } from "@/components/agent/agent-message-actions";
 import { formatAgentArtifactText, formatAgentMessageText, friendlyAgentError } from "@/components/agent/agent-message-format";
-import { AgentMediaPreview } from "@/components/agent/agent-media-preview";
+import { agentMediaPreviewPopupStyles, AgentMediaPreview, getAgentMediaPreviewContainer } from "@/components/agent/agent-media-preview";
 import { SiteLogo } from "@/components/layout/site-logo";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useCreativeAgentModels } from "@/hooks/use-creative-agent-options";
@@ -461,7 +461,7 @@ function CreativeQualityReview({ run, message, onAdjust }: { run: CreativeAgentR
 function CreativeRoundReferenceStrip({ assets }: { assets: CreativeAsset[] }) {
     let imageIndex = 0;
     return (
-        <div className="hide-scrollbar mb-2 ml-auto flex max-w-[176px] justify-end gap-1.5 overflow-x-auto pb-0.5" aria-label="本轮参考素材">
+        <div className="hide-scrollbar mb-2 ml-auto flex w-max max-w-[176px] gap-1.5 overflow-x-auto pb-0.5" aria-label="本轮参考素材">
             {assets.map((asset) => {
                 const url = assetUrl(asset);
                 if (!url || asset.type === "text") return null;
@@ -472,10 +472,20 @@ function CreativeRoundReferenceStrip({ assets }: { assets: CreativeAsset[] }) {
                         className="relative grid size-14 shrink-0 place-items-center overflow-hidden rounded-md border border-[#dde2e7] bg-[#eef1f4] text-[#697582] dark:border-[#3b424b] dark:bg-[#252a31] dark:text-[#aab2bc]"
                         title={asset.title}
                     >
-                        {asset.type === "image" ? <img src={imagePreviewUrl(url, 192)} alt={asset.title || "参考图"} loading="lazy" className="size-full object-cover" /> : null}
+                        {asset.type === "image" ? (
+                            <Image
+                                src={imagePreviewUrl(url, 192)}
+                                alt={asset.title || "参考图"}
+                                loading="lazy"
+                                className="!size-full object-cover"
+                                classNames={{ root: "!block !size-full cursor-zoom-in", popup: { root: "agent-media-image-preview" } }}
+                                styles={agentMediaPreviewPopupStyles}
+                                preview={{ src: imagePreviewUrl(url, 4096), getContainer: getAgentMediaPreviewContainer, cover: false }}
+                            />
+                        ) : null}
                         {asset.type === "video" ? <Film className="size-5" aria-hidden /> : null}
                         {asset.type === "audio" ? <FileAudio2 className="size-5" aria-hidden /> : null}
-                        <span className="absolute left-1 top-1 rounded-sm bg-black/68 px-1 py-0.5 text-[9px] font-medium leading-none text-white">{label}</span>
+                        <span className="pointer-events-none absolute left-1 top-1 rounded-sm bg-black/68 px-1 py-0.5 text-[9px] font-medium leading-none text-white">{label}</span>
                     </div>
                 );
             })}

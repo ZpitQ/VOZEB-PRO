@@ -118,6 +118,55 @@ async function holdSubmission(page: Page) {
     return { received: received.promise, release: release.resolve };
 }
 
+test("reference thumbnails preview local drafts without losing text or removing attachments", async ({ page }) => {
+    await open(page, "references");
+    await page.locator('input[type="file"]').setInputFiles({ name: "preview-local.png", mimeType: "image/png", buffer: Buffer.from(png.split(",")[1], "base64") });
+    await composer(page).fill("保留这段尚未发送的要求");
+    await page.getByRole("img", { name: "preview-local.png", exact: true }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(page.getByRole("dialog").getByRole("img", { name: "preview-local.png", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await expect(composer(page)).toHaveValue("保留这段尚未发送的要求");
+    await expect(page.getByRole("img", { name: "preview-local.png", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "移除preview-local.png", exact: true }).click();
+    await expect(page.getByRole("img", { name: "preview-local.png", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toBeHidden();
+});
+
+test("reference thumbnails preview submitted images and their labels after reload", async ({ page }) => {
+    const messages = exchange("references");
+    messages[0].metadata = { assetIds: ["reference-A", "reference-B"] };
+    await page.route("**/api/creative/conversations/references/messages?*", (route) => ok(route, { messages }));
+    await open(page, "references");
+    const strip = page.getByLabel("本轮参考素材", { exact: true });
+    await strip.getByRole("img", { name: "Reference A", exact: true }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.reload();
+    await strip.getByRole("img", { name: "Reference A", exact: true }).click({ position: { x: 8, y: 8 } });
+    await expect(page.getByRole("dialog").getByRole("img", { name: "Reference A", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(strip.getByRole("img", { name: "Reference B", exact: true })).toBeVisible();
+});
+
+test("reference strip keeps the first and last of four submitted images reachable", async ({ page }) => {
+    const assets = [references[0], references[1], { ...references[0], id: "reference-C", title: "Reference C" }, { ...references[0], id: "reference-D", title: "Reference D" }];
+    const messages = exchange("references");
+    messages[0].metadata = { assetIds: ["reference-A", "reference-B", "reference-C", "reference-D"] };
+    await page.route("**/api/creative/conversations/references/assets", (route) => ok(route, { assets }));
+    await page.route("**/api/creative/conversations/references/messages?*", (route) => ok(route, { messages }));
+    await open(page, "references");
+    const strip = page.getByLabel("本轮参考素材", { exact: true });
+    const first = strip.getByRole("img", { name: "Reference A", exact: true });
+    expect(await first.evaluate((image) => image.getBoundingClientRect().left - image.closest('[aria-label="本轮参考素材"]')!.getBoundingClientRect().left)).toBeGreaterThanOrEqual(0);
+    const last = strip.getByRole("img", { name: "Reference D", exact: true });
+    await last.scrollIntoViewIfNeeded();
+    expect(await strip.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+    await last.click();
+    await expect(page.getByRole("dialog").getByRole("img", { name: "Reference D", exact: true })).toBeVisible();
+});
+
 test("new references preserve existing image aliases and submitted order", async ({ page }) => {
     const submitted = deferred();
     let payload: { assetIds: string[]; prompt: string };
