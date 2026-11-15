@@ -123,6 +123,10 @@ test("reference thumbnails preview local drafts without losing text or removing 
     await page.locator('input[type="file"]').setInputFiles({ name: "preview-local.png", mimeType: "image/png", buffer: Buffer.from(png.split(",")[1], "base64") });
     await composer(page).fill("保留这段尚未发送的要求");
     await page.getByRole("img", { name: "preview-local.png", exact: true }).click();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await composer(page).click();
+    await page.getByRole("img", { name: "preview-local.png", exact: true }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
     await expect(page.getByRole("dialog").getByRole("img", { name: "preview-local.png", exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
@@ -143,6 +147,8 @@ test("reference thumbnails preview submitted images and their labels after reloa
     await strip.getByRole("img", { name: "Reference A", exact: true }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await composer(page).click();
     await page.reload();
     await strip.getByRole("img", { name: "Reference A", exact: true }).click({ position: { x: 8, y: 8 } });
     await expect(page.getByRole("dialog").getByRole("img", { name: "Reference A", exact: true })).toBeVisible();

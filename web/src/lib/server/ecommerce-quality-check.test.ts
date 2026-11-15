@@ -734,6 +734,42 @@ describe("ecommerce quality check", () => {
         expect(evaluateEcommerceCanvas(canvas, { width: 1920, height: 1080 }, { width: 3840, height: 2160 }).hardFailures).toEqual([]);
         expect(evaluateEcommerceCanvas({ ...canvas, mode: "exact", size: { width: 3840, height: 2160 } }, { width: 1920, height: 1080 }, { width: 3840, height: 2160 }).nativeMatches).toBe(false);
     });
+    it.each([
+        { planVersion: "ecommerce-edit.v7", mode: "ratio", source: "baseline", status: "passed", action: "publish" },
+        { planVersion: "ecommerce-edit.v7", mode: "ratio", source: "user_text", status: "blocked", action: "pause" },
+        { planVersion: "ecommerce-edit.v7", mode: "ratio", source: "explicit_size", status: "blocked", action: "pause" },
+        { planVersion: "ecommerce-edit.v7", mode: "exact", source: "baseline", status: "blocked", action: "pause" },
+        { planVersion: "ecommerce-edit.v6", mode: "ratio", source: "baseline", status: "blocked", action: "pause" },
+    ] as const)("delivers inherited AUTO without relaxing $planVersion $mode $source contracts", async ({ planVersion, mode, source, status, action }) => {
+        const input = await independentRequest();
+        input.plan.planVersion = planVersion;
+        input.plan.strategy = "full_image";
+        input.plan.protection = { scope: "global", protectedObjectIds: [], preserveOutsideMask: false, allowLightingChange: true };
+        input.plan.canvas = { mode, size: { width: 1513, height: 1511 }, source, allowReframe: false };
+        const bytes = await sharp({ create: { width: 1254, height: 1254, channels: 3, background: "#aaa" } })
+            .png()
+            .toBuffer();
+        const image = "data:image/png;base64," + bytes.toString("base64");
+        input.resultImages = [{ resultId: "result-1", nativeUrl: image, url: image }];
+
+        const technical = await checkEcommerceTechnicalResult(input);
+
+        expect(technical).toMatchObject({ status, canvasEvidence: [{ nativeSize: { width: 1254, height: 1254 }, storedSize: { width: 1254, height: 1254 }, nativeMatches: false, storedMatches: false }] });
+        expect(ecommerceResultDeliveryGate(technical).action).toBe(action);
+    });
+    it("keeps unreadable AUTO output from being delivered", async () => {
+        const input = await independentRequest();
+        input.plan.planVersion = "ecommerce-edit.v7";
+        input.plan.strategy = "full_image";
+        input.plan.protection = { scope: "global", protectedObjectIds: [], preserveOutsideMask: false, allowLightingChange: true };
+        input.plan.canvas = { mode: "ratio", size: { width: 1513, height: 1511 }, source: "baseline", allowReframe: false };
+        input.resultImages = [{ resultId: "result-1", nativeUrl: "data:image/png;base64,AA==", url: "data:image/png;base64,AA==" }];
+
+        const technical = await checkEcommerceTechnicalResult(input);
+
+        expect(ecommerceResultDeliveryGate(technical).action).toBe("pause");
+        expect(technical.canvasEvidence).toMatchObject([{ nativeStatus: "unavailable", storedStatus: "unavailable" }]);
+    });
     it("delivers a full-image v7 ratio rounded to real 1672 x 941 pixels", async () => {
         const input = await independentRequest();
         input.plan.planVersion = "ecommerce-edit.v7";

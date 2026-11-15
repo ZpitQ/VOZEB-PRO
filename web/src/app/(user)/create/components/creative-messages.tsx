@@ -480,7 +480,7 @@ function CreativeRoundReferenceStrip({ assets }: { assets: CreativeAsset[] }) {
                                 className="!size-full object-cover"
                                 classNames={{ root: "!block !size-full cursor-zoom-in", popup: { root: "agent-media-image-preview" } }}
                                 styles={agentMediaPreviewPopupStyles}
-                                preview={{ src: imagePreviewUrl(url, 4096), getContainer: getAgentMediaPreviewContainer, cover: false }}
+                                preview={{ src: imagePreviewUrl(url, 4096), getContainer: getAgentMediaPreviewContainer, cover: false, motionName: "" }}
                             />
                         ) : null}
                         {asset.type === "video" ? <Film className="size-5" aria-hidden /> : null}

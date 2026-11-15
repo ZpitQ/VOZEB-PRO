@@ -54,6 +54,25 @@ function nativeTask(): ImageTask {
     };
 }
 describe("ecommerce v2 enhancement admission", () => {
+    it("enhances AUTO using the actual generated aspect ratio", () => {
+        const task = nativeTask();
+        task.config.quality = "high";
+        task.config.size = "1513:1511";
+        task.ecommerceExecution = {
+            state: "ready",
+            compilerVersion: "ecommerce-nano-banana-2.v5",
+            providerProfileId: "nano-banana-2",
+            prompt: "fixture",
+            parameters: { variant: "nano-banana-2" },
+            modelSnapshot: { logicalRole: "image_generation", capability: "image", logicalModelId: "image", channelId: "fixture", upstreamModel: "nano-banana-2", apiFormat: "openai" },
+            canvas: { mode: "ratio", size: { width: 1513, height: 1511 }, source: "baseline", allowReframe: false },
+            protection: { scope: "global", protectedObjectIds: [], preserveOutsideMask: false, allowLightingChange: true },
+            referenceRoles: [{ assetId: "scene", role: "scene" }],
+        };
+        const result = { ...task.result!, width: 1200, height: 800, enhancementSource: { ...task.result!.nativeSource!, width: 1200, height: 800, provenance: "generation_final" as const } };
+
+        expect(planImageTaskEnhancement(task, result)).toMatchObject({ status: "queued", source: { width: 1200, height: 800 }, target: { width: 3520, height: 2352 } });
+    });
     function canvasTask() {
         const task = nativeTask();
         const canvas = { mode: "ratio" as const, size: { width: 1, height: 1 }, source: "baseline" as const, allowReframe: true };

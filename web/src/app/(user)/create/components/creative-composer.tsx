@@ -574,7 +574,7 @@ function ComposerMediaThumbnail({ asset, compact = false, onRemove }: { asset: C
                         className="!size-full object-cover"
                         classNames={{ root: "!block !size-full cursor-zoom-in", popup: { root: "agent-media-image-preview" } }}
                         styles={agentMediaPreviewPopupStyles}
-                        preview={{ src: imagePreviewUrl(previewUrl, 4096), getContainer: getAgentMediaPreviewContainer, cover: false }}
+                        preview={{ src: imagePreviewUrl(previewUrl, 4096), getContainer: getAgentMediaPreviewContainer, cover: false, motionName: "" }}
                     />
                 ) : (
                     <video src={previewUrl} muted playsInline preload="metadata" aria-label={asset.title} className="size-full object-cover" />
