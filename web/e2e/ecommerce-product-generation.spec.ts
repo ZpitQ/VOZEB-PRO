@@ -1568,7 +1568,7 @@ function expectSuccessfulTrace(
     expect(qualityStage.status).toBe("passed");
     const checks = qualityStage.output.checks ?? [];
     expect(checks).toHaveLength(QUALITY_CHECKS.length + 1);
-    expect(checks.map((check) => check.key).sort()).toEqual([...QUALITY_CHECKS, "canvas_geometry"].sort());
+    expect(checks.map((check) => check.key).sort()).toEqual([...QUALITY_CHECKS, "stored_media"].sort());
     const resultId = `${trace.imageTaskIds[0]}:1`;
     for (const check of checks) {
         expect(check.resultId).toBe(resultId);
