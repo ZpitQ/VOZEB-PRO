@@ -1,3 +1,4 @@
+import { CREATIVE_IMAGE_REFERENCE_LIMIT } from "@/lib/creative-upload";
 import { getAuthSettings } from "@/lib/auth/store";
 import { nanoid } from "nanoid";
 import { randomUUID } from "node:crypto";
@@ -164,10 +165,17 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
         const explicitHistory = explicitAssets.filter(isHistoricalGeneratedAsset);
         const ecommerceOrchestrationEnabled = settings.ecommerceGenerationEnabled === true;
         const ecommerceRollout = ecommerceRolloutStage(process.env.ECOMMERCE_GENERATION_ROLLOUT, claimed.userId);
+        const explicitBindings = buildEcommercePlanningInput(claimed, explicitAssets, conversationContext).explicitReferenceBindings || [];
+        const explicitTarget = explicitBindings.find((binding) => binding.purposes.includes("edit_target")) || explicitBindings.find((binding) => binding.purposes.includes("product_identity"));
+        const primaryReference = explicitTarget ? explicitAssets.find((asset) => asset.id === explicitTarget.assetId) : explicitAssets.find((asset) => asset.type === "image" && !explicitBindings.some((binding) => binding.assetId === asset.id));
+        const historicalTargetId = primaryReference && isHistoricalGeneratedAsset(primaryReference) ? primaryReference.id : undefined;
+        const usesLatestBaseline = !explicitTarget && !explicitHistory.length;
         const continuityResult = referenceContinuation
             ? referenceContinuation.assets.find((item) => item.asset.id === referenceContinuation.planningInput.inheritedReferences?.editTargetId)?.asset || null
             : (ecommerceOrchestrationEnabled || ecommerceRollout === "shadow") && claimed.surface === "chat" && (ecommerceImageRequest || isEcommerceNoAttachmentContinuation(claimed, requestedModelCapabilities))
-              ? await selectCurrentSceneBaseline(claimed.conversationId, explicitHistory[0]?.id, claimed.userId)
+              ? historicalTargetId || usesLatestBaseline
+                  ? await selectCurrentSceneBaseline(claimed.conversationId, historicalTargetId, claimed.userId)
+                  : null
               : null;
         const ecommerceAssets = (usesMemoryCandidates ? (continuityResult ? [continuityResult] : memoryAssets) : explicitAssets).filter((asset) => asset.type === "image");
         if (ecommerceRollout === "shadow" && claimed.surface === "chat" && ecommerceAssets.length) {
@@ -194,9 +202,9 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             let referenceCheckpoint: EcommerceReferenceCheckpoint | undefined = referenceContinuation;
             const processing = claimed.ecommerceSnapshot?.processing;
             let snapshotInput = ecommerceSnapshotInput(planningInput);
-            const visionCandidates = resolveEcommerceRoleCandidates(settings, "vision_analysis", "text");
+            let visionCandidates = resolveEcommerceRoleCandidates(settings, "vision_analysis", "text");
             const editPlanningCandidates = resolveEcommerceRoleCandidates(settings, "edit_planning", "text");
-            const imageGenerationCandidates = resolveEcommerceRoleCandidates(
+            let imageGenerationCandidates = resolveEcommerceRoleCandidates(
                 {
                     ...settings,
                     ...(requestedModels.length ? { ecommerceModelRoles: { image_generation: requestedModels.map((model) => model.id) } } : {}),
@@ -272,11 +280,11 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             };
 
             const explicitNewImages = explicitAssets.filter((asset) => asset.type === "image" && !isHistoricalGeneratedAsset(asset));
-            if (!referenceContinuation && (explicitHistory.length > 1 || explicitHistory.length + explicitNewImages.length > 2)) {
-                await pauseForReview("invalid_reference_selection", "请只选择一张历史结果和一张新参考图。", true);
+            if (!referenceContinuation && explicitHistory.length + explicitNewImages.length > CREATIVE_IMAGE_REFERENCE_LIMIT) {
+                await pauseForReview("invalid_reference_selection", `一次最多引用 ${CREATIVE_IMAGE_REFERENCE_LIMIT} 张图片。`, true);
                 return;
             }
-            if (!referenceContinuation && explicitHistory.length && !continuityResult) {
+            if (!referenceContinuation && primaryReference && isHistoricalGeneratedAsset(primaryReference) && !continuityResult) {
                 await pauseForReview("invalid_reference_selection", "无法读取选择的历史结果，请重新选择。", true);
                 return;
             }
@@ -287,23 +295,15 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                     return;
                 }
                 const rootId = preliminary.productAnchorId || preliminary.sceneRootAssetId;
-                const loadedAnchors = rootId && explicitNewImages.length < 2 ? await getCreativeAssetsByIds([rootId], claimed.userId) : [];
-                const root = loadedAnchors.find((asset) => asset.id === rootId && asset.userId === claimed.userId && asset.conversationId === claimed.conversationId && asset.type === "image" && asset.status === "ready");
+                const loadedAnchors = rootId && !planningAssets.some((asset) => asset.id === rootId) ? await getCreativeAssetsByIds([rootId], claimed.userId) : [];
+                const root = [...planningAssets, ...loadedAnchors].find((asset) => asset.id === rootId && asset.userId === claimed.userId && asset.conversationId === claimed.conversationId && asset.type === "image" && asset.status === "ready");
                 const productAnchor = preliminary.productAnchorId ? root : undefined;
                 if (!root && !explicitNewImages.length) {
                     await pauseForReview("missing_product_anchor", "无法读取历史结果对应的原始商品图，请重新提供商品图。", true);
                     return;
                 }
                 planningAssets =
-                    explicitNewImages.length === 2
-                        ? explicitNewImages
-                        : explicitNewImages.length && continuityResult
-                          ? [continuityResult, ...explicitNewImages, ...(productAnchor ? [productAnchor] : [])]
-                          : productAnchor
-                            ? [continuityResult, productAnchor]
-                            : explicitNewImages.length
-                              ? explicitNewImages
-                              : [continuityResult];
+                    explicitNewImages.length >= 2 && !explicitHistory.length ? ecommerceAssets : Array.from(new Map([continuityResult, ...ecommerceAssets, ...(productAnchor ? [productAnchor] : [])].map((asset) => [asset.id, asset])).values());
                 planningInput = buildEcommercePlanningInput(claimed, planningAssets, conversationContext);
                 if (planningAssets.some((asset) => asset.id === continuityResult.id))
                     planningInput.inheritedReferences = {
@@ -312,6 +312,18 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                     };
                 snapshotInput = ecommerceSnapshotInput(planningInput);
             }
+
+            const referenceCount = planningAssets.length;
+            if (referenceCount > CREATIVE_IMAGE_REFERENCE_LIMIT) {
+                await pauseForReview("invalid_reference_selection", `连续编辑还需要原始商品图，一次最多发送 ${CREATIVE_IMAGE_REFERENCE_LIMIT} 张图片，请减少参考图。`, true);
+                return;
+            }
+            const supportsReferences = (candidate: (typeof imageGenerationCandidates)[number]) => candidate.capabilityProfile?.maxReferenceImages === undefined || candidate.capabilityProfile.maxReferenceImages >= referenceCount;
+            visionCandidates = visionCandidates.filter(supportsReferences);
+            imageGenerationCandidates = imageGenerationCandidates.filter(supportsReferences);
+            if (!visionCandidates.length || !imageGenerationCandidates.length || requestedModels.some((model) => !imageGenerationCandidates.some((candidate) => candidate.logicalModelId === model.id)))
+                throw new Error("当前模型无法处理本次参考图数量，请减少参考图或选择其他模型");
+            imageGenerationRole = imageGenerationCandidates[0];
 
             referenceCheckpoint ||= createEcommerceReferenceCheckpoint(claimed, planningInput, planningAssets);
 
@@ -440,9 +452,10 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                     ...reference.visualEvidence,
                 })),
             );
-            const sources: EcommerceSources = purposeDecision
+            let sources: EcommerceSources = purposeDecision
                 ? resolveSourcesFromEcommerceReferenceDecision(purposeDecision, planningAssets, continuityResult ? [continuityResult] : explicitHistory)
                 : resolveDualBaseline(claimed, { assets: explicitNewImages, decision, results: continuityResult ? [continuityResult] : [] });
+            if (purposeDecision && sources.status === "resolved" && continuityResult && !explicitHistory.length && explicitNewImages.length >= 2 && usesLatestBaseline) sources = { ...sources, parentResultId: continuityResult.id, createsBranch: true };
             if (sources.status !== "resolved" || (!sources.productAnchorId && !sources.currentSceneBaselineId)) {
                 await pauseForReview(sources.ambiguityReason || "reference_roles_need_review", sources.clarificationQuestion || "无法可靠区分商品图和场景参考图，请确认图片角色。", false, undefined, planningEvidence());
                 return;

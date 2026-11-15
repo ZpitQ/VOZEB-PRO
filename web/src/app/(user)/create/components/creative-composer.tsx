@@ -91,7 +91,7 @@ export function CreativeComposer({
     generationPreferences: CreativeGenerationPreferences;
     uploading: boolean;
     onRemoveAttachment: (id: string) => void;
-    onReferenceAsset: (id: string) => void;
+    onReferenceAsset: (id: string) => boolean;
     onSelectSkill: (skill: SkillOption) => void;
     onRemoveSkill: () => void;
     onToggleModel: (model: CreativeModelOption) => void;
@@ -167,7 +167,7 @@ export function CreativeComposer({
         if (!alias) return;
         const currentValue = inputRef.current?.resizableTextArea?.textArea?.value ?? value;
         const result = replaceCreativeAssetMention(currentValue, caretRef.current, alias);
-        onReferenceAsset(asset.id);
+        if (!selectedAssetIds.includes(asset.id) && !onReferenceAsset(asset.id)) return;
         updateComposerValue(result.value, result.cursor);
         setMentionQuery(null);
         focusComposerAt(result.cursor);

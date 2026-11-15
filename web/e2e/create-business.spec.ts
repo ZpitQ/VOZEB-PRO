@@ -188,6 +188,57 @@ test("new references preserve existing image aliases and submitted order", async
     expect(payload!.assetIds).toEqual(["reference-B", "reference-A"]);
 });
 
+test("four local references reject a fifth upload and mention without changing aliases", async ({ page }) => {
+    await open(page, "references");
+    const buffer = Buffer.from(png.split(",")[1], "base64");
+    await page.locator('input[type="file"]').setInputFiles([
+        { name: "one.png", mimeType: "image/png", buffer },
+        { name: "two.png", mimeType: "image/png", buffer },
+        { name: "three.png", mimeType: "image/png", buffer },
+        { name: "four.png", mimeType: "image/png", buffer },
+    ]);
+    await expect(page.getByRole("button", { name: /^移除(?:one|two|three|four)\.png$/ })).toHaveCount(4);
+    await page.locator('input[type="file"]').setInputFiles({ name: "five.png", mimeType: "image/png", buffer });
+    await expect(page.getByText("一次最多引用 4 张图片，请减少本次添加的图片", { exact: true })).toBeVisible();
+    await composer(page).fill("调整 @");
+    await page.getByRole("button", { name: "选择Reference A", exact: true }).click();
+    await expect(page.getByText("一次最多引用 4 张图片", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^移除(?:one|two|three|four)\.png$/ })).toHaveCount(4);
+    await expect(composer(page)).toHaveValue("调整 @");
+});
+
+test("the public model reference limit blocks a third local image", async ({ page }) => {
+    await page.route("**/api/auth/session", async (route) => {
+        const response = await route.fetch();
+        const payload = await response.json();
+        payload.settings.logicalModels = [
+            {
+                id: "limited-image",
+                name: "Limited image",
+                capability: "image",
+                enabled: true,
+                bindings: [{ id: "limited-binding", channelId: "limited-channel", upstreamModel: "gpt-image-2.5-flare", enabled: true, priority: 1, capabilityProfile: { maxReferenceImages: 2 } }],
+            },
+        ];
+        payload.settings.systemChannels = [{ id: "limited-channel", name: "Limited fixture", baseUrl: "/api/ai/system/limited-channel", apiKey: "system", apiFormat: "openai", models: ["gpt-image-2.5-flare"], enabled: true }];
+        payload.settings.defaultModels.imageModel = "limited-image";
+        await route.fulfill({ response, json: payload });
+    });
+    await open(page, "references");
+    await page.getByRole("button", { name: "生成模型：智能模型", exact: true }).click();
+    await page.getByRole("button", { name: /Limited image 图片模型/ }).click();
+    await composer(page).click();
+    const buffer = Buffer.from(png.split(",")[1], "base64");
+    await page.locator('input[type="file"]').setInputFiles([
+        { name: "one.png", mimeType: "image/png", buffer },
+        { name: "two.png", mimeType: "image/png", buffer },
+    ]);
+    await expect(page.getByRole("button", { name: /^移除(?:one|two)\.png$/ })).toHaveCount(2);
+    await page.locator('input[type="file"]').setInputFiles({ name: "three.png", mimeType: "image/png", buffer });
+    await expect(page.getByText("一次最多引用 2 张图片，请减少本次添加的图片", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "移除three.png", exact: true })).toHaveCount(0);
+});
+
 test("local attachments retain their alias when a stored reference is added", async ({ page }) => {
     const submitted = deferred();
     let payload: { assetIds: string[] };

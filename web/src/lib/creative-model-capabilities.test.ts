@@ -1,8 +1,28 @@
 import { describe, expect, it } from "vitest";
 
-import { creativeModelProfileForLogicalModel, creativeSelectedModelProfile, reconcileCreativeGenerationPreferences, type CreativeModelCapabilityOption } from "./creative-model-capabilities";
+import { creativeImageReferenceLimit, creativeModelProfileForLogicalModel, creativeSelectedModelProfile, reconcileCreativeGenerationPreferences, type CreativeModelCapabilityOption } from "./creative-model-capabilities";
 
 describe("creative model capabilities", () => {
+    it("caps create at four and respects the lower selected model limit across usable routes", () => {
+        const limited = creativeModelProfileForLogicalModel({
+            id: "limited",
+            bindings: [
+                { enabled: true, capabilityProfile: { maxReferenceImages: 1 } },
+                { enabled: true, capabilityProfile: { maxReferenceImages: 2 } },
+            ],
+        });
+        const unconfigured = creativeModelProfileForLogicalModel({ id: "open", bindings: [{ enabled: true, capabilityProfile: { maxReferenceImages: 1 } }, { enabled: true }] });
+        expect(creativeImageReferenceLimit([])).toBe(4);
+        expect(
+            creativeImageReferenceLimit([
+                { id: "limited", name: "Limited", capability: "image", capabilityProfile: limited },
+                { id: "open", name: "Open", capability: "image", capabilityProfile: unconfigured },
+            ]),
+        ).toBe(2);
+        expect(creativeImageReferenceLimit([{ id: "open", name: "Open", capability: "image", capabilityProfile: unconfigured }])).toBe(4);
+        expect(creativeImageReferenceLimit([{ id: "many", name: "Many", capability: "image", capabilityProfile: { maxReferenceImages: 16 } }])).toBe(4);
+    });
+
     it("merges route bindings and intersects the explicitly configured options of selected models", () => {
         const first = creativeModelProfileForLogicalModel({
             id: "first",

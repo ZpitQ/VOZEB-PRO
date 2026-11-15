@@ -1,8 +1,9 @@
+import { CREATIVE_IMAGE_REFERENCE_LIMIT } from "@/lib/creative-upload";
 import type { LogicalModelCapabilityProfile } from "@/lib/auth/store-types";
 import { isCreativeAutoValue, type CreativeGenerationPreferences } from "@/lib/creative-runtime-contract";
 
 export type CreativeMediaCapability = "image" | "video" | "audio";
-export type CreativeModelCapabilityProfile = Pick<LogicalModelCapabilityProfile, "aspectRatios" | "resolutions" | "durationSeconds" | "minDurationSeconds" | "maxDurationSeconds" | "maxBatchSize">;
+export type CreativeModelCapabilityProfile = Pick<LogicalModelCapabilityProfile, "aspectRatios" | "resolutions" | "durationSeconds" | "minDurationSeconds" | "maxDurationSeconds" | "maxBatchSize" | "maxReferenceImages">;
 export type CreativeModelCapabilityOption = {
     id: string;
     name: string;
@@ -25,6 +26,7 @@ export function creativeModelProfileForLogicalModel(model: LogicalModelLike | un
         minDurationSeconds: minimum(profiles.map((profile) => profile.minDurationSeconds)),
         maxDurationSeconds: maximum(profiles.map((profile) => profile.maxDurationSeconds)),
         maxBatchSize: maximum(profiles.map((profile) => profile.maxBatchSize)),
+        maxReferenceImages: model?.bindings.filter((binding) => binding.enabled).every((binding) => binding.capabilityProfile?.maxReferenceImages !== undefined) ? maximum(profiles.map((profile) => profile.maxReferenceImages)) : undefined,
     });
 }
 
@@ -38,8 +40,13 @@ export function creativeSelectedModelProfile(models: readonly CreativeModelCapab
         durationSeconds: intersectNumberLists(profiles.map((profile) => profile.durationSeconds)),
         minDurationSeconds: maximum(profiles.map((profile) => profile.minDurationSeconds)),
         maxDurationSeconds: minimum(profiles.map((profile) => profile.maxDurationSeconds)),
+        maxReferenceImages: minimum(profiles.map((profile) => profile.maxReferenceImages)),
         maxBatchSize: selected.every((model) => model.capabilityProfile?.maxBatchSize) ? selected.reduce((total, model) => total + model.capabilityProfile!.maxBatchSize!, 0) : undefined,
     });
+}
+
+export function creativeImageReferenceLimit(models: readonly CreativeModelCapabilityOption[]): number {
+    return Math.min(CREATIVE_IMAGE_REFERENCE_LIMIT, creativeSelectedModelProfile(models, "image")?.maxReferenceImages ?? CREATIVE_IMAGE_REFERENCE_LIMIT);
 }
 
 export function reconcileCreativeGenerationPreferences(preferences: CreativeGenerationPreferences, models: readonly CreativeModelCapabilityOption[]): CreativeGenerationPreferences {

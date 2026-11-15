@@ -174,17 +174,16 @@ export function resolveSourcesFromEcommerceReferenceDecision(
 
     const assets = uniqueReadyImages([...explicitAssets, ...selectedHistory]);
     const assetIds = new Set(assets.map((asset) => asset.id));
-    const selectedResults = Array.from(new Map(selectedHistory.filter((asset) => assetIds.has(asset.id) && asset.type === "image" && asset.status === "ready" && Boolean(asset.sourceRunId)).map((asset) => [asset.id, asset])).values());
-    if (selectedResults.length > 1) return unresolvedSources("multiple_history_results");
-
+    const selectedResults = Array.from(
+        new Map(selectedHistory.filter((asset) => assetIds.has(asset.id) && asset.id === decision.editTargetId && asset.type === "image" && asset.status === "ready" && Boolean(asset.sourceRunId)).map((asset) => [asset.id, asset])).values(),
+    );
     const decisionIds = [decision.editTargetId, decision.productAnchorId, decision.currentSceneBaselineId, ...decision.bindings.map((binding) => binding.assetId)].filter((id): id is string => Boolean(id));
     if (decisionIds.some((id) => !assetIds.has(id))) return unresolvedSources("invalid_reference_selection");
 
     const sceneReferenceIds = decision.bindings
-        .filter((binding) => binding.purposes.some((purpose) => ["style", "lighting", "composition"].includes(purpose)))
+        .filter((binding) => binding.purposes.some((purpose) => ["product_identity", "style", "lighting", "composition"].includes(purpose)))
         .map((binding) => binding.assetId)
         .filter((id) => id !== decision.productAnchorId && id !== decision.currentSceneBaselineId);
-    if (sceneReferenceIds.length > 1) return unresolvedSources("multiple_scene_candidates");
     const selectedResult = selectedResults[0];
     const parentResultId = selectedResult?.id || null;
 

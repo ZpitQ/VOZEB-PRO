@@ -9,7 +9,7 @@ import { useRouter } from "next/navigation";
 import { CREATIVE_UPLOAD_MAX_BYTES, isCreativeUploadMimeType } from "@/lib/creative-upload";
 import type { CreateOverviewAsset } from "@/lib/create-workbench-overview";
 import type { CreativeAsset, CreativeGenerationPreferences, CreativeMessage } from "@/lib/creative-runtime-contract";
-import { reconcileCreativeGenerationPreferences } from "@/lib/creative-model-capabilities";
+import { creativeImageReferenceLimit, reconcileCreativeGenerationPreferences } from "@/lib/creative-model-capabilities";
 import { cn } from "@/lib/utils";
 import { useCreativeAgentModels } from "@/hooks/use-creative-agent-options";
 import { listAgentSkills, type AgentSkillSummary } from "@/services/api/agent-skills";
@@ -80,6 +80,7 @@ export default function CreatePage() {
     const selectedSkill = skills.find((skill) => skill.id === selectedSkillId);
     const modelOptions = useCreativeAgentModels();
     const selectedModels = modelOptions.filter((model) => selectedModelIds.includes(model.id));
+    const referenceLimit = creativeImageReferenceLimit(smartPlanning ? [] : selectedModels);
     const updatePrompt = useCallback((value: string) => {
         promptValueRef.current = value;
         promptRevisionRef.current += 1;
@@ -198,6 +199,10 @@ export default function CreatePage() {
             message.warning("请选择至少一个模型，或重新开启智能规划");
             return;
         }
+        if (agent.selectedAssets.filter((asset) => asset.type === "image").length > referenceLimit) {
+            message.warning(`当前模型一次最多引用 ${referenceLimit} 张图片，请移除多余图片`);
+            return;
+        }
         const revision = ++promptRevisionRef.current;
         try {
             const preferences = { ...generationPreferences, mode: "image" as const };
@@ -249,6 +254,10 @@ export default function CreatePage() {
     };
 
     const uploadAttachments = async (files: File[], successMessage?: string) => {
+        if (agent.selectedAssets.length + files.length > referenceLimit) {
+            message.warning(`一次最多引用 ${referenceLimit} 张图片，请减少本次添加的图片`);
+            return [] as CreativeAsset[];
+        }
         const unsupported = files.find((file) => !file.type.startsWith("image/") || !isCreativeUploadMimeType(file.type));
         if (unsupported) {
             message.error(`${unsupported.name} 不是支持的图片格式`);
@@ -360,16 +369,21 @@ export default function CreatePage() {
         if (nextPrompt !== promptValueRef.current) updatePrompt(nextPrompt);
     };
 
-    const toggleReferencedAsset = (id: string) => {
+    const toggleReferencedAsset = (id: string): boolean => {
         if (!agent.assets.some((asset) => asset.id === id && asset.type === "image")) {
             message.warning("图片创作入口只支持引用图片");
-            return;
+            return false;
         }
         const currentAssetIds = agent.selectedAssetIds;
+        if (!currentAssetIds.includes(id) && currentAssetIds.length >= referenceLimit) {
+            message.warning(`一次最多引用 ${referenceLimit} 张图片`);
+            return false;
+        }
         const nextAssetIds = currentAssetIds.includes(id) ? currentAssetIds.filter((assetId) => assetId !== id) : [...currentAssetIds, id];
         const nextPrompt = remapCreativeAssetReferences(promptValueRef.current, [...agent.assets, ...agent.selectedAssets], currentAssetIds, nextAssetIds);
         agent.toggleAsset(id);
         if (nextPrompt !== promptValueRef.current) updatePrompt(nextPrompt);
+        return true;
     };
 
     const setAwayFromLatestState = (away: boolean) => {
@@ -481,7 +495,7 @@ export default function CreatePage() {
             onPasteImages={(files) => void uploadAttachments(files)}
             referenceAssets={imageAssets}
             selectedAssetIds={selectedImageAssetIds}
-            onReferenceAsset={agent.selectAsset}
+            onReferenceAsset={(id) => agent.selectedAssetIds.includes(id) || toggleReferencedAsset(id)}
         />
     );
 

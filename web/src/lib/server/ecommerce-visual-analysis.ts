@@ -1,3 +1,4 @@
+import { CREATIVE_IMAGE_REFERENCE_LIMIT } from "@/lib/creative-upload";
 import { refundUserPoints } from "@/lib/auth/store";
 import { createHash } from "node:crypto";
 import { originalImageSourceUrl } from "@/lib/media-image-url";
@@ -141,31 +142,19 @@ export async function analyzeEcommerceReferences(
     if (!candidates.length) throw new EcommerceVisualAnalysisError("视觉分析角色没有可用模型", 503);
     const assets = input.planningInput.assetCandidates;
     const analysisVersion = input.analysisVersion || ECOMMERCE_VISUAL_ANALYSIS_VERSION;
-    const inherited = input.planningInput.inheritedReferences;
-    const aliases = input.planningInput.referenceAliases || [];
-    const inheritedIds = new Set(inherited ? [inherited.editTargetId, ...(inherited.productAnchorId ? [inherited.productAnchorId] : [])] : []);
-    const explicitIds = new Set(aliases.map((alias) => alias.assetId));
-    const validInheritedInputs =
-        analysisVersion === ECOMMERCE_VISUAL_ANALYSIS_V4_VERSION &&
-        inherited &&
-        aliases.length <= 2 &&
-        explicitIds.size === aliases.length &&
-        [...inheritedIds, ...explicitIds].every((id) => assets.some((asset) => asset.id === id)) &&
-        assets.every((asset) => explicitIds.has(asset.id) || inheritedIds.has(asset.id));
-    if (!assets.length || (assets.length > 2 && !validInheritedInputs) || new Set(assets.map((asset) => asset.id)).size !== assets.length || assets.some((asset) => asset.type !== "image" || !asset.url?.trim())) {
-        throw new EcommerceVisualAnalysisError("视觉分析需要一至两张可访问的图片", 400);
+    const referenceLimit = analysisVersion === ECOMMERCE_VISUAL_ANALYSIS_V4_VERSION ? CREATIVE_IMAGE_REFERENCE_LIMIT : 2;
+    if (!assets.length || assets.length > referenceLimit || new Set(assets.map((asset) => asset.id)).size !== assets.length || assets.some((asset) => asset.type !== "image" || !asset.url?.trim())) {
+        throw new EcommerceVisualAnalysisError(referenceLimit === 2 ? "视觉分析需要一至两张可访问的图片" : `视觉分析需要一至 ${referenceLimit} 张可访问的图片`, 400);
     }
     let images: Awaited<ReturnType<typeof normalizePlanningImage>>[];
     try {
         const prepared = input.preparedReferences;
-        images = await Promise.all(
-            assets.map((asset) => {
-                if (!prepared) return normalizePlanningImage(asset.url!, input.origin, input.cookie);
-                const reference = prepared.find((item) => item.assetId === asset.id);
-                if (!reference) throw new EcommerceVisualAnalysisError("参考预处理工件不完整", 400);
-                return loadPreparedEcommerceReference(reference, input.origin, input.cookie);
-            }),
-        );
+        images = [];
+        for (const asset of assets) {
+            const reference = prepared?.find((item) => item.assetId === asset.id);
+            if (prepared && !reference) throw new EcommerceVisualAnalysisError("参考预处理工件不完整", 400);
+            images.push(reference ? await loadPreparedEcommerceReference(reference, input.origin, input.cookie) : await normalizePlanningImage(asset.url!, input.origin, input.cookie));
+        }
     } catch (error) {
         if (error instanceof EcommerceReferenceSourceChangedError) throw error;
         throw new EcommerceVisualAnalysisError(error instanceof Error ? error.message : "无法读取视觉分析图片", error instanceof EcommerceVisualAnalysisError ? error.status : 400, { analysisVersion, kind: "input_media", attempts: [] });

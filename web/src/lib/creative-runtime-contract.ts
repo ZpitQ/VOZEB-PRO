@@ -1,3 +1,4 @@
+import { CREATIVE_IMAGE_REFERENCE_LIMIT } from "@/lib/creative-upload";
 import { videoFrameAssetIds, type CreativeVideoReferenceMode } from "@/lib/video-reference-contract";
 
 export const creativeSurfaces = ["chat", "canvas", "drama"] as const;
@@ -197,6 +198,7 @@ export function normalizeCreativeRunRequest(value: unknown): CreativeRunRequest 
     if (!clientRequestId) throw new CreativeRuntimeInputError("请求标识不能为空");
     if (!surface) throw new CreativeRuntimeInputError("创作入口不正确");
     if (!prompt) throw new CreativeRuntimeInputError("创作需求不能为空");
+    if (surface === "chat" && preferences?.mode === "image" && assetIds.length > CREATIVE_IMAGE_REFERENCE_LIMIT) throw new CreativeRuntimeInputError(`一次最多引用 ${CREATIVE_IMAGE_REFERENCE_LIMIT} 张图片`);
     if (skillIds.length > CREATIVE_RUN_SKILL_LIMIT) throw new CreativeRuntimeInputError(`一次最多启用 ${CREATIVE_RUN_SKILL_LIMIT} 个 Skill`);
     if (modelIds.length > CREATIVE_RUN_MODEL_LIMIT) throw new CreativeRuntimeInputError(`一次最多选择 ${CREATIVE_RUN_MODEL_LIMIT} 个模型`);
     if (videoFrameAssetIds(preferences?.video).some((id) => !assetIds.includes(id))) throw new CreativeRuntimeInputError("视频首尾帧必须来自本轮已选择的图片素材");

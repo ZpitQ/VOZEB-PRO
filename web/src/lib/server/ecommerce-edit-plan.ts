@@ -1,3 +1,4 @@
+import { CREATIVE_IMAGE_REFERENCE_LIMIT } from "@/lib/creative-upload";
 import { resolveAgentTaskCount } from "./agent-run-validation";
 
 export const ECOMMERCE_EDIT_PLAN_VERSION = "ecommerce-edit.v5" as const;
@@ -423,7 +424,12 @@ export function validateEcommerceEditPlan(plan: EcommerceEditPlan): void {
     } else {
         requireId(plan.source.productAnchorId, "商品主参考图");
     }
-    if (!Array.isArray(plan.source.sceneReferenceIds) || plan.source.sceneReferenceIds.length > 1) throw new Error("场景参考图数量无效");
+    if (
+        !Array.isArray(plan.source.sceneReferenceIds) ||
+        new Set(plan.source.sceneReferenceIds).size !== plan.source.sceneReferenceIds.length ||
+        new Set([plan.source.productAnchorId, plan.source.currentSceneBaselineId, ...plan.source.sceneReferenceIds].filter(Boolean)).size > CREATIVE_IMAGE_REFERENCE_LIMIT
+    )
+        throw new Error("场景参考图数量无效");
     plan.source.sceneReferenceIds.forEach((id) => {
         requireId(id, "场景参考图");
         if (plan.source.productAnchorId && id === plan.source.productAnchorId) throw new Error("场景参考图不能作为商品主参考图");

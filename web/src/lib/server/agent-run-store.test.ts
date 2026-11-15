@@ -35,6 +35,12 @@ import { publicAgentRun } from "./agent-run-public";
 describe("ecommerce result continuity store", () => {
     beforeEach(() => vi.clearAllMocks());
 
+    it("rejects five actual image assets before creating a run even without a mode hint", async () => {
+        mocks.getCreativeAssetsByIds.mockResolvedValue([productAsset("one"), productAsset("two"), productAsset("three"), productAsset("four"), productAsset("five")]);
+        await expect(createAgentRun("user", { surface: "chat", conversationId: "conversation", clientRequestId: "five", prompt: "Create an image", assetIds: ["one", "two", "three", "four", "five"], skillIds: [], modelIds: [] })).rejects.toThrow("4");
+        expect(mocks.createCreativeRunBundle).not.toHaveBeenCalled();
+    });
+
     it("continues editing a delivered model result when another selected model failed", async () => {
         const snapshot = { ...passedSnapshot(), mode: "active", qualityPolicy: "disabled", technicalCheck: { status: "passed", checks: [], hardFailures: [] } };
         const failed = { ...snapshot, technicalCheck: { ...snapshot.technicalCheck, status: "failed" } };

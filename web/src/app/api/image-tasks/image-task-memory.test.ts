@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({ registrations: vi.fn() }));
 
 vi.mock("@/lib/server/local-media-registry", () => ({ getLocalMediaRegistrations: mocks.registrations }));
 
-import { createWeightedImageSubmissionQueue, estimateImageSubmissionSourceBytes } from "./image-task-memory";
+import { assertImageSubmissionJsonBudget, createWeightedImageSubmissionQueue, estimateImageSubmissionSourceBytes } from "./image-task-memory";
 
 describe("image submission memory queue", () => {
     beforeEach(() => {
@@ -42,6 +42,19 @@ describe("image submission memory queue", () => {
         releaseFirst();
         await Promise.all([first, second]);
         expect(order).toEqual(["first:start", "first:end", "second:start", "second:end"]);
+    });
+
+    it("rejects one submission that exceeds capacity without blocking later work", async () => {
+        const queue = createWeightedImageSubmissionQueue(100);
+        const operation = vi.fn();
+        await expect(queue.run(101, operation)).rejects.toThrow("内存预算");
+        expect(operation).not.toHaveBeenCalled();
+        await expect(queue.run(100, async () => "accepted")).resolves.toBe("accepted");
+    });
+
+    it("includes JSON overhead in the complete inline image budget", () => {
+        expect(() => assertImageSubmissionJsonBudget(30 * 1024 * 1024, 4, { prompt: "product", images: [{ image_url: "data:image/png;base64," }] })).toThrow("体积限制");
+        expect(() => assertImageSubmissionJsonBudget(16 * 1024 * 1024, 4, { prompt: "product" })).not.toThrow();
     });
 
     it("uses registered media bytes when estimating an inline edit submission", async () => {

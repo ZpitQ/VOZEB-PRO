@@ -197,6 +197,7 @@ function publicCapabilityProfile(profile: AuthSettings["logicalModels"][number][
         minDurationSeconds: profile.minDurationSeconds,
         maxDurationSeconds: profile.maxDurationSeconds,
         maxBatchSize: profile.maxBatchSize,
+        maxReferenceImages: profile.maxReferenceImages,
     };
     return Object.values(result).some((value) => value !== undefined && (!Array.isArray(value) || value.length)) ? result : undefined;
 }

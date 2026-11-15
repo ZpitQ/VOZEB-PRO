@@ -1,3 +1,6 @@
+import { getAuthSettings } from "@/lib/auth/store";
+import { CREATIVE_IMAGE_REFERENCE_LIMIT } from "@/lib/creative-upload";
+import { creativeImageReferenceLimit, creativeModelProfileForLogicalModel } from "@/lib/creative-model-capabilities";
 import { commitAgentImageProcessingFact, repairAgentImageProcessingFacts, type AgentImageProcessingFact, type AgentImageProcessingObservation } from "./agent-run-image-processing-projection";
 import type { ReviewFrozenMedia, RunMutation } from "./creative-runtime-repository";
 import { reviewContextDigest } from "./ecommerce-visual-review-identity";
@@ -154,6 +157,19 @@ export const AGENT_RUN_TTL_MS = TTL;
 
 export async function createAgentRun(userId: string, input: CreativeRunRequest) {
     await assertVideoFrameAssets(userId, input);
+    if (input.surface === "chat" && input.assetIds.length) {
+        const assets = await getCreativeAssetsByIds(input.assetIds, userId);
+        const count = assets.filter((asset) => asset.type === "image").length;
+        if (count > CREATIVE_IMAGE_REFERENCE_LIMIT) throw new CreativeRuntimeInputError(`一次最多引用 ${CREATIVE_IMAGE_REFERENCE_LIMIT} 张图片`);
+        if (count && input.modelIds.length) {
+            const settings = await getAuthSettings();
+            const models = settings.logicalModels
+                .filter((model) => input.modelIds.includes(model.id) && model.capability === "image")
+                .map((model) => ({ id: model.id, name: model.name, capability: "image" as const, capabilityProfile: creativeModelProfileForLogicalModel(model) }));
+            const limit = creativeImageReferenceLimit(models);
+            if (count > limit) throw new CreativeRuntimeInputError(`所选模型一次最多引用 ${limit} 张图片`);
+        }
+    }
     const now = Date.now();
     const conversationId = input.conversationId || `conversation-${nanoid()}`;
     const snapshot =

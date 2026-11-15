@@ -644,6 +644,18 @@ function executableEditPlanningTool(sources: EcommerceSources, referenceUses: Re
                 ...ecommerceEditPlanningV7Tool.parameters.properties,
                 operation: { type: "string", enum: [capability.operation] },
                 strategy: { type: "string", enum: [capability.strategy] },
+                source: {
+                    ...ecommerceEditPlanningV7Tool.parameters.properties.source,
+                    properties: {
+                        ...ecommerceEditPlanningV7Tool.parameters.properties.source.properties,
+                        sceneReferenceIds: {
+                            type: "array",
+                            minItems: sources.sceneReferenceIds.length,
+                            maxItems: sources.sceneReferenceIds.length,
+                            items: { type: "string", ...(sources.sceneReferenceIds.length ? { enum: sources.sceneReferenceIds } : {}) },
+                        },
+                    },
+                },
                 referenceUses: {
                     ...ecommerceEditPlanningV7Tool.parameters.properties.referenceUses,
                     minItems: referenceUses.length,
