@@ -1,3 +1,4 @@
+import { CREATIVE_IMAGE_REFERENCE_LIMIT } from "@/lib/creative-upload";
 import type { ImageProcessingGenerationInput } from "../image-processing/contracts";
 import { ecommerceCanvasSize, type EcommerceCanvasConstraint, type EcommerceEditPlan, type EcommerceEditProtection, type EcommercePhotographyPlan, type EcommerceReferenceUse } from "./ecommerce-edit-plan";
 import type { EcommerceRoleCandidate, EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
@@ -136,7 +137,7 @@ export function compileEcommerceImageRequest(plan: EcommerceEditPlan, profile: E
 
 function productSceneReferences(plan: EcommerceEditPlan) {
     if (!plan.source.productAnchorId) throw new Error("商品场景生成缺少商品锚点");
-    return uniqueReferences([{ assetId: plan.source.productAnchorId, role: "product" as const }, ...plan.source.sceneReferenceIds.map((assetId) => ({ assetId, role: "scene" as const }))]);
+    return uniqueReferences([{ assetId: plan.source.productAnchorId, role: "product" as const }, ...auxiliaryReferences(plan)]);
 }
 
 function compilePhotography(plan: EcommerceEditPlan): string[] {
@@ -154,15 +155,15 @@ function compilePhotography(plan: EcommerceEditPlan): string[] {
 
 function localEditReferences(plan: EcommerceEditPlan) {
     if (!plan.source.productAnchorId) throw new Error("商品局部编辑缺少商品锚点");
-    return uniqueReferences([
-        ...(plan.source.currentSceneBaselineId ? [{ assetId: plan.source.currentSceneBaselineId, role: "scene" as const }] : []),
-        { assetId: plan.source.productAnchorId, role: "product" as const },
-        ...plan.source.sceneReferenceIds.map((assetId) => ({ assetId, role: "scene" as const })),
-    ]);
+    return uniqueReferences([...(plan.source.currentSceneBaselineId ? [{ assetId: plan.source.currentSceneBaselineId, role: "scene" as const }] : []), { assetId: plan.source.productAnchorId, role: "product" as const }, ...auxiliaryReferences(plan)]);
 }
 
 function sceneEditReferences(plan: EcommerceEditPlan) {
-    return uniqueReferences([...(plan.source.currentSceneBaselineId ? [{ assetId: plan.source.currentSceneBaselineId, role: "scene" as const }] : []), ...plan.source.sceneReferenceIds.map((assetId) => ({ assetId, role: "scene" as const }))]);
+    return uniqueReferences([...(plan.source.currentSceneBaselineId ? [{ assetId: plan.source.currentSceneBaselineId, role: "scene" as const }] : []), ...auxiliaryReferences(plan)]);
+}
+
+function auxiliaryReferences(plan: EcommerceEditPlan): Array<{ assetId: string; role: "product" | "scene" }> {
+    return plan.source.sceneReferenceIds.map((assetId) => ({ assetId, role: plan.referenceUses?.find((use) => use.assetId === assetId)?.purposes.includes("product_identity") ? "product" : "scene" }));
 }
 
 function mapReferenceUses(referenceRoles: Array<{ assetId: string; role: "product" | "scene" }>, uses: EcommerceReferenceUse[]) {
@@ -178,6 +179,7 @@ function mapReferenceUses(referenceRoles: Array<{ assetId: string; role: "produc
 }
 
 function uniqueReferences(references: Array<{ assetId: string; role: "product" | "scene" }>) {
+    if (new Set(references.map((reference) => reference.assetId)).size > CREATIVE_IMAGE_REFERENCE_LIMIT) throw new Error(`一次最多发送 ${CREATIVE_IMAGE_REFERENCE_LIMIT} 张参考图（包含连续编辑原图）`);
     const seen = new Set<string>();
     return references.filter((reference) => Boolean(reference.assetId) && !seen.has(reference.assetId) && Boolean(seen.add(reference.assetId)));
 }

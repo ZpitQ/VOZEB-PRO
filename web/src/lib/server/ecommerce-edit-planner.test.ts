@@ -28,6 +28,21 @@ vi.mock("./text-planning-runtime", () => ({
 const mockedRequest = vi.mocked(requestStructuredText);
 
 describe("ecommerce edit planner", () => {
+    it("declares all three auxiliary references in the model planning contract", async () => {
+        const { input, analysis } = productPurposeFixture("参考图片1风格，修改图片2背景");
+        const scene = analysis.references.find((reference) => reference.assetId === "scene")!;
+        analysis.references.push({ ...structuredClone(scene), assetId: "light" }, { ...structuredClone(scene), assetId: "composition" });
+        input.sources.sceneReferenceIds = ["scene", "light", "composition"];
+        const sceneBinding = input.referenceDecision.bindings.find((binding) => binding.assetId === "scene")!;
+        input.referenceDecision.bindings.push({ ...sceneBinding, assetId: "light", alias: "图片3" }, { ...sceneBinding, assetId: "composition", alias: "图片4" });
+        input.referenceDecision.appliedCues.push({ assetId: "light", purpose: "style", cueIds: ["style"] }, { assetId: "composition", purpose: "style", cueIds: ["style"] });
+        mockedRequest.mockRejectedValue(new Error("captured four reference contract"));
+        await expect(planEcommerceEdit(input, analysis, plannerRole([candidate("planner")]))).rejects.toThrow("captured four reference contract");
+        expect(mockedRequest.mock.calls[0][0].tool?.parameters).toMatchObject({
+            properties: { source: { properties: { sceneReferenceIds: { minItems: 3, maxItems: 3, items: { enum: ["scene", "light", "composition"] } } } }, referenceUses: { minItems: 4, maxItems: 4 } },
+        });
+    });
+
     it("keeps a product detail as a semantic reference without forcing its original framing", () => {
         const { input, analysis, plan } = productPurposeFixture("参考图片1风格，修改图片2背景");
         analysis.references.find((reference) => reference.assetId === "product")!.contentType = "product_detail";

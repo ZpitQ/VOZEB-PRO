@@ -212,7 +212,15 @@ export function resolveEcommerceReferenceDecision(input: { planningInput: Ecomme
         const eligible = aliases.filter(({ assetId }) => !explicitRequest.excludedTargetIds.includes(assetId) && (!chosen.has(assetId) || chosen.get(assetId)!.purposes.includes("product_identity")));
         const products = eligible.filter(({ assetId }) => targetCandidate(facts.get(assetId)));
         const scenes = eligible.filter(({ assetId }) => facts.get(assetId)?.contentType === "interior_scene" && facts.get(assetId)?.confidence === "high");
-        const inferredTarget = inherited?.editTargetId ? eligible.find(({ assetId }) => assetId === inherited.editTargetId) : products.length === 1 ? products[0] : !products.length && scenes.length === 1 ? scenes[0] : undefined;
+        const inferredTarget = inherited?.editTargetId
+            ? eligible.find(({ assetId }) => assetId === inherited.editTargetId)
+            : products.length === 1
+              ? products[0]
+              : !products.length && scenes.length === 1
+                ? scenes[0]
+                : aliases.length >= 3 && eligible.some((alias) => alias.assetId === aliases[0].assetId) && (products.some((alias) => alias.assetId === aliases[0].assetId) || scenes.some((alias) => alias.assetId === aliases[0].assetId))
+                  ? aliases[0]
+                  : undefined;
         if (inferredTarget) {
             const previous = chosen.get(inferredTarget.assetId);
             chosen.set(inferredTarget.assetId, { ...inferredTarget, purposes: ECOMMERCE_REFERENCE_PURPOSES.filter((purpose) => purpose === "edit_target" || previous?.purposes.includes(purpose)), source: previous?.source || "inferred" });
@@ -251,11 +259,12 @@ export function resolveEcommerceReferenceDecision(input: { planningInput: Ecomme
         issues.push({ code: "edit_target_facts_unreliable", assetId: target.assetId, path: "references", message: "修改目标的可见事实不足，请确认或提供清晰图片" });
     }
     const identities = bindings.filter((binding) => binding.purposes.includes("product_identity"));
-    if (identities.length > 1) issues.push({ code: "product_identity_ambiguous", path: "bindings", message: "请选择唯一商品身份来源" });
     const inheritedAnchor = editTargetId === inherited?.editTargetId ? inherited.productAnchorId : null;
     if (!identities.length && inheritedAnchor && (!reliableProduct(facts.get(inheritedAnchor)) || assets.get(inheritedAnchor)?.type !== "image"))
         issues.push({ code: "continuity_anchor_unreliable", assetId: inheritedAnchor, path: "productFacts", message: "连续编辑原始商品锚点不可可靠确认" });
-    const productAnchorId = identities.length === 1 && reliableProduct(facts.get(identities[0].assetId)) ? identities[0].assetId : !identities.length && inheritedAnchor && reliableProduct(facts.get(inheritedAnchor)) ? inheritedAnchor : null;
+    const primaryIdentity = identities.find((binding) => binding.assetId === editTargetId) || identities.find((binding) => binding.assetId === inheritedAnchor) || (identities.length === 1 ? identities[0] : undefined);
+    if (identities.length > 1 && !primaryIdentity) issues.push({ code: "product_identity_ambiguous", path: "bindings", message: "请选择唯一商品主图，其余商品图可作为身份参考" });
+    const productAnchorId = primaryIdentity && reliableProduct(facts.get(primaryIdentity.assetId)) ? primaryIdentity.assetId : !identities.length && inheritedAnchor && reliableProduct(facts.get(inheritedAnchor)) ? inheritedAnchor : null;
     const appliedCues: EcommerceReferenceDecision["appliedCues"] = [];
     for (const binding of bindings) {
         for (const purpose of binding.purposes.filter((purpose) => ["style", "lighting", "composition"].includes(purpose))) {

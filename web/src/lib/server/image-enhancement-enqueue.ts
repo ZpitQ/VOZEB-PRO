@@ -147,6 +147,8 @@ export function planImageTaskEnhancement(task: ImageTask, result: NonNullable<Im
     const source = result.enhancementSource || result.nativeSource;
     if (!source) throw new Error("native_invalid");
     const delivery = result.enhancementSource ? undefined : imageTaskEnhancementDelivery(task, result);
+    const canvas = task.ecommerceExecution?.canvas;
+    const targetSize = isFullImageEcommerceExecution(task.ecommerceExecution) && canvas?.mode === "ratio" && canvas.source === "baseline" ? `${source.width}:${source.height}` : task.config.size || "auto";
     return planImageEnhancement({
         nativeValid: enhancementNativeIdentityMatches(task, result, source, delivery),
         enabled: task.enhancementPolicy?.enabled ?? false,
@@ -165,7 +167,7 @@ export function planImageTaskEnhancement(task: ImageTask, result: NonNullable<Im
             ),
         layered: task.config.outputMode === "layers",
         source,
-        target: parseImageDimensions(resolveResultSize(task.config.quality, task.config.size || "auto") || "") || { width: 0, height: 0 },
+        target: parseImageDimensions(resolveResultSize(task.config.quality, targetSize) || "") || { width: 0, height: 0 },
         connection: task.enhancementPolicy?.connection ?? null,
         ...(delivery ? { delivery } : {}),
     });

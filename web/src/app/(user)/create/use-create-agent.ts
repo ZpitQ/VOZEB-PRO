@@ -1,5 +1,7 @@
 "use client";
 
+import { CREATIVE_IMAGE_REFERENCE_LIMIT } from "@/lib/creative-upload";
+
 import { nanoid } from "nanoid";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -482,6 +484,8 @@ export function useCreateAgent() {
             const executionPrompt = prompt.trim();
             const content = (options?.publicPrompt || prompt).trim();
             if (!executionPrompt || !content || sending || submittingRef.current) return false;
+            const selectedIds = options?.assetIds || selectedAssetIdsWithDrafts;
+            if (selectedIds.length > CREATIVE_IMAGE_REFERENCE_LIMIT) throw new Error(`一次最多引用 ${CREATIVE_IMAGE_REFERENCE_LIMIT} 张图片`);
             submittingRef.current = true;
             const cancellation = { requested: false };
             pendingSubmissionRef.current = cancellation;
@@ -489,7 +493,6 @@ export function useCreateAgent() {
             const submissionConversationId = activeConversationRef.current;
             stopWatching();
             setSending(true);
-            const selectedIds = options?.assetIds || selectedAssetIdsWithDrafts;
             let prepared: Awaited<ReturnType<typeof materializeDraftAttachments>>;
             try {
                 prepared = await materializeDraftAttachments(selectedIds, generation, submissionConversationId);

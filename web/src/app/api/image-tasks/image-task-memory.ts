@@ -1,3 +1,5 @@
+import { GenerationSubmissionSafeFailure } from "@/lib/server/generation-submission-error";
+import { SYSTEM_PROXY_JSON_BODY_MAX_BYTES } from "@/lib/server/system-proxy-request-limits";
 import { getHeapStatistics } from "node:v8";
 
 import type { ImageTaskReference } from "@/lib/server/image-task-store";
@@ -43,7 +45,8 @@ export function createWeightedImageSubmissionQueue(capacity: number): WeightedIm
 
     return {
         async run<T>(weight: number, operation: () => Promise<T>) {
-            const reservedWeight = Math.min(maximumWeight, Math.max(1, Math.ceil(Number.isFinite(weight) ? weight : maximumWeight)));
+            if (!Number.isFinite(weight) || weight > maximumWeight) throw new GenerationSubmissionSafeFailure("参考图片总量超过当前内存预算，请减少图片或压缩后重试");
+            const reservedWeight = Math.max(1, Math.ceil(weight));
             await new Promise<void>((resolve) => {
                 waiting.push({ weight: reservedWeight, start: resolve });
                 startWaitingSubmissions();
@@ -65,6 +68,11 @@ export async function estimateImageSubmissionSourceBytes(task: ImageSubmissionSo
     const registeredBytes = new Map(registrations.map((registration) => [registration.storageKey, registration.bytes]));
 
     return sources.reduce((total, source) => total + estimateReferenceSourceBytes(source, registeredBytes), 0);
+}
+
+export function assertImageSubmissionJsonBudget(sourceBytes: number, sourceCount: number, bodyWithoutBase64: unknown) {
+    const encodedBytes = Math.ceil(sourceBytes / 3) * 4 + Math.max(0, sourceCount - 1) * 4;
+    if (encodedBytes + Buffer.byteLength(JSON.stringify(bodyWithoutBase64), "utf8") > SYSTEM_PROXY_JSON_BODY_MAX_BYTES) throw new GenerationSubmissionSafeFailure("参考图片编码后超过请求体积限制，请减少图片或压缩后重试");
 }
 
 export async function runNativeSub2ApiImageSubmission<T>(task: ImageSubmissionSources, operation: () => Promise<T>) {

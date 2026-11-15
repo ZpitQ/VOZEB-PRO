@@ -189,7 +189,24 @@ describe("ecommerce visual analysis", () => {
         expect(JSON.stringify(request.messages)).toContain("assetId=original;alias=");
         expect(JSON.stringify(request.messages)).toContain("inheritedReferences");
         await expect(analyzeEcommerceReferences({ ...base, planningInput: input }, role("vision_analysis", [candidate("primary")]))).rejects.toThrow("一至两张");
-        await expect(analyzeEcommerceReferences({ ...base, planningInput: { ...input, inheritedReferences: undefined }, analysisVersion: "ecommerce-visual-analysis.v4" }, role("vision_analysis", [candidate("primary")]))).rejects.toThrow("一至两张");
+        await expect(analyzeEcommerceReferences({ ...base, planningInput: { ...input, inheritedReferences: undefined }, analysisVersion: "ecommerce-visual-analysis.v4" }, role("vision_analysis", [candidate("primary")]))).resolves.toMatchObject({
+            analysisVersion: "ecommerce-visual-analysis.v4",
+        });
+    });
+
+    it("analyzes all four real image inputs and rejects a fifth before transport", async () => {
+        const input = requestInput();
+        input.planningInput.assetCandidates.push({ id: "light", type: "image", title: "light", url: fixtureImage }, { id: "composition", type: "image", title: "composition", url: fixtureImage });
+        const value = v4Fixture();
+        value.references.push({ ...structuredClone(value.references[0]), assetId: "light" }, { ...structuredClone(value.references[0]), assetId: "composition" });
+        mockedRequest.mockResolvedValue(modelCall(value));
+        const result = await analyzeEcommerceReferences({ ...input, analysisVersion: "ecommerce-visual-analysis.v4" }, role("vision_analysis", [candidate("primary")]));
+        expect(result.references.map((reference) => reference.assetId)).toEqual(["product", "scene", "light", "composition"]);
+        expect(mockedRequest.mock.calls[0][0].tool.parameters).toMatchObject({ properties: { references: { minItems: 4, maxItems: 4 } } });
+        input.planningInput.assetCandidates.push({ id: "five", type: "image", title: "five", url: fixtureImage });
+        mockedRequest.mockClear();
+        await expect(analyzeEcommerceReferences({ ...input, analysisVersion: "ecommerce-visual-analysis.v4" }, role("vision_analysis", [candidate("primary")]))).rejects.toThrow("4");
+        expect(mockedRequest).not.toHaveBeenCalled();
     });
 
     it("provides specific v4 validator paths for the existing structured repair request", async () => {

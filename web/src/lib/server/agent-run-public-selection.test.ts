@@ -418,17 +418,36 @@ describe("owned public reference review", () => {
         expect(JSON.stringify(projection)).not.toMatch(/vision-private|service-private|source-url-private|rawAnalysis|attempts/);
     });
 
-    it.each([false, true])("offers purpose confirmation only when two product references have a legal assignment (reliable cue: %s)", async (hasCue) => {
+    it("offers purpose confirmation for a legal product target and identity without lighting cues", async () => {
         const run = referenceReviewRun(ownedAssets);
         const checkpoint = run.ecommerceSnapshot!.referenceCheckpoint!;
         const analysis = checkpoint.analysis!;
-        analysis.references[1] = { ...structuredClone(analysis.references[0]), assetId: "scene", cues: hasCue ? [{ id: "second-light", facet: "lighting", description: "soft light", confidence: "high" }] : [] };
+        analysis.references[1] = { ...structuredClone(analysis.references[0]), assetId: "scene", cues: [] };
         checkpoint.decision = resolveEcommerceReferenceDecision({ planningInput: checkpoint.planningInput, analysis });
         expect(checkpoint.decision.issues.every((issue) => ["reference_expression_unresolved", "edit_target_required", "reference_purpose_required"].includes(issue.code))).toBe(true);
         const before = structuredClone(checkpoint);
         const projection = await publicAgentRunForRequest(run, request);
-        expect(projection.ecommerceReferenceReview?.kind).toBe(hasCue ? "confirm_purposes" : "retry_analysis");
-        if (!hasCue) expect(projection.ecommerceReferenceReview?.question).toContain("重新分析");
+        const review = projection.ecommerceReferenceReview!;
+        expect(review.kind).toBe("confirm_purposes");
+        const confirmed = confirmedReferenceDecision(checkpoint, {
+            action: "confirm_purposes",
+            reviewId: review.reviewId,
+            decisionVersion: "ecommerce-reference-decision.v1",
+            bindings: [
+                { assetId: "product", assetVersion: checkpoint.assets[0].assetVersion, purposes: ["edit_target"] },
+                { assetId: "scene", assetVersion: checkpoint.assets[1].assetVersion, purposes: ["product_identity"] },
+            ],
+        });
+        expect(confirmed?.decision).toMatchObject({
+            state: "resolved",
+            editTargetId: "product",
+            productAnchorId: "product",
+            bindings: [
+                { assetId: "product", purposes: ["edit_target", "product_identity"] },
+                { assetId: "scene", purposes: ["product_identity"] },
+            ],
+            issues: [],
+        });
         expect(checkpoint).toEqual(before);
     });
 

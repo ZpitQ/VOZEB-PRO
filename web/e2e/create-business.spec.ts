@@ -118,6 +118,61 @@ async function holdSubmission(page: Page) {
     return { received: received.promise, release: release.resolve };
 }
 
+test("reference thumbnails preview local drafts without losing text or removing attachments", async ({ page }) => {
+    await open(page, "references");
+    await page.locator('input[type="file"]').setInputFiles({ name: "preview-local.png", mimeType: "image/png", buffer: Buffer.from(png.split(",")[1], "base64") });
+    await composer(page).fill("保留这段尚未发送的要求");
+    await page.getByRole("img", { name: "preview-local.png", exact: true }).click();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await composer(page).click();
+    await page.getByRole("img", { name: "preview-local.png", exact: true }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(page.getByRole("dialog").getByRole("img", { name: "preview-local.png", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await expect(composer(page)).toHaveValue("保留这段尚未发送的要求");
+    await expect(page.getByRole("img", { name: "preview-local.png", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "移除preview-local.png", exact: true }).click();
+    await expect(page.getByRole("img", { name: "preview-local.png", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toBeHidden();
+});
+
+test("reference thumbnails preview submitted images and their labels after reload", async ({ page }) => {
+    const messages = exchange("references");
+    messages[0].metadata = { assetIds: ["reference-A", "reference-B"] };
+    await page.route("**/api/creative/conversations/references/messages?*", (route) => ok(route, { messages }));
+    await open(page, "references");
+    const strip = page.getByLabel("本轮参考素材", { exact: true });
+    await strip.getByRole("img", { name: "Reference A", exact: true }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await composer(page).click();
+    await page.reload();
+    await strip.getByRole("img", { name: "Reference A", exact: true }).click({ position: { x: 8, y: 8 } });
+    await expect(page.getByRole("dialog").getByRole("img", { name: "Reference A", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(strip.getByRole("img", { name: "Reference B", exact: true })).toBeVisible();
+});
+
+test("reference strip keeps the first and last of four submitted images reachable", async ({ page }) => {
+    const assets = [references[0], references[1], { ...references[0], id: "reference-C", title: "Reference C" }, { ...references[0], id: "reference-D", title: "Reference D" }];
+    const messages = exchange("references");
+    messages[0].metadata = { assetIds: ["reference-A", "reference-B", "reference-C", "reference-D"] };
+    await page.route("**/api/creative/conversations/references/assets", (route) => ok(route, { assets }));
+    await page.route("**/api/creative/conversations/references/messages?*", (route) => ok(route, { messages }));
+    await open(page, "references");
+    const strip = page.getByLabel("本轮参考素材", { exact: true });
+    const first = strip.getByRole("img", { name: "Reference A", exact: true });
+    expect(await first.evaluate((image) => image.getBoundingClientRect().left - image.closest('[aria-label="本轮参考素材"]')!.getBoundingClientRect().left)).toBeGreaterThanOrEqual(0);
+    const last = strip.getByRole("img", { name: "Reference D", exact: true });
+    await last.scrollIntoViewIfNeeded();
+    expect(await strip.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+    await last.click();
+    await expect(page.getByRole("dialog").getByRole("img", { name: "Reference D", exact: true })).toBeVisible();
+});
+
 test("new references preserve existing image aliases and submitted order", async ({ page }) => {
     const submitted = deferred();
     let payload: { assetIds: string[]; prompt: string };
@@ -137,6 +192,57 @@ test("new references preserve existing image aliases and submitted order", async
     await page.getByRole("button", { name: "发送", exact: true }).click();
     await submitted.promise;
     expect(payload!.assetIds).toEqual(["reference-B", "reference-A"]);
+});
+
+test("four local references reject a fifth upload and mention without changing aliases", async ({ page }) => {
+    await open(page, "references");
+    const buffer = Buffer.from(png.split(",")[1], "base64");
+    await page.locator('input[type="file"]').setInputFiles([
+        { name: "one.png", mimeType: "image/png", buffer },
+        { name: "two.png", mimeType: "image/png", buffer },
+        { name: "three.png", mimeType: "image/png", buffer },
+        { name: "four.png", mimeType: "image/png", buffer },
+    ]);
+    await expect(page.getByRole("button", { name: /^移除(?:one|two|three|four)\.png$/ })).toHaveCount(4);
+    await page.locator('input[type="file"]').setInputFiles({ name: "five.png", mimeType: "image/png", buffer });
+    await expect(page.getByText("一次最多引用 4 张图片，请减少本次添加的图片", { exact: true })).toBeVisible();
+    await composer(page).fill("调整 @");
+    await page.getByRole("button", { name: "选择Reference A", exact: true }).click();
+    await expect(page.getByText("一次最多引用 4 张图片", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^移除(?:one|two|three|four)\.png$/ })).toHaveCount(4);
+    await expect(composer(page)).toHaveValue("调整 @");
+});
+
+test("the public model reference limit blocks a third local image", async ({ page }) => {
+    await page.route("**/api/auth/session", async (route) => {
+        const response = await route.fetch();
+        const payload = await response.json();
+        payload.settings.logicalModels = [
+            {
+                id: "limited-image",
+                name: "Limited image",
+                capability: "image",
+                enabled: true,
+                bindings: [{ id: "limited-binding", channelId: "limited-channel", upstreamModel: "gpt-image-2.5-flare", enabled: true, priority: 1, capabilityProfile: { maxReferenceImages: 2 } }],
+            },
+        ];
+        payload.settings.systemChannels = [{ id: "limited-channel", name: "Limited fixture", baseUrl: "/api/ai/system/limited-channel", apiKey: "system", apiFormat: "openai", models: ["gpt-image-2.5-flare"], enabled: true }];
+        payload.settings.defaultModels.imageModel = "limited-image";
+        await route.fulfill({ response, json: payload });
+    });
+    await open(page, "references");
+    await page.getByRole("button", { name: "生成模型：智能模型", exact: true }).click();
+    await page.getByRole("button", { name: /Limited image 图片模型/ }).click();
+    await composer(page).click();
+    const buffer = Buffer.from(png.split(",")[1], "base64");
+    await page.locator('input[type="file"]').setInputFiles([
+        { name: "one.png", mimeType: "image/png", buffer },
+        { name: "two.png", mimeType: "image/png", buffer },
+    ]);
+    await expect(page.getByRole("button", { name: /^移除(?:one|two)\.png$/ })).toHaveCount(2);
+    await page.locator('input[type="file"]').setInputFiles({ name: "three.png", mimeType: "image/png", buffer });
+    await expect(page.getByText("一次最多引用 2 张图片，请减少本次添加的图片", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "移除three.png", exact: true })).toHaveCount(0);
 });
 
 test("local attachments retain their alias when a stored reference is added", async ({ page }) => {

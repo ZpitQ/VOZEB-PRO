@@ -76,6 +76,7 @@ export function AgentMediaPreview({
                     }}
                     styles={agentMediaPreviewPopupStyles}
                     preview={{
+                        motionName: "",
                         src: largePreviewUrl,
                         getContainer: getAgentMediaPreviewContainer,
                         cover: (

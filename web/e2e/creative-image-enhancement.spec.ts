@@ -26,6 +26,10 @@ test("restored variants keep one result and download and reference the actual se
     await expect(result.getByLabel("图像增强与版本", { exact: true })).toContainText(/当前AI增强\s*2048×2048/);
     const preview = result.getByTestId("creative-primary-result").locator("img");
     await expect(preview).toHaveAttribute("src", `${fixture.child.serverUrl}?format=webp&width=960`);
+    await preview.click();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await result.getByRole("button", { name: "原图", exact: true }).click({ trial: true });
     await referenceCurrent(page, actions);
     await expect(page.getByRole("button", { name: `移除${fixture.child.title}`, exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: `移除${fixture.original.title}`, exact: true })).toHaveCount(0);

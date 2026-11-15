@@ -1,3 +1,4 @@
+import { CREATIVE_IMAGE_REFERENCE_LIMIT } from "@/lib/creative-upload";
 import { createHash, randomUUID } from "node:crypto";
 import type { CreativeAsset, CreativeReferenceRecovery, CreativeReferenceReview } from "@/lib/creative-runtime-contract";
 import { ECOMMERCE_REFERENCE_PURPOSES } from "@/lib/creative-runtime-contract";
@@ -114,16 +115,25 @@ export function referenceReviewKind(checkpoint: EcommerceReferenceCheckpoint): C
 function hasResolvableReferenceBindings(checkpoint: EcommerceReferenceCheckpoint): boolean {
     const analysis = checkpoint.analysis;
     const aliases = checkpoint.assets.filter((item) => item.alias);
-    if (!analysis || !aliases.length || aliases.length > 3) return false;
-    const choices = aliases.map((item) => allowedEcommerceReferencePurposes(analysis.references.find((reference) => reference.assetId === item.asset.id)).map((purpose) => ({ assetId: item.asset.id, alias: item.alias, purposes: [purpose] })));
-    // A nonempty subset can resolve only if one of its single purposes can:
-    // extra cues add requirements, and a product target supplies its identity.
-    // At most three references and five purposes keep this search bounded.
-    const search = (index: number, bindings: Array<Omit<EcommerceReferenceBinding, "source">>): boolean => {
-        if (index === choices.length) return resolveEcommerceReferenceDecision({ planningInput: checkpoint.planningInput, analysis, confirmedBindings: bindings }).state === "resolved";
-        return choices[index].some((binding) => search(index + 1, [...bindings, binding]));
-    };
-    return search(0, []);
+    if (!analysis || !aliases.length || aliases.length > CREATIVE_IMAGE_REFERENCE_LIMIT) return false;
+    const choices = aliases.map((item) => ({ assetId: item.asset.id, alias: item.alias, allowed: allowedEcommerceReferencePurposes(analysis.references.find((reference) => reference.assetId === item.asset.id)) }));
+    // Only the target and primary identity affect whether a valid assignment exists.
+    const targets = [...choices.filter((item) => item.allowed.includes("edit_target")).map((item) => item.assetId), ...(checkpoint.planningInput.inheritedReferences ? [null] : [])];
+    const anchors = [null, ...choices.filter((item) => item.allowed.includes("product_identity")).map((item) => item.assetId)];
+    return targets.some((target) =>
+        anchors.some((anchor) => {
+            const bindings: Array<Omit<EcommerceReferenceBinding, "source">> = choices.map((item) => {
+                const purpose =
+                    item.assetId === target
+                        ? "edit_target"
+                        : item.assetId === anchor
+                          ? "product_identity"
+                          : item.allowed.find((purpose) => purpose !== "edit_target" && purpose !== "product_identity") || (item.allowed.includes("product_identity") ? "product_identity" : undefined);
+                return { assetId: item.assetId, alias: item.alias, purposes: purpose ? [purpose] : [] };
+            });
+            return bindings.every((binding) => binding.purposes.length) && resolveEcommerceReferenceDecision({ planningInput: checkpoint.planningInput, analysis, confirmedBindings: bindings }).state === "resolved";
+        }),
+    );
 }
 
 export function unsubmittedReferenceCheckpoint(run: AgentRun) {
@@ -149,7 +159,7 @@ export function parseCreativeReferenceRecovery(value: unknown): CreativeReferenc
         input.decisionVersion !== "ecommerce-reference-decision.v1" ||
         !Array.isArray(input.bindings) ||
         !input.bindings.length ||
-        input.bindings.length > 3 ||
+        input.bindings.length > CREATIVE_IMAGE_REFERENCE_LIMIT ||
         Object.keys(input).some((key) => !["reviewId", "action", "decisionVersion", "bindings"].includes(key))
     )
         throw new Error("参考用途确认无效");

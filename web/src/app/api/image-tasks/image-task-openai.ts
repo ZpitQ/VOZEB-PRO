@@ -1,3 +1,4 @@
+import { SYSTEM_PROXY_JSON_BODY_MAX_BYTES } from "@/lib/server/system-proxy-request-limits";
 import { readEcommerceGenerationInput } from "@/lib/server/image-processing-service";
 import { isFullImageEcommerceExecution } from "@/lib/server/ecommerce-image-compiler";
 import { after, NextResponse } from "next/server";
@@ -27,7 +28,7 @@ import { GenerationSubmissionSafeFailure } from "@/lib/server/generation-submiss
 import { ecommerceCanvasSize } from "@/lib/server/ecommerce-edit-plan";
 import { EcommerceCanvasAdapterReview, recordEcommerceCanvasRequest, resolveCanvasRequestSize } from "./image-task-size";
 
-import { runNativeSub2ApiImageSubmission } from "./image-task-memory";
+import { assertImageSubmissionJsonBudget, estimateImageSubmissionSourceBytes, runNativeSub2ApiImageSubmission } from "./image-task-memory";
 import {
     type CreateImageTaskBody,
     type ImageApiResponse,
@@ -249,8 +250,10 @@ export async function runOpenAiJsonImageEditTask(
     singleStep = false,
     billingVariant = "primary",
 ): Promise<ImageTaskRunResult> {
+    const generation = await generationInputForJsonEdit(task, quality, requestSize);
+    // Waiting for memory can outlive cancellation or the frozen input identity.
     const run = () => runOpenAiJsonImageEditTaskUnlocked(task, url, origin, publicOrigin, quality, requestSize, cookie, responseFormat, singleStep, billingVariant);
-    return isNativeSub2ApiImageEdit(task.config) ? runNativeSub2ApiImageSubmission(task, run) : run();
+    return isNativeSub2ApiImageEdit(task.config) ? runNativeSub2ApiImageSubmission(generation ? { userId: task.userId, references: generation.references, mask: generation.mask } : task, run) : run();
 }
 
 async function runOpenAiJsonImageEditTaskUnlocked(
@@ -276,7 +279,9 @@ async function runOpenAiJsonImageEditTaskUnlocked(
         const headers = taskHeaders(config, cookie, imagePointsIdempotencyKey(task, index === 0 ? billingVariant : `${billingVariant}-${index + 1}`));
         headers.set("content-type", "application/json");
         await recordEcommerceCanvasRequest(task, { size: body.size as string | undefined }, "OpenAI JSON edit");
-        const response = await imageSubmissionFetch(config, url, { method: "POST", headers, body: JSON.stringify(body), cache: "no-store" });
+        const encodedBody = JSON.stringify(body);
+        if (isNativeSub2ApiImageEdit(config) && Buffer.byteLength(encodedBody, "utf8") > SYSTEM_PROXY_JSON_BODY_MAX_BYTES) throw new GenerationSubmissionSafeFailure("参考图片编码后超过请求体积限制，请减少图片或压缩后重试");
+        const response = await imageSubmissionFetch(config, url, { method: "POST", headers, body: encodedBody, cache: "no-store" });
         if (!response.ok) {
             const message = await readFetchError(response, "图片生成失败");
             lastMessage = message;
@@ -410,6 +415,15 @@ export function buildResponsesImageBodies(task: ImageTask, origin: string) {
     ];
 }
 
+async function generationInputForJsonEdit(task: ImageTask, quality: string | undefined, requestSize: string | undefined) {
+    if (!isNativeSub2ApiImageEdit(task.config) || !task.ecommerceExecution || (!task.productProtection && !isFullImageEcommerceExecution(task.ecommerceExecution))) return undefined;
+    return readEcommerceGenerationInput(task, quality, requestSize).catch((cause: unknown) => {
+        const error = new GenerationSubmissionSafeFailure("生成输入副本读取失败，请重新发起任务");
+        error.cause = cause;
+        throw error;
+    });
+}
+
 export async function buildJsonImageEditBodies(
     task: ImageTask,
     quality: string | undefined,
@@ -424,34 +438,9 @@ export async function buildJsonImageEditBodies(
 ) {
     const referenceContext = { ownerUserId: task.userId, taskId: task.id };
     const nativeSub2Api = isNativeSub2ApiImageEdit(task.config);
-    const generation =
-        nativeSub2Api && task.ecommerceExecution && (task.productProtection || isFullImageEcommerceExecution(task.ecommerceExecution))
-            ? await readEcommerceGenerationInput(task, quality, requestSize).catch((cause: unknown) => {
-                  const error = new GenerationSubmissionSafeFailure("生成输入副本读取失败，请重新发起任务");
-                  error.cause = cause;
-                  throw error;
-              })
-            : undefined;
+    const generation = await generationInputForJsonEdit(task, quality, requestSize);
     const references = generation ? generation.references : task.references;
     const maskReference = generation ? generation.mask : task.mask;
-    const images = (
-        await Promise.all(
-            references.map((reference, index) =>
-                nativeSub2Api
-                    ? imageReferenceToDataUrl(reference, reference.name || `reference-${index + 1}.png`, origin, cookie, generation?.referenceBytes[index])
-                    : publicUrlReferenceMode
-                      ? publicImageReferenceRequestUrl(reference, origin, publicOrigin, referenceContext)
-                      : Promise.resolve(jsonImageReferenceRequestUrl(reference, origin)),
-            ),
-        )
-    ).filter(Boolean);
-    const mask = maskReference
-        ? nativeSub2Api
-            ? await imageReferenceToDataUrl(maskReference, maskReference.name || "mask.png", origin, cookie, generation?.maskBytes)
-            : publicUrlReferenceMode
-              ? await publicImageReferenceRequestUrl(maskReference, origin, publicOrigin, referenceContext)
-              : jsonImageReferenceRequestUrl(maskReference, origin)
-        : "";
     const prompt = withImageOutputInstructions(task.config, imageUrlObjectOnlyMode || nativeSub2Api ? buildSub2ApiImageEditPrompt(task.prompt, task.references, task.mask, nativeSub2Api) : buildImageReferencePromptText(task.prompt, task.references));
     const base = {
         model: task.config.model,
@@ -461,10 +450,31 @@ export async function buildJsonImageEditBodies(
         ...(requestSize ? { size: requestSize } : {}),
         ...(includeCompatibilityFields ? { response_format: responseFormat, output_format: IMAGE_OUTPUT_FORMAT } : {}),
         ...(task.config.outputBackground === "transparent" ? { background: "transparent" } : {}),
-        ...(mask ? { mask } : {}),
     };
+    if (nativeSub2Api) {
+        const sourceBytes = await estimateImageSubmissionSourceBytes({ userId: task.userId, references, mask: maskReference });
+        const prefix = (reference: ImageTaskReference) => ({ image_url: `data:${reference.type || "image/png"};base64,` });
+        assertImageSubmissionJsonBudget(sourceBytes, references.length + (maskReference ? 1 : 0), { ...base, images: references.map(prefix), ...(maskReference ? { mask: prefix(maskReference) } : {}), input_fidelity: "high" });
+    }
+    const images: string[] = [];
+    for (const [index, reference] of references.entries()) {
+        const image = nativeSub2Api
+            ? await imageReferenceToDataUrl(reference, reference.name || `reference-${index + 1}.png`, origin, cookie, generation?.referenceBytes[index])
+            : publicUrlReferenceMode
+              ? await publicImageReferenceRequestUrl(reference, origin, publicOrigin, referenceContext)
+              : jsonImageReferenceRequestUrl(reference, origin);
+        if (image) images.push(image);
+    }
+    const mask = maskReference
+        ? nativeSub2Api
+            ? await imageReferenceToDataUrl(maskReference, maskReference.name || "mask.png", origin, cookie, generation?.maskBytes)
+            : publicUrlReferenceMode
+              ? await publicImageReferenceRequestUrl(maskReference, origin, publicOrigin, referenceContext)
+              : jsonImageReferenceRequestUrl(maskReference, origin)
+        : "";
     if (nativeSub2Api) return [{ ...base, images: images.map((image_url) => ({ image_url })), ...(mask ? { mask: { image_url: mask } } : {}), input_fidelity: "high" }];
-    if (!images.length) return [base];
+    const baseWithMask = { ...base, ...(mask ? { mask } : {}) };
+    if (!images.length) return [baseWithMask];
     const first = images[0];
     const imageUrlObjects = images.map((item) => ({ image_url: item }));
     const imageObjects = images.map((item) => ({ url: item }));
@@ -484,12 +494,12 @@ export async function buildJsonImageEditBodies(
         ];
     }
     return [
-        { ...base, images: imageUrlObjects, ref_assets: imageUrlObjects, image_urls: imageUrlObjects },
-        { ...base, ...(images.length === 1 ? { image: first } : {}), images, ref_assets: images, image_urls: images },
-        { ...base, image_url: first },
-        { ...base, input_image: first },
-        { ...base, image: first },
-        { ...base, images: imageObjects, ref_assets: imageObjects, image_urls: imageObjects },
+        { ...baseWithMask, images: imageUrlObjects, ref_assets: imageUrlObjects, image_urls: imageUrlObjects },
+        { ...baseWithMask, ...(images.length === 1 ? { image: first } : {}), images, ref_assets: images, image_urls: images },
+        { ...baseWithMask, image_url: first },
+        { ...baseWithMask, input_image: first },
+        { ...baseWithMask, image: first },
+        { ...baseWithMask, images: imageObjects, ref_assets: imageObjects, image_urls: imageObjects },
     ];
 }
 

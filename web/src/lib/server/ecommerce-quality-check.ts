@@ -195,6 +195,7 @@ async function collectEcommerceTechnicalEvidence(input: EcommerceQualityCheckReq
     if (input.plan.canvas) {
         const constraint = input.plan.canvas;
         const allowRatioRounding = input.plan.planVersion === "ecommerce-edit.v7" && input.plan.strategy === "full_image";
+        const inheritedRatio = allowRatioRounding && constraint.mode === "ratio" && constraint.source === "baseline";
         validateEcommerceDimensions(constraint.size);
         const slots = [
             ...(input.batchEvidence || []).map((evidence) => ({ evidence, result: input.resultImages.find((result) => result.resultId === evidence.resultId) })),
@@ -229,13 +230,13 @@ async function collectEcommerceTechnicalEvidence(input: EcommerceQualityCheckReq
                     storedMatches,
                     normalization: result?.sceneProtectionEvidence?.normalization || ("none" as const),
                     mappingVerified,
-                    hardFailures: (nativeMatches === false && !mappingVerified) || storedMatches === false ? ["canvas_geometry"] : [],
+                    hardFailures: !inheritedRatio && ((nativeMatches === false && !mappingVerified) || storedMatches === false) ? ["canvas_geometry"] : [],
                 };
             }),
         );
         geometryChecks = canvasEvidence.map((evidence) => ({
             resultId: evidence.resultId,
-            key: "canvas_geometry",
+            key: inheritedRatio ? "stored_media" : "canvas_geometry",
             source: "media",
             status: evidence.hardFailures.length ? "failed" : evidence.nativeStatus === "unavailable" || evidence.storedStatus === "unavailable" ? "not_applicable" : "passed",
             reason: `native=${evidence.nativeSize ? evidence.nativeSize.width + "x" + evidence.nativeSize.height : "unavailable"};stored=${evidence.storedSize ? evidence.storedSize.width + "x" + evidence.storedSize.height : "unavailable"};constraint=${constraint.mode}:${constraint.size.width}x${constraint.size.height};normalization=${evidence.normalization}`,
