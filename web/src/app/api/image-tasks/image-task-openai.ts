@@ -251,7 +251,8 @@ export async function runOpenAiJsonImageEditTask(
     billingVariant = "primary",
 ): Promise<ImageTaskRunResult> {
     const generation = await generationInputForJsonEdit(task, quality, requestSize);
-    const run = () => runOpenAiJsonImageEditTaskUnlocked(task, url, origin, publicOrigin, quality, requestSize, cookie, responseFormat, singleStep, billingVariant, generation);
+    // Waiting for memory can outlive cancellation or the frozen input identity.
+    const run = () => runOpenAiJsonImageEditTaskUnlocked(task, url, origin, publicOrigin, quality, requestSize, cookie, responseFormat, singleStep, billingVariant);
     return isNativeSub2ApiImageEdit(task.config) ? runNativeSub2ApiImageSubmission(generation ? { userId: task.userId, references: generation.references, mask: generation.mask } : task, run) : run();
 }
 
@@ -266,7 +267,6 @@ async function runOpenAiJsonImageEditTaskUnlocked(
     responseFormat: (typeof IMAGE_RESPONSE_FORMATS)[number],
     singleStep: boolean,
     billingVariant: string,
-    generation?: Awaited<ReturnType<typeof readEcommerceGenerationInput>>,
 ): Promise<ImageTaskRunResult> {
     const config = task.config;
     let lastMessage = "";
@@ -275,7 +275,7 @@ async function runOpenAiJsonImageEditTaskUnlocked(
     const imageUrlObjectOnlyMode = shouldUseSub2ApiImageEdit(config, apiBase);
     const allowProtocolFallback = !task.sceneProtection && !task.ecommerceExecution?.canvas && allowsImageProtocolFallback(config);
     const publicUrlReferenceMode = imageUrlObjectOnlyMode || referenceMode === "public-url";
-    for (const [index, body] of (await buildJsonImageEditBodies(task, quality, requestSize, responseFormat, origin, publicOrigin, cookie, publicUrlReferenceMode, imageUrlObjectOnlyMode, allowProtocolFallback, generation)).entries()) {
+    for (const [index, body] of (await buildJsonImageEditBodies(task, quality, requestSize, responseFormat, origin, publicOrigin, cookie, publicUrlReferenceMode, imageUrlObjectOnlyMode, allowProtocolFallback)).entries()) {
         const headers = taskHeaders(config, cookie, imagePointsIdempotencyKey(task, index === 0 ? billingVariant : `${billingVariant}-${index + 1}`));
         headers.set("content-type", "application/json");
         await recordEcommerceCanvasRequest(task, { size: body.size as string | undefined }, "OpenAI JSON edit");
@@ -435,11 +435,10 @@ export async function buildJsonImageEditBodies(
     publicUrlReferenceMode = false,
     imageUrlObjectOnlyMode = false,
     includeCompatibilityFields = true,
-    preparedGeneration?: Awaited<ReturnType<typeof readEcommerceGenerationInput>>,
 ) {
     const referenceContext = { ownerUserId: task.userId, taskId: task.id };
     const nativeSub2Api = isNativeSub2ApiImageEdit(task.config);
-    const generation = preparedGeneration || (await generationInputForJsonEdit(task, quality, requestSize));
+    const generation = await generationInputForJsonEdit(task, quality, requestSize);
     const references = generation ? generation.references : task.references;
     const maskReference = generation ? generation.mask : task.mask;
     const prompt = withImageOutputInstructions(task.config, imageUrlObjectOnlyMode || nativeSub2Api ? buildSub2ApiImageEditPrompt(task.prompt, task.references, task.mask, nativeSub2Api) : buildImageReferencePromptText(task.prompt, task.references));

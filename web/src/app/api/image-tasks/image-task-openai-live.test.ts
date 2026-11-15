@@ -24,6 +24,45 @@ beforeEach(() => {
 });
 
 describe("OpenAI image provider over a live compatible fixture", () => {
+    it("does not submit a full-image task revoked while waiting for memory", async () => {
+        const fixture = createProtocolFixtureServer({ sub2apiImageEdits: true });
+        await new Promise<void>((resolve) => fixture.server.listen(0, "127.0.0.1", resolve));
+        const address = fixture.server.address();
+        if (!address || typeof address === "string") throw new Error("Fixture did not bind a port");
+        const origin = `http://127.0.0.1:${address.port}`;
+        const task = liveImageTask(origin, {
+            kind: "edit",
+            references: [{ id: "source", type: "image/png", dataUrl: PNG_DATA_URL }],
+            config: { baseUrl: `${origin}/v1`, apiKey: "fixture-key", apiFormat: "openai", model: "gpt-image-2.5-flare", advancedConfig: { ...emptyAdvancedConfig(), protocol: "sub2api", supportsReferenceImage: true } },
+            ecommerceExecution: {
+                state: "ready",
+                compilerVersion: "ecommerce-openai-image-2.5.v5",
+                providerProfileId: "gpt-image-2.5-flare",
+                prompt: "fixture",
+                referenceRoles: [{ assetId: "source", role: "scene" }],
+                parameters: { variant: "gpt-image-2.5-flare" },
+                modelSnapshot: { logicalRole: "image_generation", capability: "image", logicalModelId: "fixture-image", channelId: "fixture-channel", upstreamModel: "gpt-image-2.5-flare", apiFormat: "openai" },
+            },
+        });
+        const processing = await import("@/lib/server/image-processing-service");
+        const memory = await import("./image-task-memory");
+        let revoked = false;
+        vi.spyOn(processing, "readEcommerceGenerationInput").mockImplementation(async () => {
+            if (revoked) throw new Error("Run cancelled while waiting");
+            return { references: task.references, referenceBytes: [Buffer.from(PNG_BASE64, "base64").length], mask: undefined, maskBytes: undefined };
+        });
+        vi.spyOn(memory, "runNativeSub2ApiImageSubmission").mockImplementation(async (_sources, operation) => {
+            revoked = true;
+            return operation();
+        });
+        try {
+            await expect(runOpenAiImageTask(task, origin, origin, "", true)).rejects.toMatchObject({ name: "GenerationSubmissionSafeFailure", cause: { message: "Run cancelled while waiting" } });
+            expect(fixture.requests).toHaveLength(0);
+        } finally {
+            await new Promise<void>((resolve, reject) => fixture.server.close((error) => (error ? reject(error) : resolve())));
+        }
+    });
+
     it("parses a valid PNG returned over TCP", async () => {
         const fixture = createProtocolFixtureServer();
         await new Promise<void>((resolve) => fixture.server.listen(0, "127.0.0.1", resolve));
