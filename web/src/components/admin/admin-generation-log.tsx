@@ -9,6 +9,7 @@ import { imagePreviewUrl } from "@/lib/media-image-url";
 import type { StoredGenerationLog } from "@/lib/server/generation-log-store";
 import type { EcommerceGenerationTrace, EcommerceGenerationTraceStage } from "@/lib/server/ecommerce-generation-trace";
 import { generationLogEnhancementReasonLabels, generationLogEnhancementStageLabels, type GenerationLogAsset } from "@/lib/server/generation-log-types";
+import type { GenerationLogReferenceSnapshot, GenerationLogSlotSnapshot } from "@/lib/generation-log-snapshot";
 
 export function GenerationLogAssetPreview({ log }: { log: StoredGenerationLog }) {
     const asset = log.assets[0];
@@ -36,7 +37,7 @@ export function GenerationLogMobileCard({ log, selected, onSelectedChange, onVie
                         <Tag className="m-0" color={log.kind === "video" ? "purple" : "blue"}>
                             {generationKindLabel(log.kind)}
                         </Tag>
-                        <span className={generationStatusClass(log.status)}>{generationStatusLabel(log.status)}</span>
+                        <span className={generationStatusClass(generationLogDisplayStatus(log))}>{generationStatusLabel(generationLogDisplayStatus(log))}</span>
                         <span className="text-xs text-stone-500">{generationSourceLabel(log.source)}</span>
                     </div>
                     <div className="mt-2 truncate text-sm font-semibold text-stone-950 dark:text-stone-100">{log.title}</div>
@@ -65,24 +66,64 @@ export function GenerationLogMobileCard({ log, selected, onSelectedChange, onVie
 }
 
 export function GenerationLogDetail({ log }: { log: StoredGenerationLog }) {
+    const snapshot = log.requestSnapshot;
+    const preGeneration = snapshot?.run?.recordType === "pre-generation";
+    const executionPrompts = [...new Map(snapshot?.slots.filter((slot) => slot.prompt).map((slot) => [slot.taskId || slot.id, slot]) || []).values()];
     return (
         <div className="space-y-4">
+            <section>
+                <div className="mb-1 text-sm font-semibold text-stone-950 dark:text-stone-100">用户原话</div>
+                <div className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm leading-6 text-stone-700 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-200">
+                    {snapshot?.userPrompt || "原始需求未记录"}
+                </div>
+                {snapshot?.run ? (
+                    <div className="mt-2 space-y-1 break-all text-xs text-stone-500 dark:text-stone-400">
+                        <div>Run：{snapshot.run.id}</div>
+                        <div>原消息：{snapshot.run.inputMessageId}</div>
+                        {snapshot.run.childTaskIds.length ? <div>关联任务：{snapshot.run.childTaskIds.join("、")}</div> : null}
+                    </div>
+                ) : null}
+            </section>
             <div className="grid gap-3 sm:grid-cols-2">
                 <InfoBox label="用户" value={`${log.displayName || log.username} / ${log.username || "-"}${log.accountId ? ` / ID：${log.accountId}` : ""}`} />
                 <InfoBox label="入口" value={generationSourceLabel(log.source)} />
                 <InfoBox label="类型" value={generationKindLabel(log.kind)} />
-                <InfoBox label="状态" value={generationStatusLabel(log.status)} />
+                <InfoBox label="状态" value={generationStatusLabel(generationLogDisplayStatus(log))} />
                 <InfoBox label="时间" value={formatAdminLogTime(log.createdAt)} />
                 <InfoBox label="耗时" value={formatAdminLogDuration(log.durationMs)} />
                 <InfoBox label="模型" value={formatGenerationLogModel(log.model)} />
-                <InfoBox label="数量" value={`成功 ${log.successCount} / 失败 ${log.failCount} / 共 ${log.count}`} />
+                <InfoBox label="数量" value={preGeneration ? "前置流程记录" : `成功 ${log.successCount} / 失败 ${log.failCount} / 共 ${log.count}`} />
             </div>
-            <GenerationLogResultSection log={log} />
+            {snapshot?.references.length ? <GenerationLogReferences references={snapshot.references} /> : null}
+            {preGeneration ? (
+                <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm dark:border-stone-800 dark:bg-stone-900">
+                    <div>{snapshot.run?.reason}</div>
+                    <div className="mt-1 text-stone-500 dark:text-stone-400">{snapshot.run?.childTaskIds.length ? "前置流程已继续，后续生图见关联任务的调用记录。" : "尚未创建生图任务"}</div>
+                </div>
+            ) : (
+                <GenerationLogResultSection log={log} />
+            )}
+            {snapshot?.slots.some((slot) => slot.attempts?.length) ? <GenerationLogAttempts slots={snapshot.slots} /> : null}
             {log.ecommerceTrace ? <EcommerceGenerationTraceSection trace={log.ecommerceTrace} /> : null}
-            <div>
-                <div className="mb-1 text-sm font-semibold text-stone-950 dark:text-stone-100">提示词</div>
-                <div className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm leading-6 text-stone-700 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-200">{log.prompt || "-"}</div>
-            </div>
+            {!preGeneration ? (
+                <div>
+                    <div className="mb-1 text-sm font-semibold text-stone-950 dark:text-stone-100">{log.kind === "video" ? "实际视频提示词" : "实际生图提示词"}</div>
+                    {executionPrompts.length ? (
+                        executionPrompts.map((slot) => (
+                            <div key={slot.taskId || slot.id} className="mb-2">
+                                <div className="mb-1 break-all text-xs text-stone-500 dark:text-stone-400">
+                                    {slot.taskModel || log.model} · {slot.taskId || slot.id}
+                                </div>
+                                <div className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm leading-6 text-stone-700 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-200">
+                                    {slot.prompt}
+                                </div>
+                            </div>
+                        ))
+                    ) : (
+                        <div className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm leading-6 text-stone-700 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-200">{log.prompt || "-"}</div>
+                    )}
+                </div>
+            ) : null}
             {log.error ? (
                 <div>
                     <div className="mb-1 text-sm font-semibold text-red-600 dark:text-red-300">错误信息</div>
@@ -91,6 +132,102 @@ export function GenerationLogDetail({ log }: { log: StoredGenerationLog }) {
             ) : null}
         </div>
     );
+}
+
+function GenerationLogReferences({ references }: { references: GenerationLogReferenceSnapshot[] }) {
+    const purposeLabels: Record<string, string> = { edit_target: "编辑目标", product_identity: "商品身份", style: "风格参考", lighting: "光线参考", composition: "构图参考" };
+    return (
+        <section>
+            <div className="mb-2 text-sm font-semibold text-stone-950 dark:text-stone-100">参考素材与用途</div>
+            <div className="space-y-2">
+                {references.map((reference) => {
+                    const url = browserReadableMediaUrl(reference.serverUrl || reference.url || reference.remoteUrl || "");
+                    return (
+                        <div key={reference.id} className="flex min-w-0 items-start gap-3 rounded-lg border border-stone-200 p-3 dark:border-stone-800">
+                            {url ? (
+                                <a href={url} target="_blank" rel="noreferrer" className="shrink-0" aria-label={`查看参考素材 ${reference.name}`}>
+                                    {reference.kind === "image" ? <img src={imagePreviewUrl(url, 256)} alt={reference.name} className="h-20 w-24 rounded object-contain" loading="lazy" /> : <span>查看{reference.kind === "video" ? "视频" : "音频"}</span>}
+                                </a>
+                            ) : null}
+                            <div className="min-w-0 space-y-1 break-all text-xs text-stone-500 dark:text-stone-400">
+                                <div className="text-sm font-medium text-stone-900 dark:text-stone-100">
+                                    {reference.alias || "附加参考"} · {reference.name}
+                                </div>
+                                <div>
+                                    {reference.purposes?.map((purpose) => purposeLabels[purpose] || purpose).join("、") || "用途未记录"}
+                                    {reference.providerIndex !== undefined ? ` · 上游第 ${reference.providerIndex + 1} 张` : ""}
+                                </div>
+                                <div>素材：{reference.id}</div>
+                                {reference.submittedUrl ? (
+                                    <a href={browserReadableMediaUrl(reference.submittedUrl)} target="_blank" rel="noreferrer">
+                                        查看实际提交的输入副本
+                                    </a>
+                                ) : null}
+                                {reference.sourceRunId ? <div>来源 Run：{reference.sourceRunId}</div> : null}
+                                {reference.parentAssetId ? <div>父素材：{reference.parentAssetId}</div> : null}
+                                {reference.assetVersion || reference.sha256 ? (
+                                    <details>
+                                        <summary className="cursor-pointer">素材版本与校验</summary>
+                                        {reference.assetVersion ? <div>版本：{reference.assetVersion}</div> : null}
+                                        {reference.sha256 ? <div>SHA256：{reference.sha256}</div> : null}
+                                    </details>
+                                ) : null}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+        </section>
+    );
+}
+
+function GenerationLogAttempts({ slots }: { slots: GenerationLogSlotSnapshot[] }) {
+    return (
+        <section>
+            <div className="mb-2 text-sm font-semibold text-stone-950 dark:text-stone-100">渠道尝试</div>
+            <div className="space-y-2">
+                {slots.map((slot) => {
+                    if (!slot.attempts?.length) return null;
+                    return (
+                        <div key={slot.id} className="space-y-2 rounded-lg border border-stone-200 p-3 text-xs dark:border-stone-800">
+                            <div className="break-all text-stone-500 dark:text-stone-400">
+                                任务：{slot.taskId || slot.id}
+                                {slot.upstreamTaskId ? ` · 上游任务：${slot.upstreamTaskId}` : ""}
+                            </div>
+                            {slot.attempts.map((attempt) => (
+                                <div key={attempt.attemptNo} className="space-y-1 break-all">
+                                    <div className="font-medium">
+                                        第 {attempt.attemptNo} 次尝试 · {attempt.model} · {attempt.status === "succeeded" ? "成功" : attempt.status === "failed" ? "失败" : "执行中"}
+                                    </div>
+                                    {attempt.channelId ? <div>渠道：{attempt.channelId}</div> : null}
+                                    <div>
+                                        {formatTraceTime(attempt.startedAt)}
+                                        {attempt.completedAt !== undefined ? ` → ${formatTraceTime(attempt.completedAt)} · ${formatAdminLogDuration(attempt.completedAt - attempt.startedAt)}` : ""}
+                                    </div>
+                                    {attempt.pointsCost !== undefined ? (
+                                        <div>
+                                            {attempt.pointsCost} 积分{attempt.pointsRecordId ? ` · 消费流水：${attempt.pointsRecordId}` : ""}
+                                        </div>
+                                    ) : null}
+                                    {attempt.error ? <div className="whitespace-pre-wrap text-red-600 dark:text-red-300">{attempt.error}</div> : null}
+                                </div>
+                            ))}
+                            {slot.billing ? (
+                                <div>
+                                    计费状态：{slot.billing.refunded ? "已退款" : "未退款"} · {slot.billing.pointsCost} 积分{slot.billing.pointsRecordId ? ` · 流水：${slot.billing.pointsRecordId}` : ""}
+                                </div>
+                            ) : null}
+                        </div>
+                    );
+                })}
+            </div>
+        </section>
+    );
+}
+
+export function generationLogDisplayStatus(log: StoredGenerationLog) {
+    if (log.requestSnapshot?.run?.recordType === "pre-generation") return log.requestSnapshot.run.status;
+    return log.status === "pending" && log.requestSnapshot?.slots.some((slot) => slot.executionPhase === "needs_review") ? "needs_review" : log.status;
 }
 
 function EcommerceGenerationTraceSection({ trace }: { trace: EcommerceGenerationTrace }) {
@@ -375,6 +512,12 @@ export function generationSourceLabel(value: string) {
 }
 
 export function generationStatusLabel(value: string) {
+    if (value === "needs_review") return "待复核";
+    if (value === "paused") return "待确认";
+    if (value === "cancelled") return "已取消";
+    if (value === "planning") return "规划中";
+    if (value === "running") return "处理中";
+    if (value === "completed") return "已继续";
     if (value === "success") return "成功";
     if (value === "failed") return "失败";
     if (value === "pending") return "生成中";

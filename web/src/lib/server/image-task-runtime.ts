@@ -115,6 +115,7 @@ export async function createImageTaskUpstreamStep(task: ImageTask, origin: strin
     attempts = started.attempts;
     const candidate = { ...running, config, attempts, attemptNo: started.attempt.attemptNo, upstream: undefined, billing: undefined };
     await updateImageTask(task.id, { config, attempts, attemptNo: candidate.attemptNo, upstream: undefined, billing: undefined });
+    await writeImageGenerationLog({ ...candidate, executionPhase: "submitting" }, "pending", "", Date.now() - task.createdAt).catch((error) => console.error("Image generation submission log write failed", error));
     const submissionStartedAt = Date.now();
     await scheduleGenerationTask("image", task.id, {
         executionPhase: "submitting",

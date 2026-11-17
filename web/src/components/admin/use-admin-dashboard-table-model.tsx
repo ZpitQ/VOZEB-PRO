@@ -1,6 +1,16 @@
 "use client";
 
-import { formatAdminLogDuration, formatAdminLogTime, formatGenerationLogModel, generationKindLabel, GenerationLogAssetPreview, generationSourceLabel, generationStatusClass, generationStatusLabel } from "@/components/admin/admin-generation-log";
+import {
+    formatAdminLogDuration,
+    formatAdminLogTime,
+    formatGenerationLogModel,
+    generationKindLabel,
+    GenerationLogAssetPreview,
+    generationLogDisplayStatus,
+    generationSourceLabel,
+    generationStatusClass,
+    generationStatusLabel,
+} from "@/components/admin/admin-generation-log";
 import { adminSections } from "@/components/admin/admin-section-nav";
 import type { AdminSectionKey } from "@/components/admin/admin-sections";
 import { toNumberOrZero } from "@/components/admin/admin-values";
@@ -321,7 +331,7 @@ export function useAdminDashboardTableModel({ state, data, settingsActions }: { 
             title: "状态",
             dataIndex: "status",
             width: 92,
-            render: (_, record) => <span className={generationStatusClass(record.status)}>{generationStatusLabel(record.status)}</span>,
+            render: (_, record) => <span className={generationStatusClass(generationLogDisplayStatus(record))}>{generationStatusLabel(generationLogDisplayStatus(record))}</span>,
         },
         {
             title: "结果",
@@ -335,7 +345,7 @@ export function useAdminDashboardTableModel({ state, data, settingsActions }: { 
             render: (_, record) => (
                 <div className="admin-generation-log-prompt-cell min-w-0">
                     <div className="truncate text-sm font-medium text-stone-900 dark:text-stone-100">{record.title}</div>
-                    <div className="mt-1 line-clamp-2 text-xs leading-5 text-stone-500 dark:text-stone-400">{record.prompt || record.summary}</div>
+                    <div className="mt-1 line-clamp-2 text-xs leading-5 text-stone-500 dark:text-stone-400">{record.requestSnapshot?.userPrompt || record.prompt || record.summary}</div>
                 </div>
             ),
         },

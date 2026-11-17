@@ -36,9 +36,9 @@ export function buildCreateAgentRunOverview(runs: AgentRun[]): CreateOverviewTas
 }
 
 export function buildCreateGenerationOverview(logs: StoredGenerationLog[], imageTasks: ReadonlyMap<string, OverviewImageTask> = new Map()): Pick<CreateWorkbenchOverviewPayload, "runningTasks" | "recentAssets"> {
-    const sorted = [...logs].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+    const sorted = logs.filter((log) => log.requestSnapshot?.run?.recordType !== "pre-generation").sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
     const runningTasks = sorted
-        .filter((log) => log.status === "pending")
+        .filter((log) => log.status === "pending" && !(log.source === "agent" && log.requestSnapshot?.run?.id))
         .slice(0, 4)
         .map((log): CreateOverviewTask => ({
             id: log.id,
@@ -119,7 +119,7 @@ async function getCreateGenerationOverview(userId: string) {
         await ensurePostgresSchema();
         return createPostgresRepositories().generationLogs.getCreateOverview(userId);
     }
-    const logs = (await readGenerationLogDb()).logs.filter((log) => log.userId === userId);
+    const logs = (await readGenerationLogDb()).logs.filter((log) => log.userId === userId && log.requestSnapshot?.run?.recordType !== "pre-generation");
     const recentLogs: StoredGenerationLog[] = [];
     const imageTasks = new Map<string, OverviewImageTask>();
     const seen = new Set<string>();

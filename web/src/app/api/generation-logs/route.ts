@@ -6,6 +6,8 @@ import { deleteGenerationLogs, listGenerationLogs, listUserGenerationLogsForDele
 import type { StoredGenerationLog } from "@/lib/server/generation-log-types";
 import { deleteGenerationLogResultsForUser, GenerationLogDraftValidationError, GenerationLogOwnershipError, recordGenerationLogDraft, renameGenerationLogForUser } from "@/lib/server/generation-log-task-service";
 import type { GenerationLogInput } from "@/lib/server/generation-log-types";
+import { generationLogDraftSnapshot } from "@/lib/generation-log-snapshot";
+import { normalizeGenerationLogRequestSnapshot } from "@/lib/server/generation-log-repository";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,7 +36,13 @@ export async function POST(request: Request) {
     if (body.assets?.length || body.taskId || body.error || body.completedAt) return NextResponse.json({ error: "浏览器不能提交生成结果、任务终态或结果地址" }, { status: 403 });
     if (body.source !== "image-workbench" && body.source !== "video-workbench") return NextResponse.json({ error: "当前入口不允许浏览器登记生成记录" }, { status: 403 });
     try {
-        const log = await recordGenerationLogDraft({ ...body, userId: currentUser.id, username: currentUser.username, displayName: currentUser.displayName });
+        const log = await recordGenerationLogDraft({
+            ...body,
+            requestSnapshot: generationLogDraftSnapshot(normalizeGenerationLogRequestSnapshot(body.requestSnapshot)),
+            userId: currentUser.id,
+            username: currentUser.username,
+            displayName: currentUser.displayName,
+        });
         return NextResponse.json({ log: publicGenerationLog(log) });
     } catch (error) {
         if (error instanceof GenerationLogDraftValidationError) return NextResponse.json({ error: error.message }, { status: 400 });

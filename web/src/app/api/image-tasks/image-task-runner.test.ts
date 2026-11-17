@@ -86,6 +86,46 @@ describe("writeImageGenerationLog", () => {
         expect(mocks.record.mock.calls[0][0].assets[0]).toMatchObject({ width: 64, height: 64, bytes: 128, mimeType: "image/png" });
     });
 
+    it("records the actual references and billed channel attempts without credentials", async () => {
+        const task = imageTask();
+        task.conversationId = "conversation-one";
+        task.references = [{ id: "reference-one", name: "desk.png", dataUrl: "data:image/png;base64,PRIVATE", url: "/api/reference-assets/permanent/desk.png", width: 640, height: 480 }];
+        task.attempts = [{ attemptNo: 1, channelId: "channel-one", model: "upstream-image", status: "succeeded", startedAt: 100, completedAt: 200, pointsCost: 1.5, pointsRecordId: "charge-one" }];
+        task.billing = { pointsCost: 1.5, pointsRecordId: "charge-one", refunded: false };
+
+        await writeImageGenerationLog(task, "success", "/api/generation-log-assets/result.png", 100);
+
+        expect(mocks.record.mock.calls[0][0]).toMatchObject({
+            conversationId: "conversation-one",
+            requestSnapshot: {
+                userPrompt: "test",
+                references: [{ id: "reference-one", name: "desk.png", url: "/api/reference-assets/permanent/desk.png", providerIndex: 0 }],
+                slots: [
+                    {
+                        taskId: "image-one",
+                        attempts: [{ attemptNo: 1, channelId: "channel-one", model: "upstream-image", status: "succeeded", startedAt: 100, completedAt: 200, pointsCost: 1.5, pointsRecordId: "charge-one" }],
+                        billing: { pointsCost: 1.5, pointsRecordId: "charge-one", refunded: false },
+                    },
+                ],
+            },
+        });
+        expect(JSON.stringify(mocks.record.mock.calls[0][0])).not.toContain("PRIVATE");
+        expect(mocks.record.mock.calls[0][0].requestSnapshot).not.toHaveProperty("apiKey");
+    });
+
+    it("records the terminal attempt when the log is committed before the task completion update", async () => {
+        const task = imageTask();
+        task.attemptNo = 1;
+        task.attempts = [{ attemptNo: 1, channelId: "channel-one", model: "upstream-image", status: "running", startedAt: 100 }];
+        task.billing = { pointsCost: 1.5, pointsRecordId: "charge-one", refunded: false };
+
+        await writeImageGenerationLog(task, "success", "/api/generation-log-assets/result.png", 200);
+
+        expect(mocks.record.mock.calls[0][0].requestSnapshot.slots[0].attempts).toEqual([
+            { attemptNo: 1, channelId: "channel-one", model: "upstream-image", status: "succeeded", startedAt: 100, completedAt: 201, pointsCost: 1.5, pointsRecordId: "charge-one" },
+        ]);
+    });
+
     it.each(["native", "disabled", "not_requested", "protected_contract", "unsupported_layers"] as const)("passes only public %s enhancement facts to the log service", async (kind) => {
         const nativeSource = { url: "/api/generation-log-assets/native.png", sha256: "a".repeat(64), width: 64, height: 64, byteLength: 128, format: "png", hasAlpha: false, provenance: "provider_native" as const };
         const facts = kind === "native" ? { resultId: "image-one:1", enhancementId: "enhancement:image-one:1", nativeSource } : { resultId: "image-one:1", enhancementSkip: { status: "skipped" as const, reason: kind } };

@@ -126,6 +126,8 @@ VOZEB PRO 的 PostgreSQL 真实表名统一使用项目名前缀 `vozeb_pro_`。
 - `billing_orders` -> `vozeb_pro_billing_orders`
 - `generation_logs` -> `vozeb_pro_generation_logs`
 
+生成日志的 `request_snapshot jsonb` 持久保存原始需求、Run／原消息关联、冻结参考素材编号与版本／摘要、参考用途与实际提交顺序、执行提示词和逐次渠道尝试（时间、状态、错误、消费流水与退款状态）。这些事实独立于短期生成任务保留，不保存渠道密钥、请求头、Cookie、图片 Data URL 或隐藏推理。`run.recordType=pre-generation` 表示未创建生图子任务即暂停、失败或取消的请求；管理员列表显式包含，模型调用聚合和用户工作台排除。恢复时更新同一 Run 的记录并保留子任务关联，不将前置记录计作一次上游生成调用。
+
 这样同一个 PostgreSQL 数据库里即使存在其他业务表，也能清楚区分 VOZEB PRO 的数据。Schema 中的显式索引和会生成索引的命名唯一约束也必须使用 `vozeb_pro_` 前缀，避免与同一 `public` Schema 的其他应用对象重名。无前缀表不会被自动删除；当前部署和后续读写只使用 `vozeb_pro_` 前缀表。
 
 ## 核心表

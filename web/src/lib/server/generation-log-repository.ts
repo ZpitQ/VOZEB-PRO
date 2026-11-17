@@ -6,7 +6,7 @@ import { copyFile, mkdir, readdir, stat, unlink, writeFile } from "node:fs/promi
 import { dirname, resolve, sep } from "node:path";
 
 import { ensureMediaFileExtension, mediaFileExtension } from "@/lib/media-file";
-import type { GenerationLogReferenceSnapshot, GenerationLogRequestSnapshot, GenerationLogSlotSnapshot, GenerationLogSnapshotParameters } from "@/lib/generation-log-snapshot";
+import type { GenerationLogAttemptSnapshot, GenerationLogReferenceSnapshot, GenerationLogRequestSnapshot, GenerationLogRunSnapshot, GenerationLogSlotSnapshot, GenerationLogSnapshotParameters } from "@/lib/generation-log-snapshot";
 import { isPostgresDatabaseEnabled, type QueryExecutor } from "@/lib/server/database";
 import { readJsonDataFile, withJsonDataFileLock, writeJsonDataFile } from "@/lib/server/data-adapter";
 import { normalizeGeneratedImageBytes } from "@/lib/server/generated-image-normalizer";
@@ -585,7 +585,7 @@ export function normalizeStoredLog(log: Partial<StoredGenerationLog>): StoredGen
         source: isGenerationSource(log.source) ? log.source : "unknown",
         status,
         title: normalizeText(log.title, "未命名记录", 80),
-        prompt: normalizeText(log.prompt, "", 5000),
+        prompt: typeof log.prompt === "string" ? log.prompt.trim() : "",
         model: normalizeModelName(log.model),
         summary: normalizeText(log.summary, defaultSummary(kind, status), 160),
         durationMs: normalizeNonNegativeNumber(log.durationMs, 0),
@@ -606,12 +606,36 @@ export function normalizeStoredLog(log: Partial<StoredGenerationLog>): StoredGen
 export function normalizeGenerationLogRequestSnapshot(value: unknown): GenerationLogRequestSnapshot | undefined {
     const source = jsonObject(value);
     if (!source || Number(source.version) !== 1) return undefined;
-    const userPrompt = normalizeOptionalText(source.userPrompt, undefined, 4000);
+    const userPrompt = typeof source.userPrompt === "string" ? source.userPrompt.trim() || undefined : undefined;
     const parameters = normalizeSnapshotParameters(source.parameters);
     const references = Array.isArray(source.references) ? source.references.flatMap(normalizeSnapshotReference) : [];
     const slots = Array.isArray(source.slots) ? source.slots.flatMap(normalizeSnapshotSlot) : [];
-    if (!userPrompt && !Object.keys(parameters).length && !references.length && !slots.length) return undefined;
-    return { version: 1, ...(userPrompt ? { userPrompt } : {}), parameters, references, slots };
+    const run = normalizeSnapshotRun(source.run);
+    if (!userPrompt && !Object.keys(parameters).length && !references.length && !slots.length && !run) return undefined;
+    return { version: 1, ...(userPrompt ? { userPrompt } : {}), parameters, references, slots, ...(run ? { run } : {}) };
+}
+
+function normalizeSnapshotRun(value: unknown): GenerationLogRunSnapshot | undefined {
+    const source = jsonObject(value);
+    if (!source) return undefined;
+    const id = normalizeOptionalText(source.id, undefined, 160);
+    const inputMessageId = normalizeOptionalText(source.inputMessageId, undefined, 160);
+    const status = source.status;
+    if (!id || !inputMessageId || (source.recordType !== "generation" && source.recordType !== "pre-generation")) return undefined;
+    if (status !== "planning" && status !== "running" && status !== "paused" && status !== "completed" && status !== "failed" && status !== "cancelled") return undefined;
+    return {
+        id,
+        inputMessageId,
+        status,
+        recordType: source.recordType,
+        reason: normalizeOptionalText(source.reason, undefined, 1000),
+        failureStage: normalizeOptionalText(source.failureStage, undefined, 160),
+        childTaskIds: snapshotTexts(source.childTaskIds, 200),
+    };
+}
+
+function snapshotTexts(value: unknown, length: number) {
+    return Array.isArray(value) ? [...new Set(value.map((item) => normalizeOptionalText(item, undefined, length)).filter((item): item is string => Boolean(item)))] : [];
 }
 
 function normalizeSnapshotParameters(value: unknown): GenerationLogSnapshotParameters {
@@ -649,6 +673,15 @@ function normalizeSnapshotReference(value: unknown): GenerationLogReferenceSnaps
             width: toOptionalNumber(source.width),
             height: toOptionalNumber(source.height),
             durationMs: toOptionalNumber(source.durationMs),
+            alias: normalizeOptionalText(source.alias, undefined, 160),
+            purposes: snapshotTexts(source.purposes, 160),
+            providerIndex: source.providerIndex === undefined ? undefined : toOptionalNumber(source.providerIndex),
+            assetVersion: normalizeOptionalText(source.assetVersion, undefined, 1000),
+            sha256: normalizeOptionalText(source.sha256, undefined, 64),
+            sourceRunId: normalizeOptionalText(source.sourceRunId, undefined, 160),
+            sourceTaskId: normalizeOptionalText(source.sourceTaskId, undefined, 200),
+            parentAssetId: normalizeOptionalText(source.parentAssetId, undefined, 160),
+            submittedUrl: normalizeSnapshotUrl(source.submittedUrl),
         },
     ];
 }
@@ -664,7 +697,7 @@ function normalizeSnapshotSlot(value: unknown): GenerationLogSlotSnapshot[] {
             id,
             index: normalizeNonNegativeInteger(source.index, 0),
             status,
-            prompt: normalizeOptionalText(source.prompt, undefined, 5000),
+            prompt: typeof source.prompt === "string" ? source.prompt.trim() || undefined : undefined,
             parameters: normalizeSnapshotParameters(source.parameters),
             referenceIds: Array.isArray(source.referenceIds) ? Array.from(new Set(source.referenceIds.map((item) => normalizeOptionalText(item, undefined, 160)).filter((item): item is string => Boolean(item)))) : undefined,
             assetIndex: toOptionalNumber(source.assetIndex),
@@ -679,8 +712,41 @@ function normalizeSnapshotSlot(value: unknown): GenerationLogSlotSnapshot[] {
             startedAt: toOptionalNumber(source.startedAt),
             error: normalizeOptionalText(source.error, undefined, 1000),
             canRetry: source.canRetry === true ? true : undefined,
+            attempts: Array.isArray(source.attempts) ? source.attempts.flatMap(normalizeSnapshotAttempt) : undefined,
+            billing: normalizeSnapshotBilling(source.billing),
+            upstreamTaskId: normalizeOptionalText(source.upstreamTaskId, undefined, 200),
+            executionPhase: normalizeOptionalText(source.executionPhase, undefined, 160),
+            reviewReason: normalizeOptionalText(source.reviewReason, undefined, 1000),
         },
     ];
+}
+
+function normalizeSnapshotAttempt(value: unknown): GenerationLogAttemptSnapshot[] {
+    const source = jsonObject(value);
+    if (!source || (source.status !== "running" && source.status !== "succeeded" && source.status !== "failed")) return [];
+    const model = normalizeOptionalText(source.model, undefined, 200);
+    const attemptNo = Number(source.attemptNo);
+    const startedAt = Number(source.startedAt);
+    if (!model || !Number.isSafeInteger(attemptNo) || attemptNo < 1 || !Number.isFinite(startedAt) || startedAt < 0) return [];
+    return [
+        {
+            attemptNo,
+            model,
+            status: source.status,
+            startedAt,
+            channelId: normalizeOptionalText(source.channelId, undefined, 160),
+            completedAt: source.completedAt === undefined ? undefined : toOptionalNumber(source.completedAt),
+            pointsCost: source.pointsCost === undefined ? undefined : toOptionalNumber(source.pointsCost),
+            pointsRecordId: normalizeOptionalText(source.pointsRecordId, undefined, 200),
+            error: normalizeOptionalText(source.error, undefined, 1000),
+        },
+    ];
+}
+
+function normalizeSnapshotBilling(value: unknown): GenerationLogSlotSnapshot["billing"] {
+    const source = jsonObject(value);
+    if (!source || typeof source.pointsCost !== "number" || !Number.isFinite(source.pointsCost) || source.pointsCost < 0 || typeof source.refunded !== "boolean") return undefined;
+    return { pointsCost: source.pointsCost, refunded: source.refunded, pointsRecordId: normalizeOptionalText(source.pointsRecordId, undefined, 200) };
 }
 
 function jsonObject(value: unknown): Record<string, unknown> | undefined {
@@ -696,7 +762,7 @@ function jsonObject(value: unknown): Record<string, unknown> | undefined {
 
 function normalizeSnapshotUrl(value: unknown) {
     const url = normalizeOptionalText(value, undefined, 4000);
-    return url && !/^(data|blob):/i.test(url) ? url : undefined;
+    return url && (/^https?:\/\//i.test(url) || /^\/(?!\/)/.test(url)) ? url : undefined;
 }
 
 export function normalizeStoredAsset(asset: Partial<GenerationLogAsset> | undefined): GenerationLogAsset | null {

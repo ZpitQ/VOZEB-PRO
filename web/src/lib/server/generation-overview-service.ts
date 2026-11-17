@@ -39,7 +39,7 @@ function aggregateGenerationLogs(logs: StoredGenerationLog[], window: ReturnType
     const end = Date.parse(window.endAt);
     const scoped = logs.filter((log) => {
         const createdAt = Date.parse(log.createdAt);
-        return Number.isFinite(createdAt) && createdAt >= start && createdAt < end;
+        return log.requestSnapshot?.run?.recordType !== "pre-generation" && Number.isFinite(createdAt) && createdAt >= start && createdAt < end;
     });
     return {
         totalCalls: scoped.length,

@@ -551,8 +551,10 @@ export async function setAgentRunStatus(run: AgentRun, status: AgentRunStatus) {
             if (current.userId !== run.userId || current.status !== run.status) return null;
             const tasks = status === "cancelled" ? cancelActiveTasks(current.tasks) : current.tasks;
             const ops = status === "cancelled" && current.surface === "canvas" ? cancelledRunCanvasOps(current.id, tasks) : [];
+            const next = { ...current, status, tasks, executionId: undefined, ...(status === "cancelled" ? { cancellation: undefined } : {}) };
             return {
-                run: { ...current, status, tasks, executionId: undefined, ...(status === "cancelled" ? { cancellation: undefined } : {}) },
+                run: next,
+                requestLog: next,
                 event: { type: `run.${status}`, ...(ops.length ? { data: { ops } } : {}) },
                 assistant: terminalAssistant(status),
             };
@@ -640,6 +642,7 @@ export async function updateAgentRunById(
             }
             return {
                 run: next,
+                requestLog: next,
                 event,
                 assistant: assistantUpdate(next, event),
                 ...(patch.status === "completed" && next.reviewStatus === "review_pending" && !next.reviewed ? { schedule: { executionPhase: "review_pending" as const, nextPollAt: Date.now(), lastUpstreamStatus: "review_pending" } } : {}),

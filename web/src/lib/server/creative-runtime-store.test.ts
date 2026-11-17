@@ -2,16 +2,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { updateAgentRunById, type AgentRun } from "./agent-run-store";
 import { writeJsonDataFile } from "./data-adapter";
+import type { CreativeAsset } from "@/lib/creative-runtime-contract";
+import { buildEcommercePlanningInput } from "./ecommerce-generation-snapshot";
+import { createEcommerceReferenceCheckpoint } from "./ecommerce-reference-recovery";
 
 const mocks = vi.hoisted(() => ({
     files: new Map<string, unknown>(),
     databaseProvider: "file" as "file" | "postgres",
     query: vi.fn(),
     transaction: vi.fn(),
+    failTaskWrites: false,
 }));
 
 vi.mock("@/lib/server/database", () => ({
     ensurePostgresSchema: vi.fn(),
+    isPostgresDatabaseEnabled: vi.fn(() => mocks.databaseProvider === "postgres"),
     getDatabaseProvider: vi.fn(() => mocks.databaseProvider),
     postgresQuery: mocks.query,
     withPostgresTransaction: mocks.transaction,
@@ -20,6 +25,7 @@ vi.mock("@/lib/server/data-adapter", () => ({
     readJsonDataFile: vi.fn(async (fileName: string, fallback: unknown) => structuredClone(mocks.files.has(fileName) ? mocks.files.get(fileName) : fallback)),
     withJsonDataFileLock: vi.fn(async (_fileName: string, callback: () => Promise<unknown>) => callback()),
     writeJsonDataFile: vi.fn(async (fileName: string, value: unknown) => {
+        if (mocks.failTaskWrites && fileName === "generation-tasks.json") throw new Error("task-file-write-failed");
         mocks.files.set(fileName, structuredClone(value));
     }),
 }));
@@ -50,6 +56,7 @@ describe("creative runtime file provider", () => {
         mocks.databaseProvider = "file";
         mocks.query.mockReset();
         mocks.transaction.mockReset();
+        mocks.failTaskWrites = false;
     });
 
     it("creates a run bundle once and keeps message sequence stable", async () => {
@@ -82,6 +89,109 @@ describe("creative runtime file provider", () => {
             { id: "input-message", role: "user", content: "生成一张图" },
             { id: "assistant-message", role: "assistant", status: "running", content: "正在识别商品", runId: "run-progress" },
         ]);
+    });
+
+    it("keeps a durable request record when reference preparation pauses before an image task exists", async () => {
+        await createBundle(run({ id: "run-reference-paused", generationPreferences: { mode: "image" } }));
+
+        await updateAgentRunById("run-reference-paused", { status: "paused", failure: "请明确要修改哪一张图" }, { type: "run.paused" }, ["planning"]);
+
+        expect(mocks.files.get("generation-logs.json")).toMatchObject({
+            logs: [
+                {
+                    id: "agent-run:run-reference-paused",
+                    userId: "user",
+                    conversationId: "conversation",
+                    requestSnapshot: { userPrompt: "生成一张图", run: { id: "run-reference-paused", recordType: "pre-generation", status: "paused", inputMessageId: "input-message", reason: "请明确要修改哪一张图" } },
+                },
+            ],
+        });
+        const logs = await import("./generation-log-store");
+        expect((await logs.listGenerationLogs({ userId: "user" })).total).toBe(0);
+        expect((await logs.listGenerationLogs({ includeRequestRecords: true })).total).toBe(1);
+    });
+
+    it("retains frozen reference identity and confirmed purpose when the current asset is unavailable", async () => {
+        const asset: CreativeAsset = {
+            id: "frozen-reference",
+            userId: "user",
+            conversationId: "conversation",
+            ordinal: 0,
+            type: "image",
+            status: "ready",
+            title: "原始桌子",
+            serverUrl: "/api/reference-assets/permanent/original.png",
+            mimeType: "image/png",
+            width: 640,
+            height: 480,
+            bytes: 128,
+            metadata: {},
+            createdAt: 1,
+            updatedAt: 1,
+        };
+        const original = run({ id: "run-frozen-reference", referencedAssetIds: [asset.id], generationPreferences: { mode: "image" } });
+        const planning = buildEcommercePlanningInput(original, [asset], { summary: "", recentMessages: [] });
+        const checkpoint = createEcommerceReferenceCheckpoint(original, planning, [asset]);
+        checkpoint.assets[0].contentSha256 = "a".repeat(64);
+        checkpoint.confirmedBindings = [{ assetId: asset.id, alias: "图片1", purposes: ["edit_target"] }];
+        original.ecommerceSnapshot = {
+            version: "ecommerce-generation.v1",
+            mode: "active",
+            runId: original.id,
+            userId: original.userId,
+            input: { userRequest: original.prompt, assetIds: [asset.id], conversationId: original.conversationId, surface: original.surface },
+            referenceCheckpoint: checkpoint,
+            createdAt: 1,
+        };
+        await createBundle(original);
+
+        await updateAgentRunById(original.id, { status: "paused", failure: "需要确认用途" }, { type: "run.paused" }, ["planning"]);
+
+        expect(mocks.files.get("generation-logs.json")).toMatchObject({
+            logs: [
+                {
+                    requestSnapshot: {
+                        references: [
+                            {
+                                id: "frozen-reference",
+                                name: "原始桌子",
+                                url: "/api/reference-assets/permanent/original.png",
+                                alias: "图片1",
+                                purposes: ["edit_target"],
+                                assetVersion: checkpoint.assets[0].assetVersion,
+                                sha256: "a".repeat(64),
+                                width: 640,
+                                height: 480,
+                            },
+                        ],
+                    },
+                },
+            ],
+        });
+    });
+
+    it("updates the same pre-generation record when the original request resumes", async () => {
+        await createBundle(run({ id: "run-resumed", generationPreferences: { mode: "image" } }));
+        await updateAgentRunById("run-resumed", { status: "paused", failure: "请选择目标" }, { type: "run.paused" }, ["planning"]);
+        await updateAgentRunById("run-resumed", { status: "running", failure: undefined }, { type: "run.resumed" }, ["paused"]);
+        expect(mocks.files.get("generation-logs.json")).toMatchObject({ logs: [{ id: "agent-run:run-resumed", requestSnapshot: { run: { status: "running" } } }] });
+    });
+
+    it("removes a newly written request log when the task file cannot commit the pause", async () => {
+        await createBundle(run({ id: "run-write-fault", generationPreferences: { mode: "image" } }));
+        mocks.failTaskWrites = true;
+        await expect(updateAgentRunById("run-write-fault", { status: "paused", failure: "请选择目标" }, { type: "run.paused" }, ["planning"])).rejects.toThrow("task-file-write-failed");
+        expect(mocks.files.get("generation-tasks.json")).toMatchObject([{ payload: { status: "planning" } }]);
+        expect(mocks.files.get("generation-logs.json")).toMatchObject({ logs: [] });
+    });
+
+    it("restores the previous request snapshot when a resume cannot commit", async () => {
+        await createBundle(run({ id: "run-resume-fault", generationPreferences: { mode: "image" } }));
+        await updateAgentRunById("run-resume-fault", { status: "paused", failure: "请选择目标" }, { type: "run.paused" }, ["planning"]);
+        mocks.failTaskWrites = true;
+        await expect(updateAgentRunById("run-resume-fault", { status: "running", failure: undefined }, { type: "run.resumed" }, ["paused"])).rejects.toThrow("task-file-write-failed");
+        expect(mocks.files.get("generation-tasks.json")).toMatchObject([{ payload: { status: "paused" } }]);
+        expect(mocks.files.get("generation-logs.json")).toMatchObject({ logs: [{ requestSnapshot: { run: { status: "paused", reason: "请选择目标" } } }] });
     });
 
     it("keeps the completed first round in the next Agent run context", async () => {

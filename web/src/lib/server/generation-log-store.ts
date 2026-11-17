@@ -58,6 +58,7 @@ export async function listGenerationLogs(options: GenerationLogListOptions = {})
             keyword: options.keyword,
             startAt: dateFilterValue(options.start),
             endAt: dateFilterValue(options.end, true),
+            includeRequestRecords: options.includeRequestRecords,
         });
         let items = result.items.map((item) => toStoredGenerationLog(item, options.includeEcommerceTrace));
         if (options.includeEcommerceTrace) items = await hydrateEcommerceTracesFromImageTasks(items);
@@ -72,6 +73,7 @@ export async function listGenerationLogs(options: GenerationLogListOptions = {})
     const endMs = parseDateEnd(options.end);
 
     const filtered = db.logs
+        .filter((log) => options.includeRequestRecords || log.requestSnapshot?.run?.recordType !== "pre-generation")
         .filter((log) => (isGenerationKind(options.kind) ? log.kind === options.kind : true))
         .filter((log) => (isGenerationSource(options.source) ? log.source === options.source : true))
         .filter((log) => (isGenerationStatus(options.status) ? log.status === options.status : true))
@@ -439,6 +441,11 @@ function buildGenerationLog(
     now = new Date().toISOString(),
     completedAt = input.status === "pending" ? undefined : normalizeTime(input.completedAt, now),
 ): StoredGenerationLog {
+    if (input.status === "pending" && existing && existing.status !== "pending" && input.requestSnapshot) {
+        const incomingAttempt = Math.max(0, ...input.requestSnapshot.slots.flatMap((slot) => slot.attempts?.map((attempt) => attempt.attemptNo) || []));
+        const recordedAttempt = Math.max(0, ...(existing.requestSnapshot?.slots.flatMap((slot) => slot.attempts?.map((attempt) => attempt.attemptNo) || []) || []));
+        if (incomingAttempt <= recordedAttempt) return existing;
+    }
     return {
         id,
         userId: normalizeText(input.userId, existing?.userId || "", 120),
@@ -449,7 +456,7 @@ function buildGenerationLog(
         source: input.source || existing?.source || "unknown",
         status: input.status,
         title: normalizeText(input.title, existing?.title || input.prompt || "未命名记录", 80),
-        prompt: normalizeText(input.prompt, existing?.prompt || "", 5000),
+        prompt: input.prompt?.trim() || existing?.prompt || "",
         model: normalizeModelName(input.model || existing?.model || ""),
         summary: normalizeText(input.summary, existing?.summary || defaultSummary(input.kind, input.status), 160),
         durationMs: normalizeNonNegativeNumber(input.durationMs, existing?.durationMs || 0),

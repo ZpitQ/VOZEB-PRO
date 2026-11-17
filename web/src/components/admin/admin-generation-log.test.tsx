@@ -54,6 +54,68 @@ function enhancementLog(assets: unknown[]): StoredGenerationLog {
 }
 
 describe("GenerationLogDetail ecommerce observability", () => {
+    it("separates the user's request from the executed prompt and exposes reference roles and billed attempts", () => {
+        const log = enhancementLog([]);
+        log.prompt = "Keep the furniture identity and recolor the table.";
+        log.requestSnapshot = {
+            version: 1,
+            userPrompt: "把桌子改成参考图的米色",
+            parameters: { size: "1:1" },
+            references: [{ id: "reference-two", kind: "image", name: "颜色参考", mimeType: "image/png", url: "/api/reference-assets/permanent/beige.png", alias: "图片2", purposes: ["style"], providerIndex: 2, sha256: "a".repeat(64) }],
+            slots: [
+                {
+                    id: "slot-one",
+                    index: 0,
+                    status: "success",
+                    taskId: "image-task-one",
+                    attempts: [{ attemptNo: 1, model: "upstream-image", channelId: "channel-one", status: "succeeded", startedAt: 100, completedAt: 200, pointsCost: 1.5, pointsRecordId: "charge-one" }],
+                    billing: { pointsCost: 1.5, pointsRecordId: "charge-one", refunded: false },
+                },
+            ],
+            run: { id: "run-one", recordType: "generation", status: "running", inputMessageId: "message-one", childTaskIds: ["image-task-one"] },
+        };
+
+        const markup = renderToStaticMarkup(<GenerationLogDetail log={log} />);
+
+        for (const text of [
+            "用户原话",
+            "把桌子改成参考图的米色",
+            "实际生图提示词",
+            "Keep the furniture identity",
+            "颜色参考",
+            "图片2",
+            "风格参考",
+            "上游第 3 张",
+            "渠道尝试",
+            "upstream-image",
+            "channel-one",
+            "1.5 积分",
+            "charge-one",
+            "run-one",
+            "message-one",
+        ])
+            expect(markup).toContain(text);
+        expect(markup).toContain('href="/api/reference-assets/permanent/beige.png"');
+    });
+
+    it("labels a pause before generation without pretending an image request failed", () => {
+        const log = enhancementLog([]);
+        log.status = "pending";
+        log.requestSnapshot = {
+            version: 1,
+            userPrompt: "把颜色改成参考图",
+            parameters: {},
+            references: [],
+            slots: [],
+            run: { id: "run-paused", recordType: "pre-generation", status: "paused", inputMessageId: "message-paused", childTaskIds: [], reason: "请明确编辑目标" },
+        };
+        const markup = renderToStaticMarkup(<GenerationLogDetail log={log} />);
+        expect(markup).toContain("待确认");
+        expect(markup).toContain("请明确编辑目标");
+        expect(markup).toContain("尚未创建生图任务");
+        expect(markup).not.toContain("实际生图提示词");
+    });
+
     it("renders the four ecommerce execution stages and their actual models", () => {
         const markup = renderToStaticMarkup(
             <GenerationLogDetail

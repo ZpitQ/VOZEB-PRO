@@ -85,7 +85,7 @@ describe("generation log browser write boundary", () => {
         const response = await POST(new Request("http://localhost/api/generation-logs", { method: "POST" }));
 
         expect(response.status).toBe(200);
-        expect(mocks.recordDraft).toHaveBeenCalledWith(expect.objectContaining({ ...body, userId: "user-one", username: "user", displayName: "User" }));
+        expect(mocks.recordDraft.mock.calls[0][0]).toMatchObject({ ...body, userId: "user-one", username: "user", displayName: "User" });
     });
 
     it("rejects an empty pending draft", async () => {
@@ -95,6 +95,27 @@ describe("generation log browser write boundary", () => {
         const response = await POST(new Request("http://localhost/api/generation-logs", { method: "POST" }));
 
         expect(response.status).toBe(400);
+    });
+
+    it("does not accept browser-forged run identity or channel billing evidence", async () => {
+        mocks.readJsonBody.mockResolvedValue({
+            kind: "image",
+            source: "image-workbench",
+            status: "pending",
+            requestSnapshot: {
+                version: 1,
+                parameters: {},
+                references: [],
+                run: { id: "forged-run", recordType: "pre-generation", status: "failed", inputMessageId: "forged-message", childTaskIds: [] },
+                slots: [{ id: "slot-one", index: 0, status: "pending", clientRequestId: "request-one", attempts: [{ attemptNo: 1, model: "forged-model", status: "succeeded", startedAt: 1, pointsCost: 0 }], billing: { pointsCost: 0, refunded: true } }],
+            },
+        });
+        mocks.recordDraft.mockResolvedValue({ id: "log-one", userId: "user-one", assets: [] });
+        await POST(new Request("http://localhost/api/generation-logs", { method: "POST" }));
+        const snapshot = mocks.recordDraft.mock.calls[0][0].requestSnapshot;
+        expect(snapshot).not.toHaveProperty("run");
+        expect(snapshot.slots[0]).not.toHaveProperty("attempts");
+        expect(snapshot.slots[0]).not.toHaveProperty("billing");
     });
 
     it("routes rename and result deletion through explicit owned actions", async () => {

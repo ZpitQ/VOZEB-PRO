@@ -41,6 +41,7 @@ import {
     type RuntimeFileDatabase,
 } from "./creative-runtime-repository";
 import { notifyCreativeRunEvent } from "./creative-run-event-signal";
+import { persistAgentRunRequestLog } from "./agent-run-generation-log";
 
 export { CreativeStoreConflict, CREATIVE_CONVERSATION_CONTEXT_MESSAGE_LIMIT } from "./creative-runtime-repository";
 import { CreativeStoreConflict } from "./creative-runtime-repository";
@@ -402,6 +403,7 @@ export async function mutateCreativeRun<T extends AgentRunBase>(
     }
     const result = await queueRuntimeFileOperation(async () => {
         let preimage: RuntimeFileDatabase | undefined;
+        let rollbackRequestLog: (() => Promise<void>) | undefined;
         try {
             return await withGenerationTaskFileMutation(async (tasks) => {
                 const index = tasks.findIndex((item) => item.id === id && item.type === "agent" && item.expiresAt > Date.now());
@@ -420,8 +422,9 @@ export async function mutateCreativeRun<T extends AgentRunBase>(
                 const run = { ...mutation.run, id: current.id, userId: current.userId, createdAt: current.createdAt, updatedAt: now };
                 const db = await readRuntimeFile();
                 const nextDb = applyRuntimeMutation(db, run, mutation, now);
-                if (options?.resumeWithChildren || mutation.schedule || claim) preimage = db;
+                if (options?.resumeWithChildren || mutation.schedule || claim || mutation.requestLog) preimage = db;
                 await writeRuntimeFile(nextDb);
+                if (mutation.requestLog) rollbackRequestLog = await persistAgentRunRequestLog({ ...mutation.requestLog, updatedAt: now });
                 if (!ownsReview()) throw new CreativeStoreConflict("视觉复核执行身份或租约已失效", 409);
                 const nextTasks = [...tasks];
                 nextTasks[index] = {
@@ -436,13 +439,22 @@ export async function mutateCreativeRun<T extends AgentRunBase>(
                 return { tasks: nextTasks, result: run };
             });
         } catch (error) {
+            const failures = [error];
+            if (rollbackRequestLog) {
+                try {
+                    await rollbackRequestLog();
+                } catch (compensationError) {
+                    failures.push(compensationError);
+                }
+            }
             if (preimage) {
                 try {
                     await writeRuntimeFile(preimage);
                 } catch (compensationError) {
-                    throw new AggregateError([error, compensationError], "参考恢复未提交且原消息补偿失败");
+                    failures.push(compensationError);
                 }
             }
+            if (failures.length > 1) throw new AggregateError(failures, "请求状态未提交且消息或记录补偿失败");
             throw error;
         }
     });

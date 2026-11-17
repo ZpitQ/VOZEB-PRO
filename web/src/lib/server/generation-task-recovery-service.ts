@@ -6,6 +6,7 @@ import { getVideoTask, type VideoTask } from "@/lib/server/video-task-store";
 import { createAudioTaskUpstreamStep, markAudioTaskFailed, persistAudioTaskResult, queryAudioTaskUpstreamStep } from "@/lib/server/audio-task-runtime";
 import { getAudioTask, updateAudioTask, type AudioTask } from "@/lib/server/audio-task-store";
 import { createImageTaskUpstreamStep, markImageTaskFailed, persistImageTaskResult, prepareImageTaskAutomaticRetry, queryCancelledImageTaskUpstreamStep, queryImageTaskUpstreamStep } from "@/lib/server/image-task-runtime";
+import { writeImageGenerationLog } from "@/app/api/image-tasks/image-task-runner";
 import { consumeCompletedImageTaskResultProcessing, ensureImageTaskResultProcessing } from "@/lib/server/image-task-result-processing";
 import { usesImageTaskResultProcessing } from "@/lib/server/image-task-result-contract";
 import { getImageTask, updateImageTask, type ImageTask } from "@/lib/server/image-task-store";
@@ -450,6 +451,21 @@ async function processTextLease(lease: GenerationTaskLease, workerId: string, or
 }
 
 async function processImageLease(lease: GenerationTaskLease, workerId: string, origin: string, publicOrigin: string, cookie: string, userRequested: boolean): Promise<RecoveryResult> {
+    try {
+        return await processImageLeaseExecution(lease, workerId, origin, publicOrigin, cookie, userRequested);
+    } finally {
+        try {
+            const observed = await getImageTask(lease.id);
+            if (observed && (observed.status === "pending" || observed.status === "running") && (observed.executionPhase === "needs_review" || observed.executionPhase === "submitted")) {
+                await writeImageGenerationLog(observed, "pending", "", Date.now() - observed.createdAt, observed.reviewReason);
+            }
+        } catch (error) {
+            console.error("Image generation observation log write failed", error);
+        }
+    }
+}
+
+async function processImageLeaseExecution(lease: GenerationTaskLease, workerId: string, origin: string, publicOrigin: string, cookie: string, userRequested: boolean): Promise<RecoveryResult> {
     let task = await getImageTask(lease.id);
     if (!task || task.status === "success" || task.status === "cancelled") {
         await releaseGenerationTaskLease("image", lease.id, workerId, { executionPhase: "completed", nextPollAt: undefined }, { executionId: lease.executionId });

@@ -128,11 +128,12 @@ export type GenerationTaskLogResultInput = {
     clientRequestId?: string;
     taskId: string;
     userId: string;
+    conversationId?: string;
     username: string;
     displayName: string;
     kind: GenerationLogKind;
     source: GenerationLogSource;
-    status: "success" | "failed";
+    status: GenerationLogStatus;
     title: string;
     prompt: string;
     model: string;
@@ -147,6 +148,7 @@ export type GenerationTaskLogResultInput = {
     taskPollPath?: string;
     serverTaskId?: string;
     createdAt: string | number;
+    requestSnapshot?: GenerationLogRequestSnapshot;
 };
 
 export type GenerationLogListOptions = {
@@ -161,6 +163,7 @@ export type GenerationLogListOptions = {
     end?: string;
     includeEcommerceTrace?: boolean;
     includeImageEnhancement?: boolean;
+    includeRequestRecords?: boolean;
 };
 
 export type GenerationAssetStats = {

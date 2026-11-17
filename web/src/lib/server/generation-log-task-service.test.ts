@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -122,8 +122,8 @@ describe("generation log task service", () => {
     });
 
     it("round-trips long public and execution prompts through the file store", async () => {
-        const publicPrompt = "原".repeat(4000);
-        const executionPrompt = "执".repeat(5000);
+        const publicPrompt = "原".repeat(6000);
+        const executionPrompt = "执".repeat(9000);
         await service.recordGenerationLogDraft({
             id: "log-long-prompts",
             userId: "user-one",
@@ -147,6 +147,53 @@ describe("generation log task service", () => {
         expect(log?.prompt).toBe(executionPrompt);
         expect(log?.requestSnapshot?.userPrompt).toBe(publicPrompt);
         expect(log?.requestSnapshot?.slots[0]?.prompt).toBe(executionPrompt);
+    });
+
+    it("retains the complete execution and billed attempts after the runtime task has been removed", async () => {
+        const prompt = "执".repeat(6000);
+        await service.recordGenerationTaskLogResult({
+            taskId: "expired-task",
+            userId: "user-one",
+            username: "user",
+            displayName: "User",
+            kind: "image",
+            source: "agent",
+            status: "failed",
+            title: "任务到期后的记录",
+            prompt,
+            model: "image-model",
+            summary: "失败",
+            durationMs: 200,
+            createdAt: 100,
+            requestSnapshot: {
+                version: 1,
+                userPrompt: "把桌子改成米色",
+                parameters: {},
+                references: [{ id: "reference-one", kind: "image", name: "桌子", mimeType: "image/png", url: "/api/reference-assets/permanent/desk.png", alias: "图片1", purposes: ["edit_target"], providerIndex: 0, sha256: "a".repeat(64) }],
+                slots: [
+                    {
+                        id: "slot-one",
+                        index: 0,
+                        status: "failed",
+                        taskId: "expired-task",
+                        prompt,
+                        attempts: [{ attemptNo: 1, model: "image-model", status: "failed", startedAt: 100, completedAt: 300, pointsCost: 0, pointsRecordId: "free-charge" }],
+                        billing: { pointsCost: 0, pointsRecordId: "free-charge", refunded: true },
+                    },
+                ],
+                run: { id: "run-one", recordType: "generation", status: "failed", inputMessageId: "message-one", childTaskIds: ["expired-task"] },
+            },
+        });
+        await writeFile(resolve(dataDir, "generation-tasks.json"), "[]");
+
+        const loaded = (await store.listGenerationLogs({ includeEcommerceTrace: true })).items[0];
+        expect(loaded.requestSnapshot?.slots[0].prompt).toBe(prompt);
+        expect(loaded.requestSnapshot).toMatchObject({
+            userPrompt: "把桌子改成米色",
+            run: { id: "run-one", inputMessageId: "message-one" },
+            references: [{ alias: "图片1", providerIndex: 0, sha256: "a".repeat(64) }],
+            slots: [{ attempts: [{ model: "image-model", pointsCost: 0, pointsRecordId: "free-charge" }], billing: { pointsCost: 0, refunded: true } }],
+        });
     });
 
     it("round-trips independent enhancement identities and safe native facts through the actual task log file", async () => {
