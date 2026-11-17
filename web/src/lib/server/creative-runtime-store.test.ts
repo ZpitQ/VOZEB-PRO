@@ -170,6 +170,28 @@ describe("creative runtime file provider", () => {
         });
     });
 
+    it("stores the readable task explanation before the internal fallback code for a pre-generation pause", async () => {
+        const original = run({
+            id: "run-readable-pause",
+            generationPreferences: { mode: "image" },
+            tasks: [{ id: "reference-review", title: "确认参考图", type: "image", prompt: "修改参考图片", count: 1, dependencies: [], attempts: 0, status: "needs_review", error: "请确认参考图用途和本次要修改的图片。" }],
+        });
+        original.ecommerceSnapshot = {
+            version: "ecommerce-generation.v1",
+            mode: "active",
+            runId: original.id,
+            userId: original.userId,
+            input: { userRequest: original.prompt, assetIds: [], conversationId: original.conversationId, surface: original.surface },
+            fallback: { reason: "reference_purpose_confirmation_required" },
+            createdAt: 1,
+        };
+        await createBundle(original);
+
+        await updateAgentRunById(original.id, { status: "paused" }, { type: "run.paused" }, ["planning"]);
+
+        expect(mocks.files.get("generation-logs.json")).toMatchObject({ logs: [{ summary: "请确认参考图用途和本次要修改的图片。", requestSnapshot: { run: { reason: "请确认参考图用途和本次要修改的图片。" } } }] });
+    });
+
     it("updates the same pre-generation record when the original request resumes", async () => {
         await createBundle(run({ id: "run-resumed", generationPreferences: { mode: "image" } }));
         await updateAgentRunById("run-resumed", { status: "paused", failure: "请选择目标" }, { type: "run.paused" }, ["planning"]);

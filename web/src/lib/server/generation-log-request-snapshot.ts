@@ -14,7 +14,7 @@ export function generationLogRunSnapshot(run: AgentRun, recordType: GenerationLo
         recordType,
         status: run.status,
         inputMessageId: run.inputMessageId,
-        reason: run.failure || run.ecommerceSnapshot?.fallback?.reason || run.tasks.find((task) => task.error)?.error,
+        reason: run.failure || run.tasks.find((task) => task.error)?.error || run.ecommerceSnapshot?.fallback?.reason,
         failureStage: run.failureStage,
         childTaskIds: [...new Set(run.tasks.flatMap((task) => [...(task.taskIds || (task.taskId ? [task.taskId] : [])), ...(task.childTasks?.map((child) => child.id) || [])]))],
     };
