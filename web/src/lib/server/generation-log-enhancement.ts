@@ -10,7 +10,9 @@ export async function hydrateGenerationLogEnhancements(logs: StoredGenerationLog
                 log.assets.map(async (asset, index) => {
                     if (asset.type !== "image" || !asset.enhancementId || !asset.resultId || asset.enhancementSkip) return asset;
                     const slots = log.requestSnapshot?.slots;
-                    const taskId = slots?.length ? slots.find((slot) => slot.status === "success" && slot.assetIndex === index)?.taskId : log.taskId;
+                    // Standalone snapshots describe the whole ImageTask; grouped snapshots bind each asset by index.
+                    const standalone = !slots?.length || slots.every((slot) => slot.assetIndex === undefined && slot.taskId === log.taskId);
+                    const taskId = slots?.find((slot) => slot.status === "success" && slot.assetIndex === index)?.taskId || (standalone ? log.taskId : undefined);
                     if (!taskId) return asset;
                     const job = await getEnhancementJob(asset.enhancementId, log.userId);
                     if (!job || job.id !== asset.enhancementId || job.userId !== log.userId || job.resultId !== asset.resultId || job.imageTaskId !== taskId) return asset;

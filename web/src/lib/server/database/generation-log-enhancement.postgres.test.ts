@@ -5,7 +5,7 @@ import { createPostgresRepositories } from "./repositories";
 import type { GenerationLogAssetRecord, GenerationLogRecord } from "./repository-shared";
 import * as postgres from "./postgres";
 import * as jobs from "./image-enhancement-job-repository";
-import { listGenerationLogs } from "../generation-log-store";
+import { getGenerationLogById, listGenerationLogs } from "../generation-log-store";
 
 const enabled = process.env.VOZEB_PRO_RUN_POSTGRES_INTEGRATION === "1" && process.env.VOZEB_PRO_ECOMMERCE_ISOLATED_DATABASE === "1";
 const ownerId = `generation-log-observation-owner-${randomUUID()}`;
@@ -163,6 +163,16 @@ describe.skipIf(!enabled)("isolated PostgreSQL generation log enhancement observ
         ]);
         expect(JSON.stringify(result)).not.toContain("private-");
         expect(await storedJobs()).toEqual(before);
+    });
+
+    it("reads a standalone ImageTask enhancement through both list and refreshed detail without an asset index", async () => {
+        const candidate = await jobs.insertEnhancementJob(job());
+        const record = log([{ type: "image", url: nativeSource.url, resultId: candidate.resultId, enhancementId: candidate.id }], {
+            requestSnapshot: { version: 1, parameters: {}, references: [], slots: [{ id: candidate.imageTaskId, index: 0, status: "success", taskId: candidate.imageTaskId }] },
+        });
+        await save(record);
+        expect((await adminRead()).items[0]?.assets[0]).toHaveProperty("enhancement.id", candidate.id);
+        expect((await getGenerationLogById(record.id))?.assets[0]).toHaveProperty("enhancement.id", candidate.id);
     });
 
     it.each(["owner", "result", "task"] as const)("rejects a real stored job with the wrong %s binding", async (mismatch) => {
