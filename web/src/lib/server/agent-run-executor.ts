@@ -329,7 +329,17 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
 
             const referenceRun = await updateAgentRunById(
                 run.id,
-                { ecommerceSnapshot: recordEcommerceGenerationSnapshot(claimed, { version: "ecommerce-generation.v1", mode: "active", input: snapshotInput, referenceCheckpoint, processing, createdAt: Date.now() }) },
+                {
+                    ecommerceSnapshot: recordEcommerceGenerationSnapshot(claimed, {
+                        version: "ecommerce-generation.v1",
+                        mode: "active",
+                        input: snapshotInput,
+                        referenceCheckpoint,
+                        processing,
+                        stageTimings: claimed.ecommerceSnapshot?.stageTimings,
+                        createdAt: Date.now(),
+                    }),
+                },
                 {
                     type: "ecommerce.progress",
                     data: { stage: "identifying_product", text: publicEcommerceProgress("identifying_product") },
@@ -340,6 +350,9 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
             if (!referenceRun) return;
             let analysis: EcommerceVisualAnalysis | EcommerceVisualAnalysisV4;
             let reusedCompletedAnalysis = false;
+            let analysisStartedAt = claimed.ecommerceSnapshot?.stageTimings?.analysisStartedAt;
+            let analysisCompletedAt = claimed.ecommerceSnapshot?.stageTimings?.analysisCompletedAt;
+            const planningTimings: { planningStartedAt?: number; planningCompletedAt?: number } = {};
             let preparedReferences: PreparedEcommerceReference[];
             try {
                 const prepared = await prepareEcommerceReferences(referenceRun, executionId);
@@ -352,6 +365,9 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                     analysis = referenceCheckpoint.analysis;
                     reusedCompletedAnalysis = true;
                 } else {
+                    analysisStartedAt = Date.now();
+                    analysisCompletedAt = undefined;
+                    if (!(await updateAgentRunById(run.id, { ecommerceSnapshot: { ...referenceRun.ecommerceSnapshot!, stageTimings: { analysisStartedAt } } }, undefined, ["running"], executionId))) return;
                     analysis = await analyzeEcommerceReferences(
                         {
                             origin,
@@ -395,11 +411,11 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                     sourceChanged ? error.message : completedAnalysis ? "参考图片暂时无法读取，可重试后继续这次创作。" : "无法可靠分析参考图，任务已暂停等待复核。",
                     false,
                     undefined,
-                    error instanceof EcommerceVisualAnalysisError && error.failure ? { visualAnalysisFailure: error.failure, stageTimings: { analysisCompletedAt: Date.now() } } : {},
+                    error instanceof EcommerceVisualAnalysisError && error.failure ? { visualAnalysisFailure: error.failure, stageTimings: { analysisStartedAt, analysisCompletedAt: Date.now() } } : {},
                 );
                 return;
             }
-            const analysisCompletedAt = Date.now();
+            if (!reusedCompletedAnalysis) analysisCompletedAt = Date.now();
             if (!(await canContinue(run.id, executionId))) return;
             const purposeDecision =
                 analysis.analysisVersion === "ecommerce-visual-analysis.v4"
@@ -421,7 +437,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 referenceCheckpoint,
                 ...(purposeDecision ? { referenceDecision: purposeDecision } : {}),
                 modelRouteSnapshots: { vision_analysis: visionRouteSnapshot, image_generation: imageGenerationRole.snapshot, quality_check: qualityCheckRole?.snapshot },
-                stageTimings: { analysisCompletedAt },
+                stageTimings: { analysisStartedAt, analysisCompletedAt, ...planningTimings },
             });
             if (
                 !(await updateAgentRunById(
@@ -502,6 +518,9 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 );
                 return;
             }
+            planningTimings.planningStartedAt = Date.now();
+            const planningRun = await getAgentRun(run.id);
+            if (!planningRun || !(await updateAgentRunById(run.id, { ecommerceSnapshot: { ...planningRun.ecommerceSnapshot!, stageTimings: { analysisStartedAt, analysisCompletedAt, ...planningTimings } } }, undefined, ["running"], executionId))) return;
             const planning = await planEcommerceEdit(
                 {
                     origin,
@@ -520,6 +539,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 editPlanningCandidates,
             );
             const planningCompletedAt = Date.now();
+            planningTimings.planningCompletedAt = planningCompletedAt;
             const canvas = resolveEcommerceCanvasConstraint({ ...canvasInput, operation: planning.plan.operation, strategy: planning.plan.strategy });
             planning.plan = {
                 ...planning.plan,
@@ -568,7 +588,7 @@ export async function executeAgentRun(run: AgentRun, origin: string, cookie: str
                 },
                 compilerVersion: ecommerceExecution.compilerVersion,
                 ...(purposeDecision ? { referenceDecision: purposeDecision } : {}),
-                stageTimings: { analysisCompletedAt, planningCompletedAt },
+                stageTimings: { analysisStartedAt, analysisCompletedAt, ...planningTimings },
                 createdAt: Date.now(),
             });
             const planned = await updateAgentRunById(

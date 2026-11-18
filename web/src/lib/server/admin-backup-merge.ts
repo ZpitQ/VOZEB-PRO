@@ -2,11 +2,13 @@ import type { AuthDatabase, AuthSettings, LogicalModel, SystemModelChannel } fro
 import type { PromptDatabase } from "@/lib/prompts/store";
 import type { AccountDeletionRequestDatabase, StoredAccountDeletionRequest } from "@/lib/server/database/account-deletion-request-repository";
 import type { GenerationLogDatabase } from "@/lib/server/generation-log-types";
+import { assertGenerationLogEvaluationIdentity, type GenerationLogEvaluationDatabase } from "@/lib/server/database/generation-log-evaluation-repository";
 
 export type AdminBackupData = {
     auth: AuthDatabase;
     prompts: PromptDatabase;
     generationLogs: GenerationLogDatabase;
+    generationLogEvaluations: GenerationLogEvaluationDatabase;
     accountDeletionRequests: AccountDeletionRequestDatabase;
 };
 
@@ -21,6 +23,18 @@ export function mergeAccountConfigBackup(current: AdminBackupData, imported: Adm
         generationLogs: {
             version: 1,
             logs: mergeRecords(current.generationLogs.logs, imported.generationLogs.logs, (log) => log.id),
+        },
+        generationLogEvaluations: {
+            version: 1,
+            evaluations: mergeRecords(
+                current.generationLogEvaluations.evaluations,
+                imported.generationLogEvaluations.evaluations,
+                (record) => record.id,
+                (existing, incoming) => {
+                    assertGenerationLogEvaluationIdentity(existing, incoming);
+                    return existing.status === "pending" ? incoming : existing;
+                },
+            ),
         },
         accountDeletionRequests: {
             version: 1,

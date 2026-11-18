@@ -129,5 +129,22 @@ describe.skipIf(!enabled)("isolated PostgreSQL durable request logs", () => {
             slots: [{ prompt: "compiled image request", attempts: [{ pointsCost: 1.5, pointsRecordId: "charge-one" }], billing: { pointsCost: 1.5, refunded: true } }],
         });
         expect(JSON.stringify(saved)).not.toContain("PRIVATE-CREDENTIAL");
+
+        await updateAgentRunById(
+            run.id,
+            { status: "completed", timings: { requestAcceptedAt: run.createdAt, planningStartedAt: run.createdAt + 100, planningCompletedAt: run.createdAt + 120000, runCompletedAt: run.createdAt + 179000 } },
+            { type: "run.completed" },
+            ["running"],
+        );
+        await postgres.postgresQuery("DELETE FROM generation_tasks WHERE id = $1 AND user_id = $2", [run.id, owner]);
+        const retained = (await listGenerationLogs({ userId: owner, includeEcommerceTrace: true })).items.find((log) => log.taskId === task.id);
+        expect(retained).toMatchObject({
+            durationMs: 200,
+            requestSnapshot: {
+                userPrompt: "只改变桌面颜色",
+                run: { status: "completed", timings: { requestAcceptedAt: run.createdAt, planningStartedAt: run.createdAt + 100, planningCompletedAt: run.createdAt + 120000, runCompletedAt: run.createdAt + 179000 } },
+                slots: [{ attempts: [{ pointsCost: 1.5, pointsRecordId: "charge-one" }] }],
+            },
+        });
     });
 });

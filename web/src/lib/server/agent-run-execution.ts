@@ -34,7 +34,7 @@ import { agentSurfaceImageSize, canvasReferenceContext, canvasReferenceSupportsT
 import { hasSystemAiCharge, readSystemAiBilling, systemAiBillingHeaders } from "./system-ai-billing";
 import { acceptsMediaReference, mergeTaskReferences, taskImageUrls, taskReferences, taskResultItems, textConstraintInstruction } from "./agent-run-execution-helpers";
 import { checkEcommerceResultWithFallback, checkEcommerceTechnicalResult, ecommerceQualityGate, ecommerceResultDeliveryGate, unavailableEcommerceQualityCheck } from "./ecommerce-quality-check";
-import { buildEcommerceGenerationTrace } from "./ecommerce-generation-trace";
+import { buildEcommerceGenerationTrace, ecommerceImageGenerationTimings } from "./ecommerce-generation-trace";
 import { ecommerceCheckpointMessage, hasUnresolvedEcommerceCheckpoint } from "./agent-run-checkpoint";
 import { readCompletedImageTaskResult } from "./image-task-result-processing";
 import { ecommerceRunForTask } from "./ecommerce-generation-snapshot";
@@ -834,12 +834,14 @@ async function runTaskWithRetryInternal(runId: string, task: AgentRunTask, origi
                 : latestTask?.childTasks?.map((child) => (child.status === "pending" ? { ...child, status: "failed" as const, error: message } : child));
             const imageTaskIds = Array.from(new Set([...(latestTask?.taskIds || []), ...(latestTask?.childTasks || []).map((child) => child.id), latestTask?.taskId].filter((id): id is string => Boolean(id))));
             if (latest?.ecommerceSnapshot && latestTask?.ecommerceExecution && imageTaskIds.length) {
+                const snapshot = ecommerceRunForTask(latest, task.id).ecommerceSnapshot!;
+                const generationTimings = ecommerceImageGenerationTimings(await Promise.all(imageTaskIds.map((id) => getImageTask(id))));
                 await persistEcommerceGenerationTrace(
                     imageTaskIds,
                     buildEcommerceGenerationTrace({
                         runId,
                         task: latestTask,
-                        snapshot: ecommerceRunForTask(latest, task.id).ecommerceSnapshot!,
+                        snapshot: { ...snapshot, stageTimings: { ...snapshot.stageTimings, ...generationTimings } },
                         imageTaskIds,
                         generationStatus: "failed",
                         finalStatus: "failed",
@@ -957,7 +959,7 @@ async function checkAndRecordEcommerceResult(
               ? await checkEcommerceResultWithFallback(checkInput, candidates, technicalCheck)
               : unavailableEcommerceQualityCheck(!snapshot?.plan ? "电商编辑计划缺失" : !candidates.length ? "结果验收模型快照不可用" : "验收基线图片不可用", fallbackRole);
     const gate = phase === "legacy" ? ecommerceQualityGate(qualityCheck!) : ecommerceResultDeliveryGate(technicalCheck!, qualityCheck);
-    const ecommerceSnapshot = snapshot ? { ...snapshot, ...(technicalCheck ? { technicalCheck } : {}), ...(qualityCheck ? { qualityCheck } : {}) } : snapshot;
+    const ecommerceSnapshot = snapshot ? { ...snapshot, stageTimings: { ...snapshot.stageTimings, ...ecommerceImageGenerationTimings(mediaTasks) }, ...(technicalCheck ? { technicalCheck } : {}), ...(qualityCheck ? { qualityCheck } : {}) } : snapshot;
     if (
         !ecommerceSnapshot ||
         !(await updateAgentRunById(

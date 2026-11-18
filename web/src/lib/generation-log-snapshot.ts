@@ -53,6 +53,17 @@ export type GenerationLogRunSnapshot = {
     reason?: string;
     failureStage?: string;
     childTaskIds: string[];
+    timings?: {
+        requestAcceptedAt: number;
+        planningStartedAt?: number;
+        plannerFirstByteAt?: number;
+        planningCompletedAt?: number;
+        firstTaskSubmittedAt?: number;
+        firstResultReadyAt?: number;
+        allResultsReadyAt?: number;
+        reviewCompletedAt?: number;
+        runCompletedAt?: number;
+    };
 };
 
 export type GenerationLogSlotSnapshot = {

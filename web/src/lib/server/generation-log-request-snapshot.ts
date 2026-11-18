@@ -9,6 +9,12 @@ import type { GenerationTaskExecutionState } from "./generation-task-types";
 import { toSafeGenerationErrorMessage } from "./generation-errors";
 
 export function generationLogRunSnapshot(run: AgentRun, recordType: GenerationLogRunSnapshot["recordType"]): GenerationLogRunSnapshot {
+    const timings: GenerationLogRunSnapshot["timings"] = run.timings ? { requestAcceptedAt: run.timings.requestAcceptedAt } : undefined;
+    if (timings && run.timings) {
+        for (const key of ["planningStartedAt", "plannerFirstByteAt", "planningCompletedAt", "firstTaskSubmittedAt", "firstResultReadyAt", "allResultsReadyAt", "reviewCompletedAt", "runCompletedAt"] as const) {
+            if (run.timings[key] !== undefined) timings[key] = run.timings[key];
+        }
+    }
     return {
         id: run.id,
         recordType,
@@ -17,6 +23,7 @@ export function generationLogRunSnapshot(run: AgentRun, recordType: GenerationLo
         reason: run.failure || run.tasks.find((task) => task.error)?.error || run.ecommerceSnapshot?.fallback?.reason,
         failureStage: run.failureStage,
         childTaskIds: [...new Set(run.tasks.flatMap((task) => [...(task.taskIds || (task.taskId ? [task.taskId] : [])), ...(task.childTasks?.map((child) => child.id) || [])]))],
+        timings,
     };
 }
 

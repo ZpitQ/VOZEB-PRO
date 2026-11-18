@@ -132,6 +132,10 @@ VOZEB PRO 的 PostgreSQL 真实表名统一使用项目名前缀 `vozeb_pro_`。
 
 ## 核心表
 
+- `vozeb_pro_generation_log_evaluations`：生成事实之外的独立评价档案，`payload jsonb` 保存管理员转述反馈或 AI 复核的规则版本、冻结事实与证据、模型路由、结论、限制和计费退款关联。`id` 唯一绑定请求；相同身份重复提交返回既有记录，指纹、操作者、日志或所有者不同则冲突，不重启模型调用。领取和结束在同一事务内先锁父日志并核对归属；只有 pending 可以结束为 completed/failed。`log_id` 与 `user_id` 分别引用生成日志和所有者，删除级联清除评价；`actor_id` 保留文本快照，不因操作者账号删除丢失档案。在线按日志或评价 ID 定向查询；完整备份读取必须传入显式事务 executor，并使用同一只读可重复读快照。文件 Provider 单独保存 `generation-log-evaluations.json`，领取、删除和备份恢复固定按生成日志文件、评价文件的顺序加锁；跨文件写入沿用补偿回滚，不能等同于数据库事务。备份导出、安全副本、合并恢复均包含反馈和 AI 档案，已有终态不被旧 pending 覆盖。
+
+生成日志的 `requestSnapshot.run.timings` 保存 Run 原始里程碑；`ecommerceTrace.stages[]` 保存对应阶段实际 `startedAt/completedAt`，电商状态的 `stageTimings` 分别保存 analysis、planning、generation、quality 的起止。图片 generation 边界来自真实 ImageTask attempts，独立于分析、规划或验收阶段。缺失的真实时间保持缺失，不用总耗时、轮询时间或相邻阶段补算。
+
 - `vozeb_pro_image_enhancement_jobs`：独立于原生生图成功状态的持久增强任务，以 `user_id + image_task_id + result_id` 唯一绑定原件版本。`status/phase/next_poll_at/lease_token/lease_until` 支持有界到期领取、行锁跳过争用与旧执行租约校验；`payload` 保存冻结原件、目标和模型连接引用、远端幂等键与任务、尝试事件、永久AI／交付件及固定接收确认身份，不保存端点或Token。`publicationProcessing.promotion` 保存已闭合CPU结果的固定 `aiStorageKey/deliveredStorageKey` 永久目标，重试复用原字节及同一目标；最终资产与父任务提交前复核原图片、父子绑定、媒体登记、取消及有效租约。原图成功写入与增强入队在同一PG事务，发布关联资产读取／登记复用同一executor；完整媒体保存并回读校验后发布，收据丢失保持成功而只恢复确认。本人读取按任务及用户定向查询，调度只查询到期行。文件Provider使用 `image-enhancement-jobs.json`：原任务锁内先保存意图，执行前核原生成功及冻结原件；发布先creative再enhancement锁，复用锁内快照、先保存creative再写job，跨文件中断沿稳定child身份恢复。该表的实际媒体／GPU及前台接入仍按M5逐项验收。
 
   普通成功图片的任务结果与创作资产metadata保留公开resultId、enhancementId、nativeSource或enhancementSkip；后者仅含skipped及已知原因。普通4K关闭策略仍有原件事实和独立skipped job，其他无job分支不伪造原件事实。重复登记使用同一来源任务及任务内压缩序号，增强件为独立child，不能覆盖原assetId。增强payload的timings分别保存Worker排队、当前attempt引擎执行及实际交付编码事实；成功Worker快照替换旧Worker计时，独立保留Web编码计时，查询失败不抹除已存事实。只读响应不从轮询间隔推算耗时，未测量字段保持缺失。

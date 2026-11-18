@@ -3,6 +3,10 @@ import { getDatabaseProvider, createPostgresRepositories, type QueryExecutor } f
 import { generationLogReferences, generationLogRunSnapshot } from "./generation-log-request-snapshot";
 import { mutateGenerationLogDb, normalizeGenerationLogRequestSnapshot, normalizeStoredLog } from "./generation-log-repository";
 import type { StoredGenerationLog } from "./generation-log-types";
+import { isDeepStrictEqual } from "node:util";
+import { normalizeEcommerceGenerationTrace, updateEcommerceGenerationTraceTimings } from "./ecommerce-generation-trace";
+import { ecommerceRunForTask } from "./ecommerce-generation-snapshot";
+import { deleteGenerationLogFileRecords } from "./generation-log-evaluation-file";
 
 export async function persistAgentRunRequestLog(run: AgentRun, executor?: QueryExecutor) {
     const imageRun = run.generationPreferences?.mode === "image" || run.generationPreferences?.mode === "video" || run.ecommerceSnapshot || run.tasks.some((task) => task.type === "image" || task.type === "video");
@@ -43,7 +47,7 @@ export async function persistAgentRunRequestLog(run: AgentRun, executor?: QueryE
             };
         });
         const parameters = run.generationPreferences?.image;
-        return normalizeStoredLog({
+        const log = normalizeStoredLog({
             ...existing,
             id,
             userId: run.userId,
@@ -75,23 +79,40 @@ export async function persistAgentRunRequestLog(run: AgentRun, executor?: QueryE
             updatedAt: new Date(run.updatedAt).toISOString(),
             completedAt: run.status === "completed" || run.status === "failed" || run.status === "cancelled" ? new Date(run.updatedAt).toISOString() : undefined,
         });
+        return existing && isDeepStrictEqual(existing.requestSnapshot, log.requestSnapshot) && existing.status === log.status && existing.error === log.error ? existing : log;
+    };
+    const childState = generationLogRunSnapshot(run, "generation");
+    const childMetadata = (existing: { requestSnapshot?: unknown; ecommerceTrace?: unknown }) => {
+        const requestSnapshot = normalizeGenerationLogRequestSnapshot(existing.requestSnapshot) || { version: 1 as const, parameters: {}, references: [], slots: [] };
+        const trace = normalizeEcommerceGenerationTrace(existing.ecommerceTrace);
+        const task = trace && run.tasks.find((item) => item.id === trace.agentTaskId);
+        const snapshot = task && ecommerceRunForTask(run, task.id).ecommerceSnapshot;
+        return {
+            requestSnapshot: { ...requestSnapshot, run: childState },
+            ecommerceTrace: trace && task && snapshot ? updateEcommerceGenerationTraceTimings(trace, snapshot) : trace,
+        };
     };
     if (executor) {
         const repository = createPostgresRepositories(executor).generationLogs;
         const current = await repository.getById(id, true);
         if (current && current.userId !== run.userId) throw new Error("generation log id belongs to another user");
-        const log = await build(
-            current
-                ? { ...current, source: run.surface === "canvas" ? "canvas" : run.surface === "drama" ? "drama" : "agent", assets: [], requestSnapshot: normalizeGenerationLogRequestSnapshot(current.requestSnapshot), ecommerceTrace: undefined }
-                : undefined,
-        );
-        if (!log) return;
-        const actor = await executor.query<{ username: string; display_name: string }>("SELECT username, display_name FROM users WHERE id = $1", [run.userId]);
-        if (actor.rows[0]) {
-            log.username = actor.rows[0].username;
-            log.displayName = actor.rows[0].display_name;
+        const prior: StoredGenerationLog | undefined = current
+            ? { ...current, source: run.surface === "canvas" ? "canvas" : run.surface === "drama" ? "drama" : "agent", assets: [], requestSnapshot: normalizeGenerationLogRequestSnapshot(current.requestSnapshot), ecommerceTrace: undefined }
+            : undefined;
+        const log = await build(prior);
+        if (log && log !== prior) {
+            const actor = await executor.query<{ username: string; display_name: string }>("SELECT username, display_name FROM users WHERE id = $1", [run.userId]);
+            if (actor.rows[0]) {
+                log.username = actor.rows[0].username;
+                log.displayName = actor.rows[0].display_name;
+            }
+            await repository.upsert(log);
         }
-        await repository.upsert(log);
+        for (const child of await repository.getByRunTaskIds(run.userId, run.id, childState.childTaskIds)) {
+            const metadata = childMetadata(child);
+            if (!isDeepStrictEqual(normalizeGenerationLogRequestSnapshot(child.requestSnapshot), metadata.requestSnapshot) || !isDeepStrictEqual(normalizeEcommerceGenerationTrace(child.ecommerceTrace), metadata.ecommerceTrace))
+                await repository.updateRunMetadata(child.id, run.userId, metadata.requestSnapshot, metadata.ecommerceTrace);
+        }
         return;
     }
     if (getDatabaseProvider() === "postgres") throw new Error("Agent 请求日志必须复用当前事务");
@@ -99,14 +120,39 @@ export async function persistAgentRunRequestLog(run: AgentRun, executor?: QueryE
         const existing = db.logs.find((item) => item.id === id);
         if (existing && existing.userId !== run.userId) throw new Error("generation log id belongs to another user");
         const log = await build(existing);
-        if (!log) return undefined;
-        db.logs = [log, ...db.logs.filter((item) => item.id !== id)];
+        const changes: Array<{ before?: StoredGenerationLog; after: StoredGenerationLog }> = [];
+        if (log && log !== existing) {
+            db.logs = [log, ...db.logs.filter((item) => item.id !== id)];
+            changes.push({ before: existing, after: log });
+        }
+        db.logs = db.logs.map((child) => {
+            if (child.userId !== run.userId || child.requestSnapshot?.run?.recordType === "pre-generation" || (child.requestSnapshot?.run?.id !== run.id && (child.requestSnapshot?.run || !child.taskId || !childState.childTaskIds.includes(child.taskId))))
+                return child;
+            const metadata = childMetadata(child);
+            if (isDeepStrictEqual(child.requestSnapshot, metadata.requestSnapshot) && isDeepStrictEqual(child.ecommerceTrace, metadata.ecommerceTrace)) return child;
+            const after = { ...child, ...metadata };
+            changes.push({ before: child, after });
+            return after;
+        });
+        if (!changes.length) return undefined;
         return async () => {
+            const createdLogs: StoredGenerationLog[] = [];
             await mutateGenerationLogDb((current) => {
-                const written = current.logs.find((item) => item.id === id);
-                if (JSON.stringify(written) !== JSON.stringify(log)) return;
-                current.logs = existing ? current.logs.map((item) => (item.id === id ? existing : item)) : current.logs.filter((item) => item.id !== id);
+                for (const change of changes) {
+                    const written = current.logs.find((item) => item.id === change.after.id);
+                    if (!written) continue;
+                    if (change.after.id === id) {
+                        if (!isDeepStrictEqual(written, change.after)) continue;
+                        if (change.before) current.logs = current.logs.map((item) => (item.id === id ? change.before! : item));
+                        else createdLogs.push(change.after);
+                    } else {
+                        if (isDeepStrictEqual(written.requestSnapshot?.run, change.after.requestSnapshot?.run))
+                            written.requestSnapshot = isDeepStrictEqual(written.requestSnapshot, change.after.requestSnapshot) ? change.before?.requestSnapshot : { ...written.requestSnapshot!, run: change.before?.requestSnapshot?.run };
+                        if (isDeepStrictEqual(written.ecommerceTrace, change.after.ecommerceTrace)) written.ecommerceTrace = change.before?.ecommerceTrace;
+                    }
+                }
             });
+            if (createdLogs.length) await deleteGenerationLogFileRecords((log) => createdLogs.some((created) => created.id === log.id && isDeepStrictEqual(log, created)));
         };
     });
 }

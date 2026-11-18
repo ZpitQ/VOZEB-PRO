@@ -1,6 +1,7 @@
 "use client";
 
 import { GenerationLogDetail } from "@/components/admin/admin-generation-log";
+import { hasAdminPermission } from "@/lib/admin-permissions";
 import { AdminOverview } from "@/components/admin/admin-overview";
 import { AdminSectionNav } from "@/components/admin/admin-section-nav";
 import type { AdminSectionKey } from "@/components/admin/admin-sections";
@@ -313,7 +314,7 @@ export function AdminDashboard(props: AdminDashboardProps) {
             </Modal>
             <AdminUserEditorModal controller={controller} />
             <Modal title="生成日志详情" open={Boolean(viewingGenerationLog)} footer={null} onCancel={() => setViewingGenerationLog(null)} width={860}>
-                {viewingGenerationLog ? <GenerationLogDetail log={viewingGenerationLog} /> : null}
+                {viewingGenerationLog ? <GenerationLogDetail key={viewingGenerationLog.id} log={viewingGenerationLog} canManage={hasAdminPermission(currentUser, "generation.manage")} /> : null}
             </Modal>
             <Modal title="CDK 明细" open={Boolean(viewingCdkCode)} footer={null} onCancel={() => setViewingCdkCode(null)} width={760}>
                 {viewingCdkCode ? (

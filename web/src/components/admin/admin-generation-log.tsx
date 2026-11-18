@@ -1,10 +1,15 @@
 "use client";
 
+import { useState } from "react";
+import { getAdminGenerationLog } from "@/services/api/admin-generation-logs";
+
 import { Button, Checkbox, Popconfirm, Tag } from "antd";
 import { Eye, Film, Image as ImageIcon, ListChecks, ScanSearch, ShieldCheck, Trash2 } from "lucide-react";
 
 import { browserReadableMediaUrl } from "@/lib/browser-media-url";
 import { AdminAccountId } from "@/components/admin/admin-user-identity";
+import { GenerationLogMediaResult, generationLogAssetAccessUrl } from "./admin-generation-log-media";
+import { GenerationLogEvaluationSection } from "./admin-generation-log-evaluation";
 import { imagePreviewUrl } from "@/lib/media-image-url";
 import type { StoredGenerationLog } from "@/lib/server/generation-log-store";
 import type { EcommerceGenerationTrace, EcommerceGenerationTraceStage } from "@/lib/server/ecommerce-generation-trace";
@@ -65,23 +70,51 @@ export function GenerationLogMobileCard({ log, selected, onSelectedChange, onVie
     );
 }
 
-export function GenerationLogDetail({ log }: { log: StoredGenerationLog }) {
+export function GenerationLogDetail({ log: initialLog, canManage = false }: { log: StoredGenerationLog; canManage?: boolean }) {
+    const [refreshed, setRefreshed] = useState<{ source: StoredGenerationLog; log: StoredGenerationLog }>();
+    const log = refreshed?.source === initialLog ? refreshed.log : initialLog;
+    const [refreshing, setRefreshing] = useState(false);
+    const [refreshVersion, setRefreshVersion] = useState(0);
+    const [refreshError, setRefreshError] = useState("");
+    async function refresh() {
+        setRefreshing(true);
+        setRefreshError("");
+        try {
+            setRefreshed({ source: initialLog, log: await getAdminGenerationLog(log.id) });
+            setRefreshVersion((value) => value + 1);
+        } catch (error) {
+            setRefreshError(error instanceof Error ? error.message : "刷新详情失败");
+        } finally {
+            setRefreshing(false);
+        }
+    }
     const snapshot = log.requestSnapshot;
     const preGeneration = snapshot?.run?.recordType === "pre-generation";
     const executionPrompts = [...new Map(snapshot?.slots.filter((slot) => slot.prompt).map((slot) => [slot.taskId || slot.id, slot]) || []).values()];
     return (
         <div className="space-y-4">
+            <div className="flex justify-end">
+                <Button size="small" loading={refreshing} onClick={() => void refresh()}>
+                    刷新详情
+                </Button>
+            </div>
+            {refreshError ? (
+                <div role="alert" className="text-sm text-red-600 dark:text-red-300">
+                    {refreshError}
+                </div>
+            ) : null}
             <section>
                 <div className="mb-1 text-sm font-semibold text-stone-950 dark:text-stone-100">用户原话</div>
                 <div className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm leading-6 text-stone-700 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-200">
                     {snapshot?.userPrompt || "原始需求未记录"}
                 </div>
                 {snapshot?.run ? (
-                    <div className="mt-2 space-y-1 break-all text-xs text-stone-500 dark:text-stone-400">
+                    <details className="mt-2 space-y-1 break-all text-xs text-stone-500 dark:text-stone-400">
+                        <summary className="cursor-pointer">请求关联信息</summary>
                         <div>Run：{snapshot.run.id}</div>
                         <div>原消息：{snapshot.run.inputMessageId}</div>
                         {snapshot.run.childTaskIds.length ? <div>关联任务：{snapshot.run.childTaskIds.join("、")}</div> : null}
-                    </div>
+                    </details>
                 ) : null}
             </section>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -90,24 +123,31 @@ export function GenerationLogDetail({ log }: { log: StoredGenerationLog }) {
                 <InfoBox label="类型" value={generationKindLabel(log.kind)} />
                 <InfoBox label="状态" value={generationStatusLabel(generationLogDisplayStatus(log))} />
                 <InfoBox label="时间" value={formatAdminLogTime(log.createdAt)} />
-                <InfoBox label="耗时" value={formatAdminLogDuration(log.durationMs)} />
+                <InfoBox label="请求总耗时" value={measuredDuration(snapshot?.run?.timings?.requestAcceptedAt, snapshot?.run?.timings?.runCompletedAt)} />
                 <InfoBox label="模型" value={formatGenerationLogModel(log.model)} />
                 <InfoBox label="数量" value={preGeneration ? "前置流程记录" : `成功 ${log.successCount} / 失败 ${log.failCount} / 共 ${log.count}`} />
             </div>
             {snapshot?.references.length ? <GenerationLogReferences references={snapshot.references} /> : null}
+            <GenerationLogOutcomeSummary log={log} />
             {preGeneration ? (
                 <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm dark:border-stone-800 dark:bg-stone-900">
                     <div>{snapshot.run?.reason}</div>
                     <div className="mt-1 text-stone-500 dark:text-stone-400">{snapshot.run?.childTaskIds.length ? "前置流程已继续，后续生图见关联任务的调用记录。" : "尚未创建生图任务"}</div>
                 </div>
-            ) : (
-                <GenerationLogResultSection log={log} />
-            )}
-            {snapshot?.slots.some((slot) => slot.attempts?.length) ? <GenerationLogAttempts slots={snapshot.slots} /> : null}
+            ) : null}
+            <GenerationLogRequestTimings log={log} />
             {log.ecommerceTrace ? <EcommerceGenerationTraceSection trace={log.ecommerceTrace} /> : null}
+            {!preGeneration ? <GenerationLogResultSection log={log} /> : null}
+            <GenerationLogEvaluationSection key={log.id} logId={log.id} canManage={canManage} refreshVersion={refreshVersion} />
+            {snapshot?.slots.some((slot) => slot.attempts?.length) ? (
+                <details>
+                    <summary className="cursor-pointer text-sm font-semibold">渠道尝试与计费</summary>
+                    <GenerationLogAttempts slots={snapshot.slots} />
+                </details>
+            ) : null}
             {!preGeneration ? (
-                <div>
-                    <div className="mb-1 text-sm font-semibold text-stone-950 dark:text-stone-100">{log.kind === "video" ? "实际视频提示词" : "实际生图提示词"}</div>
+                <details>
+                    <summary className="mb-1 cursor-pointer text-sm font-semibold text-stone-950 dark:text-stone-100">{log.kind === "video" ? "实际视频提示词" : "实际生图提示词"}</summary>
                     {executionPrompts.length ? (
                         executionPrompts.map((slot) => (
                             <div key={slot.taskId || slot.id} className="mb-2">
@@ -122,7 +162,7 @@ export function GenerationLogDetail({ log }: { log: StoredGenerationLog }) {
                     ) : (
                         <div className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm leading-6 text-stone-700 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-200">{log.prompt || "-"}</div>
                     )}
-                </div>
+                </details>
             ) : null}
             {log.error ? (
                 <div>
@@ -131,6 +171,73 @@ export function GenerationLogDetail({ log }: { log: StoredGenerationLog }) {
                 </div>
             ) : null}
         </div>
+    );
+}
+
+function traceOutput(stage?: EcommerceGenerationTraceStage): Record<string, unknown> {
+    return stage?.output && typeof stage.output === "object" && !Array.isArray(stage.output) ? stage.output : {};
+}
+
+function technicalStatus(log: StoredGenerationLog) {
+    const output = traceOutput(log.ecommerceTrace?.stages.find((stage) => stage.key === "image_generation"));
+    const check = output.technicalCheck;
+    return check && typeof check === "object" && "status" in check ? String(check.status) : "unknown";
+}
+
+function GenerationLogOutcomeSummary({ log }: { log: StoredGenerationLog }) {
+    const technical = technicalStatus(log);
+    const visual = log.ecommerceTrace?.stages.find((stage) => stage.key === "quality_check");
+    return (
+        <section className="grid gap-3 rounded-lg border border-stone-200 p-3 dark:border-stone-800 sm:grid-cols-3" aria-label="交付与评价摘要">
+            <InfoBox label="交付" value={`${generationStatusLabel(generationLogDisplayStatus(log))} · 已保存 ${log.assets.length} 项产物`} />
+            <InfoBox label="技术检查" value={technical === "passed" ? "通过" : technical === "blocked" ? "未通过" : "未知，未取得检查记录"} />
+            <InfoBox label="视觉评价" value={!visual || visual.status === "not_run" ? "未执行" : traceStatusLabel(visual.status)} />
+            <p className="text-xs text-stone-500 dark:text-stone-400 sm:col-span-3">交付、技术检查与视觉评价分别记录；用户满意程度以独立反馈为准。</p>
+        </section>
+    );
+}
+
+function measuredDuration(start?: number, end?: number) {
+    if (start === undefined || end === undefined || end < start) return "未知（缺少完整时间记录）";
+    return end === start ? "0ms" : formatAdminLogDuration(end - start);
+}
+
+function GenerationLogRequestTimings({ log }: { log: StoredGenerationLog }) {
+    const timing = log.requestSnapshot?.run?.timings;
+    const milestones = timing
+        ? ([
+              ["接收请求", timing.requestAcceptedAt],
+              ["开始规划", timing.planningStartedAt],
+              ["规划首字节", timing.plannerFirstByteAt],
+              ["规划完成", timing.planningCompletedAt],
+              ["首个任务提交", timing.firstTaskSubmittedAt],
+              ["首个结果就绪", timing.firstResultReadyAt],
+              ["全部结果就绪", timing.allResultsReadyAt],
+              ["视觉复核结束", timing.reviewCompletedAt],
+              ["请求结束", timing.runCompletedAt],
+          ] as const)
+        : [];
+    return (
+        <section className="space-y-2">
+            <h3 className="text-sm font-semibold">请求时间线</h3>
+            <div className="text-xs">规划耗时：{measuredDuration(timing?.planningStartedAt, timing?.planningCompletedAt)}</div>
+            <div className="text-xs text-stone-500 dark:text-stone-400">请求总耗时从接收请求到 Run 结束；生成及增强分别记录，未结束或缺失时间保持未知。</div>
+            {timing ? (
+                <details>
+                    <summary className="cursor-pointer text-xs">查看实际时间点</summary>
+                    <dl className="mt-2 grid gap-1 text-xs sm:grid-cols-2">
+                        {milestones.map(([label, at]) => (
+                            <div key={label}>
+                                <dt className="inline">{label}：</dt>
+                                <dd className="inline">{at === undefined ? "未知" : formatTraceTime(at)}</dd>
+                            </div>
+                        ))}
+                    </dl>
+                </details>
+            ) : (
+                <div className="text-xs text-stone-500 dark:text-stone-400">此记录没有请求级时间数据。</div>
+            )}
+        </section>
     );
 }
 
@@ -262,6 +369,7 @@ function TraceStage({ stage }: { stage: EcommerceGenerationTraceStage }) {
                     <Icon className="mt-0.5 size-4 shrink-0 text-stone-500 dark:text-stone-400" />
                     <div className="min-w-0">
                         <div className="text-sm font-medium text-stone-900 dark:text-stone-100">{traceStageLabel(stage.key)}</div>
+                        <div className="mt-1 whitespace-pre-wrap text-xs text-stone-600 dark:text-stone-300">{traceStageSummary(stage)}</div>
                         <div className="mt-1 break-all text-xs text-stone-500 dark:text-stone-400">{model}</div>
                         {stage.model?.channelId ? <div className="mt-0.5 break-all text-xs text-stone-400 dark:text-stone-500">渠道：{stage.model.channelId}</div> : null}
                     </div>
@@ -273,6 +381,9 @@ function TraceStage({ stage }: { stage: EcommerceGenerationTraceStage }) {
                     </Tag>
                 </div>
             </div>
+            <div className="mt-2 pl-6 text-xs text-stone-500 dark:text-stone-400">
+                开始：{stage.startedAt === undefined ? "未知" : formatTraceTime(stage.startedAt)} · 结束：{stage.completedAt === undefined ? "未知" : formatTraceTime(stage.completedAt)} · 耗时：{measuredDuration(stage.startedAt, stage.completedAt)}
+            </div>
             <details className="mt-2 pl-6">
                 <summary className="cursor-pointer select-none text-xs font-medium text-stone-600 dark:text-stone-300">结构化输出</summary>
                 <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-all border-l-2 border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-700 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-200">
@@ -281,6 +392,17 @@ function TraceStage({ stage }: { stage: EcommerceGenerationTraceStage }) {
             </details>
         </div>
     );
+}
+
+function traceStageSummary(stage: EcommerceGenerationTraceStage) {
+    const output = traceOutput(stage);
+    if (stage.key === "quality_check")
+        return stage.status === "not_run" ? (output.policy === "disabled" ? "本轮未开启视觉评价，结果按技术检查交付。" : "本轮尚未执行视觉评价，不能据此判断画面效果。") : "这是模型对画面的评价，具体结论和依据见结构化输出；不代表用户反馈。";
+    if (stage.status === "not_run") return "本轮未执行此阶段。";
+    if (stage.key === "visual_analysis") return stage.status === "failed" ? "参考图分析失败，详细原因保留在原始证据中。" : `分析参考图的主体、用途与可编辑范围${Array.isArray(output.references) ? `，记录 ${output.references.length} 项参考分析` : ""}。`;
+    if (stage.key === "edit_planning")
+        return `将用户需求与参考用途转为编辑方案${typeof output.operation === "string" ? `：${({ product_to_scene: "商品入景", local_edit: "局部修改", scene_edit: "场景修改" } as Record<string, string>)[output.operation] || output.operation}` : ""}。`;
+    return stage.status === "completed" ? "上游生成与结果保存阶段已结束；技术检查和交付产物分别列出。" : `图片任务${traceStatusLabel(stage.status)}，以渠道尝试和实际产物为准。`;
 }
 
 function traceStageLabel(key: EcommerceGenerationTraceStage["key"]) {
@@ -337,27 +459,10 @@ function GenerationLogResultSection({ log }: { log: StoredGenerationLog }) {
             </div>
             <div className="space-y-3">
                 {assets.map((asset, index) => {
-                    const assetUrl = generationLogAssetAccessUrl(asset);
                     return (
-                        <div key={`${asset.url}-${index}`} className="grid min-w-0 items-start gap-3 rounded-lg border border-stone-200 bg-white p-3 dark:border-stone-800 dark:bg-stone-950/60 sm:grid-cols-[156px_minmax(0,1fr)]">
-                            <div className="min-w-0">
-                                <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-stone-500 dark:text-stone-400">
-                                    <span>{asset.type === "video" ? `视频 ${index + 1}` : `图片 ${index + 1}`}</span>
-                                    {asset.width || asset.height ? <span className="shrink-0 tabular-nums">{[asset.width, asset.height].filter(Boolean).join("x")}</span> : null}
-                                </div>
-                                <div className="flex h-32 items-center justify-center overflow-hidden rounded-md bg-stone-100 p-2 dark:bg-stone-900 sm:h-36">
-                                    {asset.type === "video" ? (
-                                        <video className="h-full w-full rounded bg-black object-contain" src={assetUrl} controls playsInline preload="metadata" />
-                                    ) : (
-                                        <img className="h-full w-full object-contain" src={imagePreviewUrl(assetUrl, 960)} alt="" referrerPolicy="no-referrer" loading="lazy" />
-                                    )}
-                                </div>
-                            </div>
-                            <div className="min-w-0 text-sm text-stone-500 dark:text-stone-400">
-                                <div>{asset.type === "video" ? "视频" : "图片"}</div>
-                                <div className="mt-1 text-xs">{asset.bytes ? formatAssetBytes(asset.bytes) : "大小未记录"}</div>
-                                {asset.type === "image" ? <GenerationLogEnhancementSection asset={asset} /> : null}
-                            </div>
+                        <div key={asset.resultId || generationLogAssetAccessUrl(asset)} className="min-w-0 rounded-lg border border-stone-200 bg-white p-3 dark:border-stone-800 dark:bg-stone-950/60">
+                            <GenerationLogMediaResult asset={asset} index={index} />
+                            {asset.type === "image" ? <GenerationLogEnhancementSection asset={asset} /> : null}
                         </div>
                     );
                 })}
@@ -371,7 +476,6 @@ function GenerationLogEnhancementSection({ asset }: { asset: GenerationLogAsset 
     const skip = asset.enhancementSkip;
     const status = enhancement?.status || skip?.status;
     const native = enhancement?.native || asset.nativeSource || asset;
-    const nativeUrl = browserReadableMediaUrl(enhancement?.native.url || asset.nativeSource?.url || generationLogAssetAccessUrl(asset));
     const reason = enhancement?.reason || skip?.reason;
     const noEncoding =
         enhancement?.status === "succeeded" &&
@@ -390,48 +494,45 @@ function GenerationLogEnhancementSection({ asset }: { asset: GenerationLogAsset 
                     <span role="status">{enhancementStatusLabel(status)}</span>
                 </Tag>
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-                <InfoBox label="原生实际尺寸" value={formatEnhancementSize(native)} />
-                <InfoBox label="完整 AI 实际尺寸" value={formatEnhancementSize(enhancement?.ai)} />
-                <InfoBox label="实际交付尺寸" value={formatEnhancementSize(enhancement?.enhanced)} />
-                {enhancement?.plannedInference ? <InfoBox label="AI 预期尺寸" value={formatEnhancementSize(enhancement.plannedInference)} /> : null}
-                {enhancement?.target ? <InfoBox label="交付目标尺寸" value={formatEnhancementSize(enhancement.target)} /> : null}
-                <InfoBox label="模型 ID" value={enhancement?.model?.id || "未取得"} />
-                <InfoBox label="引擎版本" value={enhancement?.model?.binaryVersion || "未取得"} />
-                <InfoBox label="模型版本" value={enhancement?.model?.modelVersion || "未取得"} />
-                <InfoBox label="精细增强（TTA）" value={typeof enhancement?.model?.tta === "boolean" ? (enhancement.model.tta ? "开启" : "关闭") : "未取得"} />
-                <InfoBox label="尝试" value={formatEnhancementAttempt(enhancement?.attempt)} />
-                <InfoBox label="当前阶段" value={enhancement ? enhancementStageLabel(enhancement.phase) : "未取得"} />
-                <InfoBox label="原因" value={reason ? enhancementReasonLabel(reason) : "未取得"} />
-                <InfoBox label="Worker 排队" value={formatEnhancementTiming(enhancement?.timings?.workerQueueMs)} />
-                <InfoBox label="引擎执行（含启动与写出）" value={formatEnhancementTiming(enhancement?.timings?.workerExecutionMs)} />
-                <InfoBox label="交付缩小与 PNG 编码" value={formatEnhancementTiming(enhancement?.timings?.deliveryEncodingMs, noEncoding ? "无需重新编码" : "未取得")} />
-            </div>
-            <div>
-                <div className="mb-1 text-xs font-medium text-stone-600 dark:text-stone-300">已发生阶段</div>
-                {enhancement?.events.length ? (
-                    <ol className="space-y-1 text-xs leading-5" aria-label="已发生的增强阶段">
-                        {enhancement.events.map((event, index) => (
-                            <li key={`${event.at}-${index}`} className="flex flex-wrap gap-x-2">
-                                <span>{enhancementStageLabel(event.stage)}</span>
-                                <span>{formatEnhancementAttempt(event.attempt)}</span>
-                                <span>{formatTraceTime(event.at)}</span>
-                                {event.reason ? <span>{enhancementReasonLabel(event.reason)}</span> : null}
-                            </li>
-                        ))}
-                    </ol>
-                ) : (
-                    <span className="text-xs">未取得</span>
-                )}
-            </div>
-            {nativeUrl ? (
-                <a
-                    className="inline-flex rounded border border-stone-300 bg-stone-50 px-2 py-1 text-xs font-medium !text-stone-700 hover:bg-stone-100 dark:border-stone-600 dark:bg-stone-900 dark:!text-stone-200 dark:hover:bg-stone-800"
-                    href={`${nativeUrl}${nativeUrl.includes("?") ? "&" : "?"}download=1`}
-                    download
-                >
-                    下载原图
-                </a>
+            {reason ? <div className="text-xs">{enhancementReasonLabel(reason)}</div> : null}
+            {enhancement ? (
+                <details>
+                    <summary className="cursor-pointer text-xs font-medium">增强诊断与版本</summary>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                        <InfoBox label="原生实际尺寸" value={formatEnhancementSize(native)} />
+                        <InfoBox label="完整 AI 实际尺寸" value={formatEnhancementSize(enhancement?.ai)} />
+                        <InfoBox label="实际交付尺寸" value={formatEnhancementSize(enhancement?.enhanced)} />
+                        {enhancement?.plannedInference ? <InfoBox label="AI 预期尺寸" value={formatEnhancementSize(enhancement.plannedInference)} /> : null}
+                        {enhancement?.target ? <InfoBox label="交付目标尺寸" value={formatEnhancementSize(enhancement.target)} /> : null}
+                        <InfoBox label="模型 ID" value={enhancement?.model?.id || "未取得"} />
+                        <InfoBox label="引擎版本" value={enhancement?.model?.binaryVersion || "未取得"} />
+                        <InfoBox label="模型版本" value={enhancement?.model?.modelVersion || "未取得"} />
+                        <InfoBox label="精细增强（TTA）" value={typeof enhancement?.model?.tta === "boolean" ? (enhancement.model.tta ? "开启" : "关闭") : "未取得"} />
+                        <InfoBox label="尝试" value={formatEnhancementAttempt(enhancement?.attempt)} />
+                        <InfoBox label="当前阶段" value={enhancement ? enhancementStageLabel(enhancement.phase) : "未取得"} />
+                        <InfoBox label="原因" value={reason ? enhancementReasonLabel(reason) : "未取得"} />
+                        <InfoBox label="Worker 排队" value={formatEnhancementTiming(enhancement?.timings?.workerQueueMs)} />
+                        <InfoBox label="引擎执行（含启动与写出）" value={formatEnhancementTiming(enhancement?.timings?.workerExecutionMs)} />
+                        <InfoBox label="交付缩小与 PNG 编码" value={formatEnhancementTiming(enhancement?.timings?.deliveryEncodingMs, noEncoding ? "无需重新编码" : "未取得")} />
+                    </div>
+                    <div>
+                        <div className="mb-1 text-xs font-medium text-stone-600 dark:text-stone-300">已发生阶段</div>
+                        {enhancement?.events.length ? (
+                            <ol className="space-y-1 text-xs leading-5" aria-label="已发生的增强阶段">
+                                {enhancement.events.map((event, index) => (
+                                    <li key={`${event.at}-${index}`} className="flex flex-wrap gap-x-2">
+                                        <span>{enhancementStageLabel(event.stage)}</span>
+                                        <span>{formatEnhancementAttempt(event.attempt)}</span>
+                                        <span>{formatTraceTime(event.at)}</span>
+                                        {event.reason ? <span>{enhancementReasonLabel(event.reason)}</span> : null}
+                                    </li>
+                                ))}
+                            </ol>
+                        ) : (
+                            <span className="text-xs">未取得</span>
+                        )}
+                    </div>
+                </details>
             ) : null}
         </section>
     );
@@ -465,18 +566,6 @@ function formatEnhancementAttempt(attempt?: number) {
 
 function formatEnhancementTiming(value?: number, fallback = "未取得") {
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? `${value} ms` : fallback;
-}
-
-function generationLogAssetAccessUrl(asset: StoredGenerationLog["assets"][number]) {
-    const directUrl = asset.url && !asset.url.startsWith("/api/generation-log-assets/") && asset.url !== asset.serverUrl ? asset.url : "";
-    const serverUrl = asset.serverUrl || (asset.url?.startsWith("/api/generation-log-assets/") ? asset.url : "");
-    return browserReadableMediaUrl(serverUrl || asset.remoteUrl || directUrl);
-}
-
-function formatAssetBytes(bytes: number) {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 export function formatGenerationLogModel(model: string) {

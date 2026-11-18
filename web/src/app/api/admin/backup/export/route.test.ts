@@ -23,6 +23,7 @@ describe("POST /api/admin/backup/export", () => {
             auth: { users: [{ id: "user-one", passwordHash: "secret" }] },
             prompts: { version: 1, prompts: [] },
             generationLogs: { version: 1, logs: [] },
+            generationLogEvaluations: { version: 1, evaluations: [{ id: "evaluation-one", kind: "feedback", feedback: { message: "保持原评价" } }] },
             accountDeletionRequests: { version: 1, requests: [{ id: "request-one", email: "private@example.com" }] },
         });
     });
@@ -36,6 +37,7 @@ describe("POST /api/admin/backup/export", () => {
         expect(response.headers.get("content-disposition")).toContain("vozeb-pro-data-backup-");
         expect(JSON.stringify(backup)).not.toContain("passwordHash");
         expect(JSON.stringify(backup)).not.toContain("private@example.com");
+        expect(backup.files.generationLogEvaluations.evaluations).toEqual([{ id: "evaluation-one", kind: "feedback", feedback: { message: "保持原评价" } }]);
         expect(mocks.safeRecordAuditLog).toHaveBeenCalledWith(expect.objectContaining({ action: "admin.backup.export", target: expect.objectContaining({ type: "backup" }) }));
     });
 

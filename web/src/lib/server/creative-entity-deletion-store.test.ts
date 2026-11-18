@@ -23,6 +23,7 @@ vi.mock("@/lib/server/data-adapter", () => ({
         mocks.files.set(name, structuredClone(value));
     }),
     withJsonDataFileLocks: vi.fn(async (_names: string[], callback: () => Promise<unknown>) => callback()),
+    withJsonDataFileLock: vi.fn(async (_name: string, callback: () => Promise<unknown>) => callback()),
 }));
 
 import { CreativeEntityDeletionConflict, deleteCanvasAssistantConversationAggregates, deleteCanvasProjectAggregates, deleteCreativeConversationAggregates, deleteDramaConversationAggregate } from "./creative-entity-deletion-store";
@@ -47,6 +48,7 @@ describe("creative entity deletion file provider", () => {
         expect(file<{ events: Array<{ runId: string }> }>("creative-runtime.json").events).toEqual([{ id: "2", runId: "run-two" }]);
         expect(file<Array<{ id: string }>>("generation-tasks.json").map((item) => item.id)).toEqual(["run-two"]);
         expect(file<{ logs: Array<{ id: string }> }>("generation-logs.json").logs.map((item) => item.id)).toEqual(["log-two"]);
+        expect(file<{ evaluations: Array<{ id: string }> }>("generation-log-evaluations.json").evaluations).toEqual([{ id: "evaluation-two", logId: "log-two" }]);
     });
 
     it("deletes a Canvas project together with its linked conversation and tasks", async () => {
@@ -59,6 +61,7 @@ describe("creative entity deletion file provider", () => {
         expect(file<{ projects: Array<{ project: { id: string } }> }>("canvas-projects.json").projects.map((item) => item.project.id)).toEqual(["canvas-two"]);
         expect(file<{ conversations: Array<{ id: string }> }>("creative-runtime.json").conversations.map((item) => item.id)).toEqual(["conversation-two"]);
         expect(file<Array<{ id: string }>>("generation-tasks.json").map((item) => item.id)).toEqual(["run-two"]);
+        expect(file<{ evaluations: Array<{ id: string }> }>("generation-log-evaluations.json").evaluations).toEqual([{ id: "evaluation-two", logId: "log-two" }]);
     });
 
     it("deletes a directly requested Canvas assistant conversation without deleting its project", async () => {
@@ -239,6 +242,13 @@ function seedFiles() {
         logs: [
             { id: "log-one", userId: "user-one", conversationId: "conversation-one", taskId: "run-one", assets: [{ serverUrl: "/api/generation-log-assets/permanent/shared.png" }] },
             { id: "log-two", userId: "user-one", conversationId: "conversation-two", taskId: "run-two", assets: [{ serverUrl: "/api/generation-log-assets/permanent/shared.png" }] },
+        ],
+    });
+    mocks.files.set("generation-log-evaluations.json", {
+        version: 1,
+        evaluations: [
+            { id: "evaluation-one", logId: "log-one" },
+            { id: "evaluation-two", logId: "log-two" },
         ],
     });
     mocks.files.set("canvas-projects.json", {

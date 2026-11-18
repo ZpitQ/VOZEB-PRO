@@ -139,7 +139,7 @@ export async function processIndependentEcommerceReview(observed: AgentRun, orig
             {
                 reviewed: true,
                 reviewStatus: quality.status === "unavailable" ? "review_unavailable" : "review_completed",
-                ecommerceSnapshot: { ...active.ecommerceSnapshot!, qualityCheck: quality },
+                ecommerceSnapshot: { ...active.ecommerceSnapshot!, qualityCheck: quality, stageTimings: { ...active.ecommerceSnapshot?.stageTimings, qualityCompletedAt: Date.now() } },
                 timings: { ...(active.timings || { requestAcceptedAt: active.createdAt }), reviewCompletedAt: Date.now() },
             },
             true,
@@ -168,7 +168,7 @@ export async function processIndependentEcommerceReview(observed: AgentRun, orig
         if (!existing)
             await update(
                 { version: "ecommerce-visual-review.v1", attempt: attempts + 1, contextDigest: inputs.contextDigest, algorithmVersion: ECOMMERCE_REVIEW_PREPARATION_VERSION, sources: inputs.sources, views: [], submission: { state: "not_submitted" } },
-                { reviewStatus: "reviewing", reviewAttempts: attempts + 1 },
+                { reviewStatus: "reviewing", reviewAttempts: attempts + 1, ecommerceSnapshot: { ...active.ecommerceSnapshot!, stageTimings: { ...active.ecommerceSnapshot?.stageTimings, qualityStartedAt: Date.now() } } },
             );
         let checkpoint = active.ecommerceSnapshot!.visualReview!;
         if (checkpoint.submission.state === "started" || checkpoint.submission.state === "unknown")

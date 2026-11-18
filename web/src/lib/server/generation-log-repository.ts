@@ -352,8 +352,9 @@ export async function mutateGenerationLogDb<T>(mutator: (db: GenerationLogDataba
     const run = mutationQueue.then(() =>
         withJsonDataFileLock(LOG_DATA_FILE, async () => {
             const db = await readGenerationLogDb();
+            const before = JSON.stringify(db);
             const result = await mutator(db);
-            await writeGenerationLogDb(db);
+            if (JSON.stringify(db) !== before) await writeGenerationLogDb(db);
             return result;
         }),
     );
@@ -631,7 +632,19 @@ function normalizeSnapshotRun(value: unknown): GenerationLogRunSnapshot | undefi
         reason: normalizeOptionalText(source.reason, undefined, 1000),
         failureStage: normalizeOptionalText(source.failureStage, undefined, 160),
         childTaskIds: snapshotTexts(source.childTaskIds, 200),
+        timings: normalizeRunTimings(source.timings),
     };
+}
+
+function normalizeRunTimings(value: unknown): GenerationLogRunSnapshot["timings"] {
+    const source = jsonObject(value);
+    if (!source || typeof source.requestAcceptedAt !== "number" || !Number.isFinite(source.requestAcceptedAt) || source.requestAcceptedAt < 0) return undefined;
+    const timings: NonNullable<GenerationLogRunSnapshot["timings"]> = { requestAcceptedAt: source.requestAcceptedAt };
+    for (const key of ["planningStartedAt", "plannerFirstByteAt", "planningCompletedAt", "firstTaskSubmittedAt", "firstResultReadyAt", "allResultsReadyAt", "reviewCompletedAt", "runCompletedAt"] as const) {
+        const time = source[key];
+        if (typeof time === "number" && Number.isFinite(time) && time >= 0) timings[key] = time;
+    }
+    return timings;
 }
 
 function snapshotTexts(value: unknown, length: number) {

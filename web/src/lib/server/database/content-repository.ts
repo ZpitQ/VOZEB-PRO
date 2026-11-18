@@ -438,6 +438,22 @@ export class GenerationLogsRepository {
         return result.rowCount || 0;
     }
 
+    async getByRunTaskIds(userId: string, runId: string, taskIds: string[]) {
+        const result = await this.db.query(
+            `SELECT * FROM generation_logs
+             WHERE user_id = $1 AND (request_snapshot #>> '{run,id}' = $2
+                 OR (request_snapshot #>> '{run,id}' IS NULL AND task_id = ANY($3::text[])))
+               AND request_snapshot #>> '{run,recordType}' IS DISTINCT FROM 'pre-generation'
+             ORDER BY id FOR UPDATE`,
+            [userId, runId, taskIds],
+        );
+        return result.rows.map(mapGenerationLog);
+    }
+
+    async updateRunMetadata(id: string, userId: string, requestSnapshot: unknown, ecommerceTrace: unknown) {
+        await this.db.query("UPDATE generation_logs SET request_snapshot = $3::jsonb, ecommerce_trace = $4::jsonb WHERE id = $1 AND user_id = $2", [id, userId, JSON.stringify(requestSnapshot), JSON.stringify(ecommerceTrace || {})]);
+    }
+
     async listByUserIdBatch(userId: string, batchSize: number, forUpdate = false) {
         const targetUserId = userId.trim();
         if (!targetUserId) return [];

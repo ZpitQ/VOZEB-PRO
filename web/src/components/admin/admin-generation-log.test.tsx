@@ -54,6 +54,24 @@ function enhancementLog(assets: unknown[]): StoredGenerationLog {
 }
 
 describe("GenerationLogDetail ecommerce observability", () => {
+    it("uses recorded request boundaries and leaves absent timing unknown", () => {
+        const log = enhancementLog([]);
+        log.durationMs = 999999;
+        log.requestSnapshot = {
+            version: 1,
+            parameters: {},
+            references: [],
+            slots: [],
+            run: { id: "run", recordType: "generation", status: "completed", inputMessageId: "message", childTaskIds: [], timings: { requestAcceptedAt: 1000, runCompletedAt: 2500 } },
+        };
+        const measured = renderToStaticMarkup(<GenerationLogDetail log={log} />);
+        expect(measured).toMatch(/请求总耗时[\s\S]*?title="1.50s"/);
+        expect(measured).not.toContain("1000.00s");
+        log.requestSnapshot.run!.timings = undefined;
+        const unknown = renderToStaticMarkup(<GenerationLogDetail log={log} />);
+        expect(unknown).toContain("未知（缺少完整时间记录）");
+        expect(unknown).toContain("此记录没有请求级时间数据");
+    });
     it("separates the user's request from the executed prompt and exposes reference roles and billed attempts", () => {
         const log = enhancementLog([]);
         log.prompt = "Keep the furniture identity and recolor the table.";
@@ -241,7 +259,7 @@ describe("GenerationLogDetail AI enhancement observations", () => {
             "下载原图",
         ])
             expect(markup).toContain(text);
-        expect(markup).toContain("/api/generation-log-assets/native.png?download=1");
+        expect(markup).toContain("/api/generation-log-assets/native.png?download=original");
         expect(markup).toContain("成功 1 / 失败 0 / 共 1");
     });
 

@@ -12,6 +12,7 @@ import { WorkPublicationRepository } from "./work-publication-repository";
 import { WorkGovernanceRepository } from "./work-governance-repository";
 import { WorkCommunityRepository } from "./work-community-repository";
 import { AnnouncementsRepository, GenerationLogsRepository, PromptsRepository } from "./content-repository";
+import { GenerationLogEvaluationRepository } from "./generation-log-evaluation-repository";
 import { CdkRepository, EmailCodesRepository, PointsRepository, SessionsRepository, UsersRepository } from "./user-repository";
 import type { AppSettingsRecord, EntitlementPlanRecord, JsonValue, SystemModelChannelRecord } from "./repository-shared";
 import { isoValue, jsonParam, jsonValue, numberValue, optionalIso, optionalJson, optionalString, stringValue } from "./repository-shared";
@@ -89,6 +90,7 @@ export function createPostgresRepositories(executor: QueryExecutor = { query: po
         announcements: new AnnouncementsRepository(executor),
         prompts: new PromptsRepository(executor),
         generationLogs: new GenerationLogsRepository(executor),
+        generationLogEvaluations: new GenerationLogEvaluationRepository(executor),
         billing: {
             listProducts: billingProduct.listProducts.bind(billingProduct),
             getProductById: billingProduct.getProductById.bind(billingProduct),

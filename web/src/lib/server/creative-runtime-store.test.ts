@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { updateAgentRunById, type AgentRun } from "./agent-run-store";
+import { setAgentRunStatus, updateAgentRunById, updateAgentRunTaskById, type AgentRun } from "./agent-run-store";
 import { writeJsonDataFile } from "./data-adapter";
 import type { CreativeAsset } from "@/lib/creative-runtime-contract";
 import { buildEcommercePlanningInput } from "./ecommerce-generation-snapshot";
 import { createEcommerceReferenceCheckpoint } from "./ecommerce-reference-recovery";
+import { normalizeStoredLog } from "./generation-log-repository";
+import { generationLogRunSnapshot } from "./generation-log-request-snapshot";
+import { persistAgentRunRequestLog } from "./agent-run-generation-log";
 
 const mocks = vi.hoisted(() => ({
     files: new Map<string, unknown>(),
@@ -12,6 +15,7 @@ const mocks = vi.hoisted(() => ({
     query: vi.fn(),
     transaction: vi.fn(),
     failTaskWrites: false,
+    beforeTaskFailure: undefined as (() => void) | undefined,
 }));
 
 vi.mock("@/lib/server/database", () => ({
@@ -25,7 +29,10 @@ vi.mock("@/lib/server/data-adapter", () => ({
     readJsonDataFile: vi.fn(async (fileName: string, fallback: unknown) => structuredClone(mocks.files.has(fileName) ? mocks.files.get(fileName) : fallback)),
     withJsonDataFileLock: vi.fn(async (_fileName: string, callback: () => Promise<unknown>) => callback()),
     writeJsonDataFile: vi.fn(async (fileName: string, value: unknown) => {
-        if (mocks.failTaskWrites && fileName === "generation-tasks.json") throw new Error("task-file-write-failed");
+        if (mocks.failTaskWrites && fileName === "generation-tasks.json") {
+            mocks.beforeTaskFailure?.();
+            throw new Error("task-file-write-failed");
+        }
         mocks.files.set(fileName, structuredClone(value));
     }),
 }));
@@ -57,6 +64,7 @@ describe("creative runtime file provider", () => {
         mocks.query.mockReset();
         mocks.transaction.mockReset();
         mocks.failTaskWrites = false;
+        mocks.beforeTaskFailure = undefined;
     });
 
     it("creates a run bundle once and keeps message sequence stable", async () => {
@@ -214,6 +222,105 @@ describe("creative runtime file provider", () => {
         await expect(updateAgentRunById("run-resume-fault", { status: "running", failure: undefined }, { type: "run.resumed" }, ["paused"])).rejects.toThrow("task-file-write-failed");
         expect(mocks.files.get("generation-tasks.json")).toMatchObject([{ payload: { status: "paused" } }]);
         expect(mocks.files.get("generation-logs.json")).toMatchObject({ logs: [{ requestSnapshot: { run: { status: "paused", reason: "请选择目标" } } }] });
+    });
+
+    it("retains completed request timings on child logs after runtime retention", async () => {
+        const original = run({
+            id: "run-durable-timings",
+            status: "running",
+            executionId: "execution",
+            generationPreferences: { mode: "image" },
+            timings: { requestAcceptedAt: 100, planningStartedAt: 200, planningCompletedAt: 300 },
+            tasks: [{ id: "image-parent", type: "image", title: "Image", prompt: "Image", count: 1, dependencies: [], attempts: 1, status: "running", taskId: "image-child" }],
+        });
+        await createBundle(original);
+        seedChildLog(original);
+        await updateAgentRunTaskById(original.id, "image-parent", { status: "completed" }, "task.completed", "execution");
+        await updateAgentRunById(original.id, { status: "completed", timings: { requestAcceptedAt: 100, planningStartedAt: 200, planningCompletedAt: 300, runCompletedAt: 179100 } }, { type: "run.completed" }, ["running"]);
+        mocks.files.set("generation-tasks.json", []);
+        const logs = await import("./generation-log-store");
+        expect((await logs.listGenerationLogs({ userId: "user" })).items[0]).toMatchObject({
+            durationMs: 55000,
+            requestSnapshot: {
+                userPrompt: "生成一张图",
+                run: { status: "completed", timings: { requestAcceptedAt: 100, planningStartedAt: 200, planningCompletedAt: 300, runCompletedAt: 179100 } },
+                slots: [{ id: "image-child", attempts: [{ pointsCost: 1.5 }] }],
+            },
+        });
+    });
+
+    it("keeps the first result boundary on duplicate completion observations", async () => {
+        const original = run({
+            id: "run-task-timings",
+            status: "running",
+            executionId: "execution",
+            generationPreferences: { mode: "image" },
+            tasks: [{ id: "image-parent", type: "image", title: "Image", prompt: "Image", count: 1, dependencies: [], attempts: 0, status: "ready" }],
+        });
+        await createBundle(original);
+        await updateAgentRunTaskById(original.id, "image-parent", { status: "running" }, "task.running", "execution");
+        const completed = await updateAgentRunTaskById(original.id, "image-parent", { status: "completed" }, "task.completed", "execution");
+        const repeated = await updateAgentRunTaskById(original.id, "image-parent", { status: "completed" }, "task.completed", "execution");
+        expect(completed?.timings?.firstResultReadyAt).toEqual(expect.any(Number));
+        expect(repeated?.timings?.firstResultReadyAt).toBe(completed?.timings?.firstResultReadyAt);
+        expect(repeated?.timings?.allResultsReadyAt).toBe(completed?.timings?.allResultsReadyAt);
+    });
+
+    it.each([
+        ["failed", (current: AgentRun) => updateAgentRunById(current.id, { status: "failed" }, { type: "run.failed" }, ["planning"])],
+        ["cancelled", (current: AgentRun) => setAgentRunStatus(current, "cancelled")],
+    ] as const)("records the actual request terminal mutation for %s without inventing planning stages", async (status, finish) => {
+        const original = run({ id: `run-terminal-${status}`, generationPreferences: { mode: "image" } });
+        await createBundle(original);
+        await finish(original);
+        expect(mocks.files.get("generation-logs.json")).toMatchObject({ logs: [{ requestSnapshot: { run: { status, timings: { requestAcceptedAt: original.createdAt, runCompletedAt: expect.any(Number) } } } }] });
+        const db = mocks.files.get("generation-logs.json") as { logs: Array<{ requestSnapshot: { run: { timings: unknown } } }> };
+        expect(db.logs[0].requestSnapshot.run.timings).not.toHaveProperty("planningStartedAt");
+    });
+
+    it.each([
+        ["retry", "planning", (current: AgentRun) => updateAgentRunById(current.id, { status: "planning", failure: undefined }, { type: "run.retry.requested" }, ["failed"])],
+        ["resume", "running", (current: AgentRun) => setAgentRunStatus(current, "running")],
+    ] as const)("clears the old failed request end during %s and records a fresh cancellation end", async (_action, status, reopen) => {
+        const original = run({ id: `run-reopened-${status}`, generationPreferences: { mode: "image" }, timings: { requestAcceptedAt: 100 } });
+        await createBundle(original);
+        const failed = await updateAgentRunById(original.id, { status: "failed", timings: { requestAcceptedAt: 100, runCompletedAt: 200 } }, { type: "run.failed" }, ["planning"]);
+        const reopened = await reopen(failed!);
+        expect(reopened).toMatchObject({ status, timings: { requestAcceptedAt: 100 } });
+        expect(reopened?.timings?.runCompletedAt).toBeUndefined();
+        const activeLogs = mocks.files.get("generation-logs.json") as { logs: Array<{ completedAt?: string; requestSnapshot: { run: { timings: { requestAcceptedAt: number; runCompletedAt?: number } } } }> };
+        expect(activeLogs.logs[0].completedAt).toBeUndefined();
+        expect(activeLogs.logs[0].requestSnapshot.run.timings).toEqual({ requestAcceptedAt: 100 });
+        const cancelled = await setAgentRunStatus(reopened!, "cancelled");
+        expect(cancelled?.timings?.requestAcceptedAt).toBe(100);
+        expect(cancelled?.timings?.runCompletedAt).toBeGreaterThan(200);
+        expect(mocks.files.get("generation-logs.json")).toMatchObject({
+            logs: [{ completedAt: expect.any(String), requestSnapshot: { run: { status: "cancelled", timings: { requestAcceptedAt: 100, runCompletedAt: cancelled!.timings!.runCompletedAt } } } }],
+        });
+    });
+
+    it("does not rewrite log facts when only the run observation timestamp changes", async () => {
+        const original = run({ id: "run-unchanged-timings", generationPreferences: { mode: "image" }, status: "paused", failure: "请选择目标" });
+        await persistAgentRunRequestLog(original);
+        const before = structuredClone(mocks.files.get("generation-logs.json"));
+        vi.mocked(writeJsonDataFile).mockClear();
+        await persistAgentRunRequestLog({ ...original, updatedAt: original.updatedAt + 1000 });
+        expect(mocks.files.get("generation-logs.json")).toEqual(before);
+        expect(writeJsonDataFile).not.toHaveBeenCalled();
+    });
+
+    it("compensates child run metadata without overwriting a newer log result", async () => {
+        const original = run({ id: "run-child-compensation", status: "running", generationPreferences: { mode: "image" }, timings: { requestAcceptedAt: 100 } });
+        await createBundle(original);
+        seedChildLog(original);
+        mocks.failTaskWrites = true;
+        mocks.beforeTaskFailure = () => {
+            const db = mocks.files.get("generation-logs.json") as { logs: Array<{ title: string }> };
+            db.logs[0].title = "Newer delivery metadata";
+        };
+        await expect(updateAgentRunById(original.id, { status: "completed", timings: { requestAcceptedAt: 100, runCompletedAt: 179100 } }, { type: "run.completed" }, ["running"])).rejects.toThrow("task-file-write-failed");
+        expect(mocks.files.get("generation-logs.json")).toMatchObject({ logs: [{ title: "Newer delivery metadata", requestSnapshot: { run: { status: "running", timings: { requestAcceptedAt: 100 } } } }] });
+        expect(mocks.files.get("generation-tasks.json")).toMatchObject([{ payload: { status: "running" } }]);
     });
 
     it("keeps the completed first round in the next Agent run context", async () => {
@@ -745,6 +852,29 @@ describe("creative runtime file provider", () => {
 
 function createBundle(value: AgentRun, assetIds: string[] = [], conversationId?: string) {
     return createCreativeRunBundle("user", { run: value, conversationId, prompt: value.prompt, title: "测试会话", assetIds, ttlMs: 60_000 });
+}
+
+function seedChildLog(value: AgentRun) {
+    mocks.files.set("generation-logs.json", {
+        version: 1,
+        logs: [
+            normalizeStoredLog({
+                id: "child-log",
+                taskId: "image-child",
+                userId: value.userId,
+                title: "Image delivery",
+                durationMs: 55000,
+                requestSnapshot: {
+                    version: 1,
+                    userPrompt: value.prompt,
+                    parameters: {},
+                    references: [],
+                    run: generationLogRunSnapshot(value, "generation"),
+                    slots: [{ id: "image-child", index: 0, status: "success", attempts: [{ attemptNo: 1, model: "image", status: "succeeded", startedAt: 100, pointsCost: 1.5 }] }],
+                },
+            }),
+        ],
+    });
 }
 
 function run(patch: Partial<AgentRun> = {}): AgentRun {

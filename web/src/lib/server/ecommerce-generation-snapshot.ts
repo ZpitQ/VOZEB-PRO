@@ -20,7 +20,16 @@ export function ecommerceRunForTask(run: AgentRun, taskId: string): AgentRun {
     if (!run.ecommerceGenerations) return run;
     const generation = run.ecommerceGenerations.find((item) => item.task?.id === taskId);
     if (!generation) throw new Error("任务未绑定本轮所选模型的执行快照");
-    return { ...run, ecommerceSnapshot: generation.snapshot };
+    const qualityTimings = run.ecommerceSnapshot?.stageTimings;
+    return {
+        ...run,
+        ecommerceSnapshot: {
+            ...generation.snapshot,
+            ...(qualityTimings?.qualityStartedAt !== undefined || qualityTimings?.qualityCompletedAt !== undefined
+                ? { stageTimings: { ...generation.snapshot.stageTimings, qualityStartedAt: qualityTimings.qualityStartedAt, qualityCompletedAt: qualityTimings.qualityCompletedAt } }
+                : {}),
+        },
+    };
 }
 
 export type EcommercePlanningAssetCandidate = {
@@ -102,7 +111,16 @@ export type EcommerceGenerationSnapshot = {
     qualityCheck?: EcommerceQualityCheck;
     qualityPolicy?: "disabled" | "advisory";
     technicalCheck?: EcommerceResultTechnicalCheck;
-    stageTimings?: { analysisCompletedAt?: number; planningCompletedAt?: number };
+    stageTimings?: {
+        analysisStartedAt?: number;
+        analysisCompletedAt?: number;
+        planningStartedAt?: number;
+        planningCompletedAt?: number;
+        generationStartedAt?: number;
+        generationCompletedAt?: number;
+        qualityStartedAt?: number;
+        qualityCompletedAt?: number;
+    };
     fallback?: { reason: string };
     createdAt: number;
 };
