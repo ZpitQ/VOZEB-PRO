@@ -136,8 +136,24 @@ test("administrator inspects actual delivery versions, timings and separate eval
         detailReads += 1;
         return route.fulfill({ json: { code: 0, data: { log: fixtureLog() }, msg: "" } });
     });
+    const previousReview = historicalReview("fixture-admin-log");
+    const latestReview: GenerationLogEvaluation = {
+        ...previousReview,
+        id: "fixture-latest-review",
+        createdAt: "2026-10-23T00:00:02.000Z",
+        updatedAt: "2026-10-23T00:00:02.000Z",
+        review: {
+            ...previousReview.review,
+            report: {
+                outcome: "issues_found",
+                summary: "最新复盘发现提示词约束冲突",
+                limitations: ["未查看图片，不能评价画面效果"],
+                issues: [{ category: "提示词约束冲突", message: "生成参数与保留项不一致", evidenceIds: ["technical"], recommendation: "提交前核对保留项" }],
+            },
+        },
+    };
     await page.route(/\/api\/admin\/generation-logs\/fixture-admin-log\/evaluations$/, (route) =>
-        route.fulfill({ status: route.request().method() === "GET" ? 200 : 405, json: { code: 0, data: { evaluations: [historicalReview("fixture-admin-log")] }, msg: "" } }),
+        route.fulfill({ status: route.request().method() === "GET" ? 200 : 405, json: { code: 0, data: { evaluations: [latestReview, previousReview] }, msg: "" } }),
     );
 
     await page.goto("/admin?section=logs", { waitUntil: "domcontentloaded" });
@@ -218,10 +234,25 @@ test("administrator inspects actual delivery versions, timings and separate eval
     await expect(outcome.getByText("视觉评价", { exact: true }).locator("..")).toContainText("未执行");
     const evaluations = modal.getByRole("region", { name: "用户反馈与AI流程复盘", exact: true });
     await expect(evaluations).toContainText("用户反馈：未知，尚未记录");
-    await expect(evaluations.getByRole("article")).toContainText("AI 流程复盘");
-    await expect(evaluations.getByRole("article")).toContainText("流程复盘仅针对文字与元数据");
-    await expect(evaluations.getByRole("article")).toContainText("证据不足");
-    await expect(evaluations.getByRole("article").locator("details")).toHaveJSProperty("open", false);
+    const report = evaluations.getByRole("article");
+    await expect(report).toHaveCount(1);
+    const latestSummary = report.getByText("最新复盘发现提示词约束冲突", { exact: true });
+    await expect(latestSummary).toBeVisible();
+    await expect(latestSummary).toHaveCSS("font-size", "12px");
+    await expect(evaluations.getByText("流程复盘仅针对文字与元数据", { exact: true })).toHaveCount(0);
+    await expect(report.getByText("提交前核对保留项", { exact: true })).not.toBeVisible();
+    await report.getByRole("button", { name: "展开完整报告", exact: true }).click();
+    await expect(report.getByText("提交前核对保留项", { exact: true })).toBeVisible();
+    await report.getByText("复盘时的事实与证据", { exact: true }).click();
+    await expect(report.locator("pre")).toContainText("fixture-facts-digest");
+    const history = evaluations.getByRole("combobox", { name: "切换复盘记录", exact: true });
+    await history.selectOption("fixture-ai-review");
+    await expect(report).toContainText("流程复盘仅针对文字与元数据");
+    await expect(report).toContainText("证据不足");
+    await expect(latestSummary).toHaveCount(0);
+    await history.selectOption("fixture-latest-review");
+    await expect(latestSummary).toBeVisible();
+    await expect(report.getByText("提交前核对保留项", { exact: true })).not.toBeVisible();
     await expect(modal.getByText("fixture-analysis-diagnostic", { exact: false })).not.toBeVisible();
     await expect(modal.getByText("fixture-executed-prompt", { exact: true })).not.toBeVisible();
     await planning.getByText("结构化输出", { exact: true }).click();
@@ -364,7 +395,7 @@ async function assertOriginalDownload(page: Page, link: Locator, expected: Buffe
     expect(url.searchParams.has("width")).toBe(false);
 }
 
-function historicalReview(logId: string): GenerationLogEvaluation {
+function historicalReview(logId: string): Extract<GenerationLogEvaluation, { kind: "ai_review" }> {
     return {
         id: "fixture-ai-review",
         logId,
