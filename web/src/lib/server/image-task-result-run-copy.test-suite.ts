@@ -3357,7 +3357,12 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 expect(settled?.leaseUntil).toBeUndefined();
                 expect(await (await postHeartbeat(closing)).json()).toStrictEqual(receipt);
                 expect(await registrations.getLocalMediaRegistration(current.stored.storageKey)).toMatchObject({ storageClass: "temporary", taskId: current.child.id, runId: run.id });
-                expect((await logs.listGenerationLogs({ userId })).items).toStrictEqual([]);
+                const cancelledLogs = (await logs.listGenerationLogs({ userId })).items;
+                expect(cancelledLogs.length).toBeGreaterThan(0);
+                for (const log of cancelledLogs) {
+                    expect([prepared1.waiting.id, prepared2.waiting.id]).toContain(log.taskId);
+                    expect(log).toMatchObject({ status: "pending", assets: [], requestSnapshot: { run: { id: run.id, status: "cancelled" } } });
+                }
                 expect(await creative.listAssetsForUser(userId, run.conversationId)).toStrictEqual([]);
                 expect(await auth.listPointRecordsPage(userId, { pageSize: 50, direction: "debit" })).toStrictEqual(financial);
                 expect(await imageTasks.getImageTask(prepared1.waiting.id)).toMatchObject({ status: "cancelled", nativeResults: prepared1.waiting.nativeResults, billing: prepared1.waiting.billing, attempts: prepared1.waiting.attempts });
@@ -3504,7 +3509,7 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                 if (provider === "file") {
                     expect(await registrations.listFileLocalMediaRegistrations()).toStrictEqual(registrationsBefore);
                 } else expect(await postgresRegistrations()).toStrictEqual(registrationsBefore);
-                expect((await logs.listGenerationLogs({ userId })).items).toStrictEqual([]);
+                expect((await logs.listGenerationLogs({ userId })).items).toMatchObject([{ taskId: prepared.waiting.id, status: "pending", assets: [], requestSnapshot: { run: { id: run.id, status: "running" } } }]);
                 expect(await creative.listAssetsForUser(userId, run.conversationId)).toStrictEqual([]);
                 expect(await auth.listPointRecordsPage(userId, { pageSize: 50, direction: "debit" })).toStrictEqual(financial);
                 expect(await imageTasks.getImageTask(copies[1].taskId)).toMatchObject({ id: copies[1].taskId, status: "pending" });
@@ -3804,7 +3809,21 @@ export function imageTaskResultRunCopySuite(provider: "file" | "postgres") {
                     expect(await tasks.getStoredGenerationTaskRecord("image", completed.published.id)).toStrictEqual(oldImage);
                     expect(await tasks.getStoredGenerationTaskRecord("image", originalFailedCopy.id)).toStrictEqual(oldFailedImage);
                     expect(await creative.listAssetsForUser(userId, run.conversationId)).toStrictEqual(assetsBefore);
-                    expect((await logs.listGenerationLogs({ userId })).items).toStrictEqual(logsBefore);
+                    const logsAfter = (await logs.listGenerationLogs({ userId })).items;
+                    expect(logsAfter).toHaveLength(logsBefore.length);
+                    for (const before of logsBefore) {
+                        const after = logsAfter.find((entry) => entry.id === before.id);
+                        const priorRun = before.requestSnapshot?.run;
+                        assert.ok(after && before.requestSnapshot && priorRun);
+                        expect(after).toStrictEqual({
+                            ...before,
+                            updatedAt: after.updatedAt,
+                            requestSnapshot: {
+                                ...before.requestSnapshot,
+                                run: { ...priorRun, status: "cancelled", reason: "任务已取消", timings: { ...priorRun.timings, runCompletedAt: expect.any(Number) } },
+                            },
+                        });
+                    }
                     if (provider === "file") {
                         expect(await registrations.listFileLocalMediaRegistrations()).toStrictEqual(registrationsBefore);
                     } else expect(await postgresRegistrations()).toStrictEqual(registrationsBefore);
