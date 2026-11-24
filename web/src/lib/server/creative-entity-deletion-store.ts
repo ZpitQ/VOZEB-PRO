@@ -2,10 +2,11 @@ import { nanoid } from "nanoid";
 
 import type { CanvasProject } from "@/lib/canvas-project-contract";
 import type { DramaProject } from "@/lib/drama-project-contract";
-import { readJsonDataFile, withJsonDataFileLocks, writeJsonDataFile } from "@/lib/server/data-adapter";
+import { readJsonDataFile, withJsonDataFileLock, withJsonDataFileLocks, writeJsonDataFile } from "@/lib/server/data-adapter";
 import { ensurePostgresSchema, getDatabaseProvider, withPostgresTransaction, type QueryExecutor } from "@/lib/server/database";
 import type { RuntimeFileDatabase } from "@/lib/server/creative-runtime-repository";
 import type { GenerationLogDatabase } from "@/lib/server/generation-log-types";
+import type { GenerationLogEvaluationDatabase } from "@/lib/server/database/generation-log-evaluation-repository";
 import type { StoredGenerationTaskRecord } from "@/lib/server/generation-task-store";
 import { collectLocalMediaStorageKeys } from "@/lib/server/local-media-references";
 
@@ -201,94 +202,99 @@ async function selectPostgresTasks(client: QueryExecutor, userId: string, conver
 }
 
 async function deleteFileEntities(userId: string, scope: DeletionScope): Promise<CreativeEntityDeletionResult> {
-    return withJsonDataFileLocks([...FILES], async () => {
-        const before = await readDeletionFiles();
-        const projects = before.canvas.projects.filter((record) => record.userId === userId && scope.projectIds.includes(record.project.id));
-        const projectIds = projects.map((record) => record.project.id);
-        const linkedConversationIds = projects.flatMap((record) => collectProjectConversationIds(record.project));
-        const requestedConversationIds = new Set([...scope.conversationIds, ...linkedConversationIds]);
-        const assistantProjectRecord = scope.assistantProjectId ? before.canvas.projects.find((record) => record.userId === userId && record.project.id === scope.assistantProjectId) : undefined;
-        if (scope.assistantProjectId && !assistantProjectRecord) throw new CreativeEntityDeletionConflict("Agent 对话与当前画布不匹配");
-        let assistantProjectUpdate: ReturnType<typeof removeCanvasAssistantConversations> | undefined;
-        if (assistantProjectRecord && scope.assistantProjectId) {
-            const requestedRows = before.runtime.conversations.filter((conversation) => conversation.userId === userId && requestedConversationIds.has(conversation.id));
-            validateCanvasAssistantDeletion(assistantProjectRecord.project, scope.conversationIds, requestedRows, scope.assistantProjectId);
-            assistantProjectUpdate = removeCanvasAssistantConversations(assistantProjectRecord.project, scope.conversationIds);
-        }
-        const dramaProjectRecord = scope.dramaProjectId ? before.drama.projects.find((record) => record.userId === userId && record.project.id === scope.dramaProjectId) : undefined;
-        if (scope.dramaProjectId && !dramaProjectRecord) throw new CreativeEntityDeletionConflict("Agent 对话与当前短剧项目不匹配");
-        let dramaProjectUpdate: DramaProject | undefined;
-        if (dramaProjectRecord && scope.dramaProjectId) {
-            const requestedRows = before.runtime.conversations.filter((conversation) => conversation.userId === userId && requestedConversationIds.has(conversation.id));
-            validateDramaConversationDeletion(dramaProjectRecord.project, scope.conversationIds, requestedRows, scope.dramaProjectId);
-            if (dramaProjectRecord.project.creativeConversationId && scope.conversationIds.includes(dramaProjectRecord.project.creativeConversationId)) {
-                const replacement = before.runtime.conversations.find((conversation) => conversation.userId === userId && conversation.id === scope.replacementConversationId);
-                validateDramaReplacementConversation(replacement, scope.dramaProjectId);
-                dramaProjectUpdate = replaceDramaProjectConversation(dramaProjectRecord.project, scope.replacementConversationId!);
+    // Acquire evaluations after the parent log; sorting both filenames would reverse that order.
+    return withJsonDataFileLocks([...FILES], () =>
+        withJsonDataFileLock("generation-log-evaluations.json", async () => {
+            const before = await readDeletionFiles();
+            const projects = before.canvas.projects.filter((record) => record.userId === userId && scope.projectIds.includes(record.project.id));
+            const projectIds = projects.map((record) => record.project.id);
+            const linkedConversationIds = projects.flatMap((record) => collectProjectConversationIds(record.project));
+            const requestedConversationIds = new Set([...scope.conversationIds, ...linkedConversationIds]);
+            const assistantProjectRecord = scope.assistantProjectId ? before.canvas.projects.find((record) => record.userId === userId && record.project.id === scope.assistantProjectId) : undefined;
+            if (scope.assistantProjectId && !assistantProjectRecord) throw new CreativeEntityDeletionConflict("Agent 对话与当前画布不匹配");
+            let assistantProjectUpdate: ReturnType<typeof removeCanvasAssistantConversations> | undefined;
+            if (assistantProjectRecord && scope.assistantProjectId) {
+                const requestedRows = before.runtime.conversations.filter((conversation) => conversation.userId === userId && requestedConversationIds.has(conversation.id));
+                validateCanvasAssistantDeletion(assistantProjectRecord.project, scope.conversationIds, requestedRows, scope.assistantProjectId);
+                assistantProjectUpdate = removeCanvasAssistantConversations(assistantProjectRecord.project, scope.conversationIds);
             }
-        }
-        const conversations = before.runtime.conversations.filter(
-            (conversation) =>
-                conversation.userId === userId &&
-                (requestedConversationIds.has(conversation.id) || (conversation.surface === "canvas" && (linkedConversationIds.includes(conversation.id) || (Boolean(conversation.projectId) && scope.projectIds.includes(conversation.projectId!))))),
-        );
-        const conversationIds = new Set(conversations.map((conversation) => conversation.id));
-        if (!conversationIds.size && !projectIds.length && !assistantProjectUpdate?.changed) return { ...emptyResult(), ...(assistantProjectUpdate ? { canvasAssistantState: assistantProjectUpdate.state } : {}) };
+            const dramaProjectRecord = scope.dramaProjectId ? before.drama.projects.find((record) => record.userId === userId && record.project.id === scope.dramaProjectId) : undefined;
+            if (scope.dramaProjectId && !dramaProjectRecord) throw new CreativeEntityDeletionConflict("Agent 对话与当前短剧项目不匹配");
+            let dramaProjectUpdate: DramaProject | undefined;
+            if (dramaProjectRecord && scope.dramaProjectId) {
+                const requestedRows = before.runtime.conversations.filter((conversation) => conversation.userId === userId && requestedConversationIds.has(conversation.id));
+                validateDramaConversationDeletion(dramaProjectRecord.project, scope.conversationIds, requestedRows, scope.dramaProjectId);
+                if (dramaProjectRecord.project.creativeConversationId && scope.conversationIds.includes(dramaProjectRecord.project.creativeConversationId)) {
+                    const replacement = before.runtime.conversations.find((conversation) => conversation.userId === userId && conversation.id === scope.replacementConversationId);
+                    validateDramaReplacementConversation(replacement, scope.dramaProjectId);
+                    dramaProjectUpdate = replaceDramaProjectConversation(dramaProjectRecord.project, scope.replacementConversationId!);
+                }
+            }
+            const conversations = before.runtime.conversations.filter(
+                (conversation) =>
+                    conversation.userId === userId &&
+                    (requestedConversationIds.has(conversation.id) || (conversation.surface === "canvas" && (linkedConversationIds.includes(conversation.id) || (Boolean(conversation.projectId) && scope.projectIds.includes(conversation.projectId!))))),
+            );
+            const conversationIds = new Set(conversations.map((conversation) => conversation.id));
+            if (!conversationIds.size && !projectIds.length && !assistantProjectUpdate?.changed) return { ...emptyResult(), ...(assistantProjectUpdate ? { canvasAssistantState: assistantProjectUpdate.state } : {}) };
 
-        const messageRunIds = new Set(before.runtime.messages.filter((message) => conversationIds.has(message.conversationId) && message.runId).map((message) => message.runId!));
-        const tasks = selectFileTasks(before.tasks, userId, conversationIds, new Set(projectIds), messageRunIds);
-        const taskIds = new Set(tasks.map((task) => task.id));
-        const logs = before.logs.logs.filter((log) => log.userId === userId && ((Boolean(log.conversationId) && conversationIds.has(log.conversationId!)) || (Boolean(log.taskId) && taskIds.has(log.taskId!))));
-        const logIds = new Set(logs.map((log) => log.id));
-        const deletedAssets = before.runtime.assets.filter((asset) => asset.userId === userId && conversationIds.has(asset.conversationId));
-        const runIds = new Set([...messageRunIds, ...tasks.flatMap((task) => [task.id, task.runId || ""]).filter(Boolean)]);
-        const mediaRegistrations = before.media.assets.filter(
-            (asset) => asset.ownerUserId === userId && ((asset.conversationId && conversationIds.has(asset.conversationId)) || (asset.projectId && projectIds.includes(asset.projectId)) || (asset.taskId && taskIds.has(asset.taskId))),
-        );
-        const mediaStorageKeys = collectDeletionMediaKeys([...projects, ...deletedAssets, ...logs, ...tasks, ...mediaRegistrations]);
+            const messageRunIds = new Set(before.runtime.messages.filter((message) => conversationIds.has(message.conversationId) && message.runId).map((message) => message.runId!));
+            const tasks = selectFileTasks(before.tasks, userId, conversationIds, new Set(projectIds), messageRunIds);
+            const taskIds = new Set(tasks.map((task) => task.id));
+            const logs = before.logs.logs.filter((log) => log.userId === userId && ((Boolean(log.conversationId) && conversationIds.has(log.conversationId!)) || (Boolean(log.taskId) && taskIds.has(log.taskId!))));
+            const logIds = new Set(logs.map((log) => log.id));
+            const deletedAssets = before.runtime.assets.filter((asset) => asset.userId === userId && conversationIds.has(asset.conversationId));
+            const runIds = new Set([...messageRunIds, ...tasks.flatMap((task) => [task.id, task.runId || ""]).filter(Boolean)]);
+            const mediaRegistrations = before.media.assets.filter(
+                (asset) => asset.ownerUserId === userId && ((asset.conversationId && conversationIds.has(asset.conversationId)) || (asset.projectId && projectIds.includes(asset.projectId)) || (asset.taskId && taskIds.has(asset.taskId))),
+            );
+            const mediaStorageKeys = collectDeletionMediaKeys([...projects, ...deletedAssets, ...logs, ...tasks, ...mediaRegistrations]);
 
-        const next = {
-            runtime: {
-                ...before.runtime,
-                conversations: before.runtime.conversations.filter((conversation) => !conversationIds.has(conversation.id)),
-                messages: before.runtime.messages.filter((message) => !conversationIds.has(message.conversationId)),
-                assets: before.runtime.assets.filter((asset) => !conversationIds.has(asset.conversationId)),
-                events: before.runtime.events.filter((event) => !runIds.has(event.runId)),
-            },
-            logs: { ...before.logs, logs: before.logs.logs.filter((log) => !logIds.has(log.id)) },
-            tasks: before.tasks.filter((task) => !taskIds.has(task.id)),
-            canvas: {
-                ...before.canvas,
-                projects: before.canvas.projects
-                    .filter((record) => !(record.userId === userId && projectIds.includes(record.project.id)))
-                    .map((record) => (assistantProjectUpdate && record.userId === userId && record.project.id === scope.assistantProjectId ? { ...record, project: assistantProjectUpdate.project } : record)),
-            },
-            drama: {
-                ...before.drama,
-                projects: before.drama.projects.map((record) => (dramaProjectUpdate && record.userId === userId && record.project.id === scope.dramaProjectId ? { ...record, project: dramaProjectUpdate } : record)),
-            },
-            media: before.media,
-        };
-        try {
-            await writeDeletionFiles(next);
-        } catch (error) {
-            await Promise.allSettled([
-                writeJsonDataFile("creative-runtime.json", before.runtime),
-                writeJsonDataFile("generation-tasks.json", before.tasks),
-                writeJsonDataFile("generation-logs.json", before.logs),
-                writeJsonDataFile("canvas-projects.json", before.canvas),
-                writeJsonDataFile("drama-projects.json", before.drama),
-            ]);
-            throw error;
-        }
-        return {
-            deletedConversations: conversationIds.size,
-            deletedProjects: projectIds.length,
-            mediaStorageKeys,
-            ...(assistantProjectUpdate ? { canvasAssistantState: assistantProjectUpdate.state } : {}),
-            ...(dramaProjectUpdate ? { dramaProject: dramaProjectUpdate } : {}),
-        };
-    });
+            const next = {
+                runtime: {
+                    ...before.runtime,
+                    conversations: before.runtime.conversations.filter((conversation) => !conversationIds.has(conversation.id)),
+                    messages: before.runtime.messages.filter((message) => !conversationIds.has(message.conversationId)),
+                    assets: before.runtime.assets.filter((asset) => !conversationIds.has(asset.conversationId)),
+                    events: before.runtime.events.filter((event) => !runIds.has(event.runId)),
+                },
+                logs: { ...before.logs, logs: before.logs.logs.filter((log) => !logIds.has(log.id)) },
+                evaluations: { ...before.evaluations, evaluations: before.evaluations.evaluations.filter((record) => !logIds.has(record.logId)) },
+                tasks: before.tasks.filter((task) => !taskIds.has(task.id)),
+                canvas: {
+                    ...before.canvas,
+                    projects: before.canvas.projects
+                        .filter((record) => !(record.userId === userId && projectIds.includes(record.project.id)))
+                        .map((record) => (assistantProjectUpdate && record.userId === userId && record.project.id === scope.assistantProjectId ? { ...record, project: assistantProjectUpdate.project } : record)),
+                },
+                drama: {
+                    ...before.drama,
+                    projects: before.drama.projects.map((record) => (dramaProjectUpdate && record.userId === userId && record.project.id === scope.dramaProjectId ? { ...record, project: dramaProjectUpdate } : record)),
+                },
+                media: before.media,
+            };
+            try {
+                await writeDeletionFiles(next);
+            } catch (error) {
+                await Promise.allSettled([
+                    writeJsonDataFile("creative-runtime.json", before.runtime),
+                    writeJsonDataFile("generation-tasks.json", before.tasks),
+                    writeJsonDataFile("generation-logs.json", before.logs),
+                    writeJsonDataFile("generation-log-evaluations.json", before.evaluations),
+                    writeJsonDataFile("canvas-projects.json", before.canvas),
+                    writeJsonDataFile("drama-projects.json", before.drama),
+                ]);
+                throw error;
+            }
+            return {
+                deletedConversations: conversationIds.size,
+                deletedProjects: projectIds.length,
+                mediaStorageKeys,
+                ...(assistantProjectUpdate ? { canvasAssistantState: assistantProjectUpdate.state } : {}),
+                ...(dramaProjectUpdate ? { dramaProject: dramaProjectUpdate } : {}),
+            };
+        }),
+    );
 }
 
 function validateCanvasAssistantDeletion(project: CanvasProject, requestedIds: string[], conversationRows: Array<Record<string, unknown>>, projectId: string) {
@@ -365,20 +371,22 @@ function selectFileTasks(tasks: StoredGenerationTaskRecord[], userId: string, co
 }
 
 async function readDeletionFiles() {
-    const [canvas, drama, runtime, logs, tasks, media] = await Promise.all([
+    const [canvas, drama, runtime, logs, evaluations, tasks, media] = await Promise.all([
         readJsonDataFile<CanvasProjectFile>("canvas-projects.json", { version: 1, projects: [] }),
         readJsonDataFile<DramaProjectFile>("drama-projects.json", { version: 1, projects: [] }),
         readJsonDataFile<RuntimeFileDatabase>("creative-runtime.json", { version: 1, nextEventId: 1, conversations: [], messages: [], assets: [], events: [] }),
         readJsonDataFile<GenerationLogDatabase>("generation-logs.json", { version: 1, logs: [] }),
+        readJsonDataFile<GenerationLogEvaluationDatabase>("generation-log-evaluations.json", { version: 1, evaluations: [] }),
         readJsonDataFile<StoredGenerationTaskRecord[]>("generation-tasks.json", []),
         readJsonDataFile<LocalMediaFile>("local-media-assets.json", { version: 1, assets: [] }),
     ]);
-    return { canvas, drama, runtime, logs, tasks, media };
+    return { canvas, drama, runtime, logs, evaluations, tasks, media };
 }
 
 async function writeDeletionFiles(value: Awaited<ReturnType<typeof readDeletionFiles>>) {
     await writeJsonDataFile("creative-runtime.json", value.runtime);
     await writeJsonDataFile("generation-tasks.json", value.tasks);
+    await writeJsonDataFile("generation-log-evaluations.json", value.evaluations);
     await writeJsonDataFile("generation-logs.json", value.logs);
     await writeJsonDataFile("canvas-projects.json", value.canvas);
     await writeJsonDataFile("drama-projects.json", value.drama);

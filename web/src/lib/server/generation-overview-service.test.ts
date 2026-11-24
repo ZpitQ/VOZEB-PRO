@@ -14,6 +14,12 @@ describe("generation overview summary", () => {
         });
     });
 
+    it("does not count pre-generation request records as model calls", () => {
+        const request = log("request", "2026-07-26T04:00:00.000Z", "pending", "user", "image", "agent", "image");
+        request.requestSnapshot = { version: 1, parameters: {}, references: [], slots: [], run: { id: "run-one", recordType: "pre-generation", status: "paused", inputMessageId: "message-one", childTaskIds: [] } };
+        expect(buildAdminGenerationOverviewSummary([request], now)).toMatchObject({ totalCalls: 0, activeUsers: 0 });
+    });
+
     it("aggregates file-provider logs without leaking records outside the window", () => {
         const logs = [
             log("before", "2026-07-19T15:59:59.999Z", "success", "user-out", "old", "unknown", "image"),

@@ -4,6 +4,8 @@ import { recordGenerationTaskLogResult } from "@/lib/server/generation-log-task-
 import type { ImageTask } from "@/lib/server/image-task-store";
 import type { QueryExecutor } from "@/lib/server/database";
 import { publicImageResultEnhancement, type ImageResultEnhancementInput } from "@/lib/image-enhancement-contract";
+import { imageTaskLogRequestSnapshot } from "@/lib/server/generation-log-request-snapshot";
+import type { GenerationTaskExecutionState } from "@/lib/server/generation-task-types";
 
 import { parseImageDimensions, resolveResultSize } from "./image-task-size";
 
@@ -13,7 +15,15 @@ export function stableMediaUrl(value?: string) {
     return value && !value.startsWith("data:") && !value.startsWith("blob:") ? value : "";
 }
 
-export async function writeImageGenerationLog(task: ImageTask, status: "success" | "failed", result: ImageLogMedia[] | ImageLogMedia | string, durationMs: number, error?: string, beforePersist?: () => void, executor?: QueryExecutor) {
+export async function writeImageGenerationLog(
+    task: ImageTask & Partial<GenerationTaskExecutionState>,
+    status: "success" | "failed" | "pending",
+    result: ImageLogMedia[] | ImageLogMedia | string,
+    durationMs: number,
+    error?: string,
+    beforePersist?: () => void,
+    executor?: QueryExecutor,
+) {
     const results = Array.isArray(result) ? result : [result];
     const preserveNativeSize = task.config.advancedConfig?.protocol === "custom" && isCustomGeminiImageModel(task.config.model) && !parseImageDimensions(task.config.size || "");
     const targetSize = task.ecommerceExecution?.canvas || task.config.outputMode === "layers" || preserveNativeSize ? undefined : resolveResultSize(task.config.quality, task.config.size || "auto");
@@ -47,6 +57,7 @@ export async function writeImageGenerationLog(task: ImageTask, status: "success"
             clientRequestId: task.clientRequestId,
             taskId: task.id,
             userId: task.userId,
+            conversationId: task.conversationId,
             username: task.username,
             displayName: task.displayName,
             kind: "image",
@@ -55,13 +66,14 @@ export async function writeImageGenerationLog(task: ImageTask, status: "success"
             title: task.title || task.prompt.slice(0, 36) || "图片生成",
             prompt: task.prompt,
             model: generationModelId(task.config),
-            summary: status === "success" ? (task.kind === "edit" ? "图生图调用完成" : "文生图调用完成") : "图片生成失败",
+            summary: status === "success" ? (task.kind === "edit" ? "图生图调用完成" : "文生图调用完成") : status === "pending" ? task.reviewReason || "图片生成中" : "图片生成失败",
             durationMs,
             assets,
             error,
             canRetry: status === "failed" && task.retryable === true,
             taskKind: task.kind,
             createdAt: task.createdAt,
+            requestSnapshot: await imageTaskLogRequestSnapshot(task, status, durationMs, executor),
         },
         beforePersist,
         executor,

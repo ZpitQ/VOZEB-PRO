@@ -22,6 +22,48 @@ export type GenerationLogReferenceSnapshot = {
     width?: number;
     height?: number;
     durationMs?: number;
+    alias?: string;
+    purposes?: string[];
+    providerIndex?: number;
+    assetVersion?: string;
+    sha256?: string;
+    sourceRunId?: string;
+    sourceTaskId?: string;
+    parentAssetId?: string;
+    submittedUrl?: string;
+};
+
+export type GenerationLogAttemptSnapshot = {
+    attemptNo: number;
+    channelId?: string;
+    model: string;
+    status: "running" | "succeeded" | "failed";
+    startedAt: number;
+    completedAt?: number;
+    pointsCost?: number;
+    pointsRecordId?: string;
+    error?: string;
+};
+
+export type GenerationLogRunSnapshot = {
+    id: string;
+    recordType: "generation" | "pre-generation";
+    status: "planning" | "running" | "paused" | "completed" | "failed" | "cancelled";
+    inputMessageId: string;
+    reason?: string;
+    failureStage?: string;
+    childTaskIds: string[];
+    timings?: {
+        requestAcceptedAt: number;
+        planningStartedAt?: number;
+        plannerFirstByteAt?: number;
+        planningCompletedAt?: number;
+        firstTaskSubmittedAt?: number;
+        firstResultReadyAt?: number;
+        allResultsReadyAt?: number;
+        reviewCompletedAt?: number;
+        runCompletedAt?: number;
+    };
 };
 
 export type GenerationLogSlotSnapshot = {
@@ -43,6 +85,11 @@ export type GenerationLogSlotSnapshot = {
     startedAt?: number;
     error?: string;
     canRetry?: boolean;
+    attempts?: GenerationLogAttemptSnapshot[];
+    billing?: { pointsCost: number; pointsRecordId?: string; refunded: boolean };
+    upstreamTaskId?: string;
+    executionPhase?: string;
+    reviewReason?: string;
 };
 
 export type GenerationLogRequestSnapshot = {
@@ -51,6 +98,7 @@ export type GenerationLogRequestSnapshot = {
     parameters: GenerationLogSnapshotParameters;
     references: GenerationLogReferenceSnapshot[];
     slots: GenerationLogSlotSnapshot[];
+    run?: GenerationLogRunSnapshot;
 };
 
 export function generationLogPublicPrompt(log: { prompt?: string; creativeConversationId?: string; requestSnapshot?: Pick<GenerationLogRequestSnapshot, "userPrompt"> }) {
@@ -62,7 +110,23 @@ export function generationLogPublicPrompt(log: { prompt?: string; creativeConver
 export function generationLogDraftSnapshot(snapshot?: GenerationLogRequestSnapshot): GenerationLogRequestSnapshot | undefined {
     if (!snapshot) return undefined;
     return {
-        ...snapshot,
+        version: snapshot.version,
+        userPrompt: snapshot.userPrompt,
+        parameters: snapshot.parameters,
+        references: snapshot.references.map((reference) => ({
+            id: reference.id,
+            kind: reference.kind,
+            name: reference.name,
+            mimeType: reference.mimeType,
+            url: reference.url,
+            remoteUrl: reference.remoteUrl,
+            serverUrl: reference.serverUrl,
+            storageKey: reference.storageKey,
+            bytes: reference.bytes,
+            width: reference.width,
+            height: reference.height,
+            durationMs: reference.durationMs,
+        })),
         slots: snapshot.slots.flatMap((slot) =>
             slot.status === "pending" && slot.clientRequestId
                 ? [

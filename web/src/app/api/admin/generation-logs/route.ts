@@ -28,11 +28,23 @@ export async function GET(request: NextRequest) {
         end: params.get("end") || "",
         includeEcommerceTrace: true,
         includeImageEnhancement: true,
+        includeRequestRecords: true,
     });
 
     const users = await getPublicUsersByIds(result.items.map((item) => item.userId));
-    const accountIdByUserId = new Map(users.map((user) => [user.id, user.accountId]));
-    return NextResponse.json({ logs: result.items.map((item) => ({ ...item, accountId: accountIdByUserId.get(item.userId) })), total: result.total, page: result.page, pageSize: result.pageSize }, { headers: { "Cache-Control": "private, no-store" } });
+    const usersById = new Map(users.map((user) => [user.id, user]));
+    return NextResponse.json(
+        {
+            logs: result.items.map((item) => {
+                const user = usersById.get(item.userId);
+                return { ...item, accountId: user?.accountId, username: user?.username || item.username, displayName: user?.displayName || item.displayName };
+            }),
+            total: result.total,
+            page: result.page,
+            pageSize: result.pageSize,
+        },
+        { headers: { "Cache-Control": "private, no-store" } },
+    );
 }
 
 export async function DELETE(request: Request) {

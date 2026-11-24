@@ -1,8 +1,38 @@
 import { describe, expect, it } from "vitest";
 
-import { buildEcommerceGenerationTrace, normalizeEcommerceGenerationTrace } from "./ecommerce-generation-trace";
+import { buildEcommerceGenerationTrace, ecommerceImageGenerationTimings, normalizeEcommerceGenerationTrace } from "./ecommerce-generation-trace";
 
 describe("ecommerce generation observability trace", () => {
+    it("preserves measured zero duration and leaves missing historical boundaries unknown", () => {
+        const trace = buildEcommerceGenerationTrace({
+            runId: "run",
+            task: { id: "task", startedAt: 1, completedAt: 900 } as never,
+            snapshot: { stageTimings: { analysisStartedAt: 0, analysisCompletedAt: 0, planningCompletedAt: 300, generationStartedAt: 400, generationCompletedAt: 500 }, qualityPolicy: "disabled" } as never,
+            imageTaskIds: ["child"],
+            generationStatus: "completed",
+            finalStatus: "completed",
+        });
+        expect(normalizeEcommerceGenerationTrace(JSON.parse(JSON.stringify(trace)))?.stages).toMatchObject([
+            { key: "visual_analysis", startedAt: 0, completedAt: 0 },
+            { key: "edit_planning", completedAt: 300 },
+            { key: "image_generation", startedAt: 400, completedAt: 500 },
+            { key: "quality_check", status: "not_run" },
+        ]);
+        expect(trace.stages[1]).not.toHaveProperty("startedAt");
+        expect(trace.stages[3]).not.toHaveProperty("startedAt");
+        expect(trace.stages[3]).not.toHaveProperty("completedAt");
+        const unknownGeneration = buildEcommerceGenerationTrace({ runId: "run", task: { id: "task", startedAt: 1, completedAt: 900 } as never, snapshot: {} as never, imageTaskIds: [], generationStatus: "completed", finalStatus: "completed" });
+        expect(unknownGeneration.stages[2]).not.toHaveProperty("startedAt");
+        expect(unknownGeneration.stages[2]).not.toHaveProperty("completedAt");
+    });
+
+    it("uses real image attempt boundaries and leaves unfinished or missing historical ends unknown", () => {
+        const completed = { attemptNo: 1, model: "image", status: "succeeded" as const, startedAt: 400, completedAt: 500 };
+        expect(ecommerceImageGenerationTimings([{ attempts: [completed] }])).toEqual({ generationStartedAt: 400, generationCompletedAt: 500 });
+        expect(ecommerceImageGenerationTimings([{ attempts: [completed] }, { attempts: [{ attemptNo: 1, model: "image", status: "running", startedAt: 450 }] }])).toEqual({ generationStartedAt: 400 });
+        expect(ecommerceImageGenerationTimings([{ attempts: [completed] }, null])).toEqual({});
+    });
+
     it("records a failed analysis as failed with actual candidates rather than not_run", () => {
         const failure = {
             analysisVersion: "ecommerce-visual-analysis.v4",

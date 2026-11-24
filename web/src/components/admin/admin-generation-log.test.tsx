@@ -54,6 +54,86 @@ function enhancementLog(assets: unknown[]): StoredGenerationLog {
 }
 
 describe("GenerationLogDetail ecommerce observability", () => {
+    it("uses recorded request boundaries and leaves absent timing unknown", () => {
+        const log = enhancementLog([]);
+        log.durationMs = 999999;
+        log.requestSnapshot = {
+            version: 1,
+            parameters: {},
+            references: [],
+            slots: [],
+            run: { id: "run", recordType: "generation", status: "completed", inputMessageId: "message", childTaskIds: [], timings: { requestAcceptedAt: 1000, runCompletedAt: 2500 } },
+        };
+        const measured = renderToStaticMarkup(<GenerationLogDetail log={log} />);
+        expect(measured).toMatch(/请求总耗时[\s\S]*?title="1.50s"/);
+        expect(measured).not.toContain("1000.00s");
+        log.requestSnapshot.run!.timings = undefined;
+        const unknown = renderToStaticMarkup(<GenerationLogDetail log={log} />);
+        expect(unknown).toContain("未知（缺少完整时间记录）");
+        expect(unknown).toContain("此记录没有请求级时间数据");
+    });
+    it("separates the user's request from the executed prompt and exposes reference roles and billed attempts", () => {
+        const log = enhancementLog([]);
+        log.prompt = "Keep the furniture identity and recolor the table.";
+        log.requestSnapshot = {
+            version: 1,
+            userPrompt: "把桌子改成参考图的米色",
+            parameters: { size: "1:1" },
+            references: [{ id: "reference-two", kind: "image", name: "颜色参考", mimeType: "image/png", url: "/api/reference-assets/permanent/beige.png", alias: "图片2", purposes: ["style"], providerIndex: 2, sha256: "a".repeat(64) }],
+            slots: [
+                {
+                    id: "slot-one",
+                    index: 0,
+                    status: "success",
+                    taskId: "image-task-one",
+                    attempts: [{ attemptNo: 1, model: "upstream-image", channelId: "channel-one", status: "succeeded", startedAt: 100, completedAt: 200, pointsCost: 1.5, pointsRecordId: "charge-one" }],
+                    billing: { pointsCost: 1.5, pointsRecordId: "charge-one", refunded: false },
+                },
+            ],
+            run: { id: "run-one", recordType: "generation", status: "running", inputMessageId: "message-one", childTaskIds: ["image-task-one"] },
+        };
+
+        const markup = renderToStaticMarkup(<GenerationLogDetail log={log} />);
+
+        for (const text of [
+            "用户原话",
+            "把桌子改成参考图的米色",
+            "实际生图提示词",
+            "Keep the furniture identity",
+            "颜色参考",
+            "图片2",
+            "风格参考",
+            "上游第 3 张",
+            "渠道尝试",
+            "upstream-image",
+            "channel-one",
+            "1.5 积分",
+            "charge-one",
+            "run-one",
+            "message-one",
+        ])
+            expect(markup).toContain(text);
+        expect(markup).toContain('href="/api/reference-assets/permanent/beige.png"');
+    });
+
+    it("labels a pause before generation without pretending an image request failed", () => {
+        const log = enhancementLog([]);
+        log.status = "pending";
+        log.requestSnapshot = {
+            version: 1,
+            userPrompt: "把颜色改成参考图",
+            parameters: {},
+            references: [],
+            slots: [],
+            run: { id: "run-paused", recordType: "pre-generation", status: "paused", inputMessageId: "message-paused", childTaskIds: [], reason: "请明确编辑目标" },
+        };
+        const markup = renderToStaticMarkup(<GenerationLogDetail log={log} />);
+        expect(markup).toContain("待确认");
+        expect(markup).toContain("请明确编辑目标");
+        expect(markup).toContain("尚未创建生图任务");
+        expect(markup).not.toContain("实际生图提示词");
+    });
+
     it("renders the four ecommerce execution stages and their actual models", () => {
         const markup = renderToStaticMarkup(
             <GenerationLogDetail
@@ -179,7 +259,7 @@ describe("GenerationLogDetail AI enhancement observations", () => {
             "下载原图",
         ])
             expect(markup).toContain(text);
-        expect(markup).toContain("/api/generation-log-assets/native.png?download=1");
+        expect(markup).toContain("/api/generation-log-assets/native.png?download=original");
         expect(markup).toContain("成功 1 / 失败 0 / 共 1");
     });
 

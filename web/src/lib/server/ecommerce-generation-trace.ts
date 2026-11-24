@@ -2,6 +2,7 @@ import type { AgentRunTask } from "./agent-run-store";
 import type { EcommerceGenerationSnapshot } from "./ecommerce-generation-snapshot";
 import type { EcommerceRoleRouteSnapshot } from "./ecommerce-model-routing";
 import type { JsonValue } from "./database";
+import type { ImageTask } from "./image-task-store";
 
 export const ECOMMERCE_GENERATION_TRACE_VERSION = "ecommerce-generation-trace.v1" as const;
 
@@ -18,6 +19,7 @@ export type EcommerceGenerationTraceStage = { [key: string]: JsonValue } & {
     key: EcommerceGenerationTraceStageKey;
     status: string;
     model?: EcommerceGenerationTraceModel;
+    startedAt?: number;
     completedAt?: number;
     output: JsonValue;
 };
@@ -47,7 +49,7 @@ export function buildEcommerceGenerationTrace(input: {
     const analysisModel = analysis?.modelRole || analysisFailure?.attempts.at(-1)?.modelRole;
     const plan = input.snapshot.plan;
     const execution = input.task.ecommerceExecution;
-    const quality = input.snapshot.qualityCheck;
+    const quality = input.snapshot.qualityPolicy === "disabled" ? undefined : input.snapshot.qualityCheck;
     return sanitizeTraceValue({
         version: ECOMMERCE_GENERATION_TRACE_VERSION,
         ...(input.snapshot.mode ? { mode: input.snapshot.mode } : {}),
@@ -59,7 +61,7 @@ export function buildEcommerceGenerationTrace(input: {
                 key: "visual_analysis",
                 status: analysis ? "completed" : analysisFailure ? "failed" : "not_run",
                 ...(analysisModel ? { model: routeSnapshot(analysisModel) } : {}),
-                ...(finiteTime(input.snapshot.stageTimings?.analysisCompletedAt) ? { completedAt: input.snapshot.stageTimings!.analysisCompletedAt } : {}),
+                ...stageTimings("visual_analysis", input.snapshot),
                 output: analysis
                     ? {
                           analysisVersion: analysis.analysisVersion,
@@ -76,12 +78,13 @@ export function buildEcommerceGenerationTrace(input: {
                 key: "edit_planning",
                 status: plan ? "completed" : "not_run",
                 ...(input.snapshot.modelRouteSnapshots?.edit_planning ? { model: routeSnapshot(input.snapshot.modelRouteSnapshots.edit_planning) } : {}),
-                ...(finiteTime(input.snapshot.stageTimings?.planningCompletedAt) ? { completedAt: input.snapshot.stageTimings!.planningCompletedAt } : {}),
+                ...stageTimings("edit_planning", input.snapshot),
                 output: plan || {},
             },
             {
                 key: "image_generation",
                 status: input.generationStatus,
+                ...stageTimings("image_generation", input.snapshot),
                 ...(execution?.modelSnapshot ? { model: routeSnapshot(execution.modelSnapshot) } : {}),
                 output: {
                     ...(input.snapshot.technicalCheck ? { technicalCheck: input.snapshot.technicalCheck } : {}),
@@ -110,7 +113,7 @@ export function buildEcommerceGenerationTrace(input: {
                 key: "quality_check",
                 status: quality?.status || "not_run",
                 ...(quality?.modelRole ? { model: routeSnapshot(quality.modelRole) } : {}),
-                ...(finiteTime(quality?.checkedAt) ? { completedAt: quality!.checkedAt } : {}),
+                ...stageTimings("quality_check", input.snapshot),
                 output: {
                     ...(input.snapshot.qualityPolicy ? { policy: input.snapshot.qualityPolicy } : {}),
                     ...(quality
@@ -134,6 +137,34 @@ export function buildEcommerceGenerationTrace(input: {
         finalStatus: input.finalStatus.trim() || input.generationStatus,
         recordedAt: input.recordedAt ?? Date.now(),
     }) as EcommerceGenerationTrace;
+}
+
+export function updateEcommerceGenerationTraceTimings(trace: EcommerceGenerationTrace, snapshot: EcommerceGenerationSnapshot): EcommerceGenerationTrace {
+    return { ...trace, stages: trace.stages.map((stage) => ({ ...stage, ...stageTimings(stage.key, snapshot) })) };
+}
+
+export function ecommerceImageGenerationTimings(images: Array<Pick<ImageTask, "attempts"> | null>) {
+    if (!images.length || images.some((image) => !image?.attempts?.length)) return {};
+    const attempts = images.flatMap((image) => image!.attempts!);
+    return {
+        ...(attempts.every((attempt) => finiteTime(attempt.startedAt)) ? { generationStartedAt: Math.min(...attempts.map((attempt) => attempt.startedAt)) } : {}),
+        ...(attempts.every((attempt) => finiteTime(attempt.completedAt)) ? { generationCompletedAt: Math.max(...attempts.map((attempt) => attempt.completedAt!)) } : {}),
+    };
+}
+
+function stageTimings(key: EcommerceGenerationTraceStageKey, snapshot: EcommerceGenerationSnapshot) {
+    const times = snapshot.stageTimings;
+    const [startedAt, completedAt] =
+        key === "visual_analysis"
+            ? [times?.analysisStartedAt, times?.analysisCompletedAt]
+            : key === "edit_planning"
+              ? [times?.planningStartedAt, times?.planningCompletedAt]
+              : key === "image_generation"
+                ? [times?.generationStartedAt, times?.generationCompletedAt]
+                : snapshot.qualityPolicy === "disabled"
+                  ? [undefined, undefined]
+                  : [times?.qualityStartedAt, times?.qualityCompletedAt ?? snapshot.qualityCheck?.checkedAt];
+    return { ...(finiteTime(startedAt) ? { startedAt } : {}), ...(finiteTime(completedAt) ? { completedAt } : {}) };
 }
 
 export function normalizeEcommerceGenerationTrace(value: unknown): EcommerceGenerationTrace | undefined {
@@ -163,12 +194,14 @@ function normalizeStage(value: unknown): EcommerceGenerationTraceStage[] {
     if (!status) return [];
     const model = isRecord(value.model) ? routeSnapshot(value.model) : undefined;
     const completedAt = finiteTime(value.completedAt) ? value.completedAt : undefined;
+    const startedAt = finiteTime(value.startedAt) ? value.startedAt : undefined;
     return [
         {
             key: value.key,
             status,
             ...(Object.values(model || {}).some(Boolean) ? { model } : {}),
             ...(completedAt !== undefined ? { completedAt } : {}),
+            ...(startedAt !== undefined ? { startedAt } : {}),
             output: sanitizeTraceValue(value.output),
         },
     ];

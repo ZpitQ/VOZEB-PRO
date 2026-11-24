@@ -181,7 +181,7 @@ export class PromptsRepository {
 export class GenerationLogsRepository {
     constructor(private readonly db: QueryExecutor) {}
 
-    async list(input: PageInput & { userId?: string; kind?: GenerationKind; source?: string; status?: GenerationStatus; keyword?: string; startAt?: string; endAt?: string } = {}): Promise<PageResult<GenerationLogRecord>> {
+    async list(input: PageInput & { userId?: string; kind?: GenerationKind; source?: string; status?: GenerationStatus; keyword?: string; startAt?: string; endAt?: string; includeRequestRecords?: boolean } = {}): Promise<PageResult<GenerationLogRecord>> {
         const page = normalizePage(input.page);
         const pageSize = normalizePageSize(input.pageSize);
         const keyword = input.keyword?.trim().toLowerCase() || "";
@@ -196,10 +196,11 @@ export class GenerationLogsRepository {
               AND ($5 = '' OR lower(title) LIKE $6 OR lower(prompt) LIKE $6 OR lower(model) LIKE $6 OR lower(username) LIKE $6 OR lower(display_name) LIKE $6 OR lower(summary) LIKE $6)
               AND ($7::timestamptz IS NULL OR created_at >= $7)
               AND ($8::timestamptz IS NULL OR created_at <= $8)
+              AND ($11::boolean OR request_snapshot #>> '{run,recordType}' IS DISTINCT FROM 'pre-generation')
             ORDER BY created_at DESC, id ASC
             LIMIT $9 OFFSET $10
             `,
-            [input.userId || null, input.kind || null, input.source || null, input.status || null, keyword, `%${keyword}%`, input.startAt || null, input.endAt || null, pageSize, (page - 1) * pageSize],
+            [input.userId || null, input.kind || null, input.source || null, input.status || null, keyword, `%${keyword}%`, input.startAt || null, input.endAt || null, pageSize, (page - 1) * pageSize, input.includeRequestRecords === true],
         );
         const logs = await this.attachAssets(result.rows.map(mapGenerationLog));
         return pageResult(logs, Number(result.rows[0]?.total_count || 0), page, pageSize);
@@ -218,6 +219,7 @@ export class GenerationLogsRepository {
                     to_char(created_at AT TIME ZONE $3::text, 'YYYY-MM-DD') AS day_key
                 FROM generation_logs
                 WHERE created_at >= $1::timestamptz AND created_at < $2::timestamptz
+                  AND request_snapshot #>> '{run,recordType}' IS DISTINCT FROM 'pre-generation'
             )
             SELECT
                 count(*)::int AS total_calls,
@@ -275,6 +277,8 @@ export class GenerationLogsRepository {
                     created_at
                 FROM generation_logs
                 WHERE user_id = $1 AND status = 'pending'
+                  AND request_snapshot #>> '{run,recordType}' IS DISTINCT FROM 'pre-generation'
+                  AND (source <> 'agent' OR request_snapshot #>> '{run,id}' IS NULL)
                 ORDER BY created_at DESC
                 LIMIT 4
             ),
@@ -432,6 +436,22 @@ export class GenerationLogsRepository {
             [ids, JSON.stringify(trace || {}), ...(expectedTrace !== undefined ? [expectedTrace === null ? null : JSON.stringify(expectedTrace)] : [])],
         );
         return result.rowCount || 0;
+    }
+
+    async getByRunTaskIds(userId: string, runId: string, taskIds: string[]) {
+        const result = await this.db.query(
+            `SELECT * FROM generation_logs
+             WHERE user_id = $1 AND (request_snapshot #>> '{run,id}' = $2
+                 OR (request_snapshot #>> '{run,id}' IS NULL AND task_id = ANY($3::text[])))
+               AND request_snapshot #>> '{run,recordType}' IS DISTINCT FROM 'pre-generation'
+             ORDER BY id FOR UPDATE`,
+            [userId, runId, taskIds],
+        );
+        return result.rows.map(mapGenerationLog);
+    }
+
+    async updateRunMetadata(id: string, userId: string, requestSnapshot: unknown, ecommerceTrace: unknown) {
+        await this.db.query("UPDATE generation_logs SET request_snapshot = $3::jsonb, ecommerce_trace = $4::jsonb WHERE id = $1 AND user_id = $2", [id, userId, JSON.stringify(requestSnapshot), JSON.stringify(ecommerceTrace || {})]);
     }
 
     async listByUserIdBatch(userId: string, batchSize: number, forUpdate = false) {

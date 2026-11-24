@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentRun, AgentRunChildTask } from "./agent-run-store";
+import { persistAgentRunRequestLog } from "./agent-run-generation-log";
 import type { AgentImageProcessingPayload, ImageProcessingStoredResult } from "./image-processing-service";
 import type { ImageTask } from "./image-task-store";
 import { appliedImageResultRunBinding, fileImageResultRun, imageResultRunBinding } from "./image-task-result-run";
@@ -218,7 +219,7 @@ async function processProjection(runId: string, project: Projection, update?: Fa
                     const receipt = await executor.query("SELECT id FROM creative_run_events WHERE run_id = $1 AND data ->> 'imageProcessingProjectionKey' = $2 LIMIT 1", [runId, projectionKey(observed)]);
                     if (!receipt.rows.length) missing.push(observed);
                 }
-                if (update && prepared.changed)
+                if (update && prepared.changed) {
                     await executor.query("UPDATE generation_tasks SET status = $2, payload = $3::jsonb, updated_at = $4, expires_at = $5 WHERE id = $1 AND task_type = 'agent'", [
                         runId,
                         normalizeTaskStatus(prepared.run.status),
@@ -226,6 +227,8 @@ async function processProjection(runId: string, project: Projection, update?: Fa
                         new Date(now),
                         new Date(now + update.ttlMs),
                     ]);
+                    await persistAgentRunRequestLog(prepared.run, executor);
+                }
                 for (const observed of missing) {
                     const mutation = keyedProjection(prepared.run, observed, project);
                     await executor.query("INSERT INTO creative_run_events (run_id, type, data, created_at) VALUES ($1, $2, $3::jsonb, $4)", [runId, mutation.event.type, JSON.stringify(mutation.event.data), new Date(now)]);
@@ -247,11 +250,13 @@ async function processProjection(runId: string, project: Projection, update?: Fa
                 if (!next) return null;
                 const missing = next.projections.filter((observed) => !db.events.some((event) => event.runId === runId && (event.data as { imageProcessingProjectionKey?: string } | undefined)?.imageProcessingProjectionKey === projectionKey(observed)));
                 // This existing generation lock permits a single truth write, and no write for receipt-only repair.
-                if (update && next.changed)
+                if (update && next.changed) {
                     await writeJsonDataFile(
                         GENERATION_TASK_FILE,
                         records.map((item) => (item === record ? { ...item, status: normalizeTaskStatus(next.run.status), payload: next.run as unknown as Record<string, unknown>, updatedAt: now, expiresAt: now + update.ttlMs } : item)),
                     );
+                    await persistAgentRunRequestLog(next.run);
+                }
                 return { ...next, missing };
             });
             if (!prepared) return null;

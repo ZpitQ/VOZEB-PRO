@@ -56,6 +56,7 @@ const POSTGRES_TABLES = [
     "prompt_seed_sources",
     "generation_logs",
     "generation_log_assets",
+    "generation_log_evaluations",
     "generation_tasks",
     "generation_concurrency_reservations",
     "generation_worker_heartbeats",
@@ -77,6 +78,8 @@ const POSTGRES_TABLES = [
 ] as const;
 
 const POSTGRES_SCHEMA_OBJECTS = [
+    "generation_log_evaluations_log_created_idx",
+    "generation_log_evaluations_user_idx",
     "image_enhancement_jobs_due_idx",
     "image_enhancement_jobs_user_task_idx",
     "user_account_id_seq",

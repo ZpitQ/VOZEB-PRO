@@ -2,6 +2,7 @@ import { getLocalMediaRegistrations, isLocalMediaRegistrationExpired, type Local
 import { nanoid } from "nanoid";
 
 import { creativeConversationSourceForSurface, normalizeCreativeConversationSource, type CreativeAsset, type CreativeConversation, type CreativeMessage, type CreativeRunEvent, type CreativeSurface } from "@/lib/creative-runtime-contract";
+import { persistAgentRunRequestLog } from "./agent-run-generation-log";
 import { readJsonDataFile, withJsonDataFileLock, writeJsonDataFile } from "@/lib/server/data-adapter";
 import { ensurePostgresSchema, withPostgresTransaction, type QueryExecutor } from "@/lib/server/database";
 import type { StoredGenerationTaskRecord } from "@/lib/server/generation-task-store";
@@ -42,6 +43,7 @@ export type CreateRunBundleInput<T extends AgentRunBase> = {
 
 export type RunMutation<T extends AgentRunBase> = {
     run: T;
+    requestLog?: import("./agent-run-store").AgentRun;
     event?: { type: string; data?: unknown };
     assistant?: { status: CreativeMessage["status"]; content?: string; metadata?: Record<string, unknown> };
     schedule?: Pick<GenerationTaskSchedulePatch, "executionPhase" | "nextPollAt" | "lastUpstreamStatus">;
@@ -191,6 +193,7 @@ export async function mutatePostgresRun<T extends AgentRunBase>(
             await client.query(`SELECT pg_notify('${CREATIVE_RUN_NOTIFY_CHANNEL}', $1)`, [id]);
         }
         if (mutation.assistant) await updatePostgresAssistant(client, run.assistantMessageId, mutation.assistant, now);
+        if (mutation.requestLog) await persistAgentRunRequestLog({ ...mutation.requestLog, updatedAt: now }, client);
         return run;
     });
 }

@@ -142,7 +142,7 @@ describe("image task runtime submission safety", () => {
         mocks.register.mockResolvedValue(undefined);
         mocks.writeLog.mockImplementation(async (task: ImageTask, status: string, _results: unknown, _duration: number, error?: string) => {
             const log = { id: `image-task:${task.id}`, taskId: task.id, userId: task.userId, kind: "image", status, error, count: 1, successCount: status === "success" ? 1 : 0, failCount: status === "failed" ? 1 : 0, assets: [] };
-            mocks.logs.push(log);
+            mocks.logs = [...mocks.logs.filter((entry) => entry.id !== log.id), log];
             return { log };
         });
     });

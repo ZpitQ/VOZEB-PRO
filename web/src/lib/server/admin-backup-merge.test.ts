@@ -85,6 +85,7 @@ function backup(input: {
                 completedAt: now,
             })),
         },
+        generationLogEvaluations: { version: 1, evaluations: [] },
         accountDeletionRequests: {
             version: 1,
             requests: input.deletionRequests.map((request) => ({

@@ -987,6 +987,17 @@ CREATE INDEX IF NOT EXISTS generation_logs_created_idx ON generation_logs (creat
 CREATE INDEX IF NOT EXISTS generation_logs_admin_filter_idx ON generation_logs (kind, source, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS generation_logs_conversation_idx ON generation_logs (conversation_id, created_at DESC) WHERE conversation_id IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS generation_log_evaluations (
+    id text PRIMARY KEY,
+    log_id text NOT NULL REFERENCES generation_logs(id) ON DELETE CASCADE,
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    actor_id text NOT NULL,
+    payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS generation_log_evaluations_log_created_idx ON generation_log_evaluations (log_id, created_at DESC, id);
+CREATE INDEX IF NOT EXISTS generation_log_evaluations_user_idx ON generation_log_evaluations (user_id);
+
 CREATE TABLE IF NOT EXISTS generation_log_assets (
     id bigserial PRIMARY KEY,
     generation_log_id text NOT NULL REFERENCES generation_logs(id) ON DELETE CASCADE,

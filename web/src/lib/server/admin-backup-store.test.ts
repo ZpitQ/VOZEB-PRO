@@ -28,6 +28,9 @@ const mocks = vi.hoisted(() => ({
     readAccountDeletionRequestBackup: vi.fn(),
     writeAccountDeletionRequestBackup: vi.fn(),
     upsertAccountDeletionRequestBackup: vi.fn(),
+    readPostgresGenerationLogEvaluationBackup: vi.fn(),
+    restorePostgresGenerationLogEvaluationBackup: vi.fn(),
+    writeGenerationLogEvaluationFile: vi.fn(),
 }));
 
 vi.mock("@/lib/auth/store-repository", () => ({
@@ -58,6 +61,14 @@ vi.mock("@/lib/server/database/account-deletion-request-repository", () => ({
     writeAccountDeletionRequestBackup: mocks.writeAccountDeletionRequestBackup,
     upsertAccountDeletionRequestBackup: mocks.upsertAccountDeletionRequestBackup,
 }));
+vi.mock("@/lib/server/generation-log-evaluation-store", () => ({
+    readPostgresGenerationLogEvaluationBackup: mocks.readPostgresGenerationLogEvaluationBackup,
+    restorePostgresGenerationLogEvaluationBackup: mocks.restorePostgresGenerationLogEvaluationBackup,
+}));
+vi.mock("@/lib/server/generation-log-evaluation-file", () => ({
+    withGenerationLogEvaluationFiles: async (callback: (logs: unknown, evaluations: unknown) => unknown) => callback(await mocks.readGenerationLogDb(), { version: 1, evaluations: [] }),
+    writeGenerationLogEvaluationFile: mocks.writeGenerationLogEvaluationFile,
+}));
 
 import { readAdminBackupData, restoreAdminBackupData } from "./admin-backup-store";
 
@@ -75,6 +86,7 @@ describe("admin backup store", () => {
         expect(mocks.readPostgresPromptDb).toHaveBeenCalledWith(mocks.client);
         expect(mocks.readPostgresGenerationLogDb).toHaveBeenCalledWith(mocks.client);
         expect(mocks.readAccountDeletionRequestBackup).toHaveBeenCalledWith(mocks.client);
+        expect(mocks.readPostgresGenerationLogEvaluationBackup).toHaveBeenCalledWith(mocks.client);
     });
 
     it("locks and upserts a merged PostgreSQL snapshot without dropping backup-missing users", async () => {
@@ -138,6 +150,7 @@ function setReadSnapshot(data: AdminBackupData) {
     mocks.readGenerationLogDb.mockResolvedValue(data.generationLogs);
     mocks.readPostgresGenerationLogDb.mockResolvedValue(data.generationLogs);
     mocks.readAccountDeletionRequestBackup.mockResolvedValue(data.accountDeletionRequests);
+    mocks.readPostgresGenerationLogEvaluationBackup.mockResolvedValue(data.generationLogEvaluations);
 }
 
 function emptyBackup(): AdminBackupData {
@@ -145,6 +158,7 @@ function emptyBackup(): AdminBackupData {
         auth: emptyDb(),
         prompts: { version: 1, prompts: [], seedSources: [] },
         generationLogs: { version: 1, logs: [] },
+        generationLogEvaluations: { version: 1, evaluations: [] },
         accountDeletionRequests: { version: 1, requests: [] },
     };
 }

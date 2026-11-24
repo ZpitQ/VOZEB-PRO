@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { ecommerceReviewSnapshot, independentAdvisoryReview, reviewContextDigest, reviewQualityDigest } from "./ecommerce-visual-review-identity";
 import { randomUUID } from "node:crypto";
+import { deleteGenerationLogFileRecords } from "@/lib/server/generation-log-evaluation-file";
 import { relative, resolve } from "node:path";
 
 import { getAuthSettings, type UserRole } from "@/lib/auth/store";
@@ -43,6 +44,20 @@ import { hydrateGenerationLogEnhancements } from "./generation-log-enhancement";
 export type { GenerationAssetStats, GenerationLogAsset, GenerationLogInput, GenerationLogSource, StoredGenerationLog } from "./generation-log-types";
 export { isGenerationSource } from "./generation-log-repository";
 
+export async function getGenerationLogById(id: string): Promise<StoredGenerationLog | null> {
+    let log: StoredGenerationLog | null;
+    if (isPostgresDatabaseEnabled()) {
+        await ensurePostgresSchema();
+        const stored = await createPostgresRepositories().generationLogs.getById(id);
+        log = stored ? toStoredGenerationLog(stored) : null;
+    } else {
+        log = (await readGenerationLogDb()).logs.find((item) => item.id === id) || null;
+    }
+    if (!log) return null;
+    const traced = await hydrateEcommerceTracesFromImageTasks([log]);
+    return (await hydrateGenerationLogEnhancements(traced))[0];
+}
+
 export async function listGenerationLogs(options: GenerationLogListOptions = {}) {
     if (isPostgresDatabaseEnabled()) {
         await ensurePostgresSchema();
@@ -58,6 +73,7 @@ export async function listGenerationLogs(options: GenerationLogListOptions = {})
             keyword: options.keyword,
             startAt: dateFilterValue(options.start),
             endAt: dateFilterValue(options.end, true),
+            includeRequestRecords: options.includeRequestRecords,
         });
         let items = result.items.map((item) => toStoredGenerationLog(item, options.includeEcommerceTrace));
         if (options.includeEcommerceTrace) items = await hydrateEcommerceTracesFromImageTasks(items);
@@ -72,6 +88,7 @@ export async function listGenerationLogs(options: GenerationLogListOptions = {})
     const endMs = parseDateEnd(options.end);
 
     const filtered = db.logs
+        .filter((log) => options.includeRequestRecords || log.requestSnapshot?.run?.recordType !== "pre-generation")
         .filter((log) => (isGenerationKind(options.kind) ? log.kind === options.kind : true))
         .filter((log) => (isGenerationSource(options.source) ? log.source === options.source : true))
         .filter((log) => (isGenerationStatus(options.status) ? log.status === options.status : true))
@@ -340,15 +357,10 @@ export async function deleteGenerationLogs(ids: string[], options: { cascadeUser
         await deleteRemovedLogMedia(removed, options.cascadeUserMedia);
         return { deleted: removed.length };
     }
-    let removed: StoredGenerationLog[] = [];
-    const result = await mutateGenerationLogDb(async (db) => {
-        const idSet = new Set(normalizedIds);
-        removed = db.logs.filter((log) => idSet.has(log.id));
-        db.logs = db.logs.filter((log) => !idSet.has(log.id));
-        return { deleted: removed.length };
-    });
+    const idSet = new Set(normalizedIds);
+    const removed = await deleteGenerationLogFileRecords((log) => idSet.has(log.id));
     await deleteRemovedLogMedia(removed, options.cascadeUserMedia);
-    return result;
+    return { deleted: removed.length };
 }
 
 export async function deleteGenerationLogsByUserId(userId: string) {
@@ -372,14 +384,9 @@ export async function deleteGenerationLogsByUserId(userId: string) {
         }
         return { deleted };
     }
-    let removed: StoredGenerationLog[] = [];
-    const result = await mutateGenerationLogDb(async (db) => {
-        removed = db.logs.filter((log) => log.userId === targetUserId);
-        db.logs = db.logs.filter((log) => log.userId !== targetUserId);
-        return { deleted: removed.length };
-    });
+    const removed = await deleteGenerationLogFileRecords((log) => log.userId === targetUserId);
     await deleteRemovedLogMedia(removed);
-    return result;
+    return { deleted: removed.length };
 }
 
 export async function getGenerationAssetStats(): Promise<GenerationAssetStats> {
@@ -439,6 +446,11 @@ function buildGenerationLog(
     now = new Date().toISOString(),
     completedAt = input.status === "pending" ? undefined : normalizeTime(input.completedAt, now),
 ): StoredGenerationLog {
+    if (input.status === "pending" && existing && existing.status !== "pending" && input.requestSnapshot) {
+        const incomingAttempt = Math.max(0, ...input.requestSnapshot.slots.flatMap((slot) => slot.attempts?.map((attempt) => attempt.attemptNo) || []));
+        const recordedAttempt = Math.max(0, ...(existing.requestSnapshot?.slots.flatMap((slot) => slot.attempts?.map((attempt) => attempt.attemptNo) || []) || []));
+        if (incomingAttempt <= recordedAttempt) return existing;
+    }
     return {
         id,
         userId: normalizeText(input.userId, existing?.userId || "", 120),
@@ -449,7 +461,7 @@ function buildGenerationLog(
         source: input.source || existing?.source || "unknown",
         status: input.status,
         title: normalizeText(input.title, existing?.title || input.prompt || "未命名记录", 80),
-        prompt: normalizeText(input.prompt, existing?.prompt || "", 5000),
+        prompt: input.prompt?.trim() || existing?.prompt || "",
         model: normalizeModelName(input.model || existing?.model || ""),
         summary: normalizeText(input.summary, existing?.summary || defaultSummary(input.kind, input.status), 160),
         durationMs: normalizeNonNegativeNumber(input.durationMs, existing?.durationMs || 0),

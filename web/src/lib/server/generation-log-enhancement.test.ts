@@ -178,6 +178,15 @@ describe("administrator generation log enhancement observations", () => {
         expect((await listGenerationLogs(adminOptions)).items[0]?.assets[0]).not.toHaveProperty("enhancement");
     });
 
+    it.each([false, true])("hydrates a standalone image task with an execution snapshot that has no asset index (postgres=%s)", async (postgres) => {
+        mocks.postgres = postgres;
+        const log = fixtureLog();
+        log.requestSnapshot = { version: 1, parameters: {}, references: [], slots: [{ id: "image-task-one", index: 0, status: "success", taskId: "image-task-one" }] };
+        mocks.readGenerationLogDb.mockResolvedValue({ version: 1, logs: [log] });
+        mocks.list.mockResolvedValue({ items: [log], total: 1, page: 1, pageSize: 1 });
+        expect((await listGenerationLogs(adminOptions)).items[0]?.assets[0]).toHaveProperty("enhancement.id", "enhancement-one");
+    });
+
     it("does not query jobs for ordinary reads, no-job skips, video, or incomplete identities", async () => {
         await listGenerationLogs({ page: 1 });
         const log = fixtureLog();

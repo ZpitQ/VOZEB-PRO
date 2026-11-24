@@ -551,8 +551,11 @@ export async function setAgentRunStatus(run: AgentRun, status: AgentRunStatus) {
             if (current.userId !== run.userId || current.status !== run.status) return null;
             const tasks = status === "cancelled" ? cancelActiveTasks(current.tasks) : current.tasks;
             const ops = status === "cancelled" && current.surface === "canvas" ? cancelledRunCanvasOps(current.id, tasks) : [];
+            const next = { ...current, status, tasks, executionId: undefined, ...(status === "cancelled" ? { cancellation: undefined } : {}) };
+            applyAgentRunStatusTimings(current, next);
             return {
-                run: { ...current, status, tasks, executionId: undefined, ...(status === "cancelled" ? { cancellation: undefined } : {}) },
+                run: next,
+                requestLog: next,
                 event: { type: `run.${status}`, ...(ops.length ? { data: { ops } } : {}) },
                 assistant: terminalAssistant(status),
             };
@@ -634,12 +637,14 @@ export async function updateAgentRunById(
             )
                 return null;
             const next = { ...current, ...patch, status: patch.status || current.status };
+            applyAgentRunStatusTimings(current, next);
             if (patch.ecommerceSnapshot && next.ecommerceGenerations) {
                 const snapshot = patch.ecommerceSnapshot;
                 next.ecommerceGenerations = next.ecommerceGenerations.map((generation) => (generation.snapshot.modelRoles?.generation === snapshot.modelRoles?.generation ? { ...generation, snapshot } : generation));
             }
             return {
                 run: next,
+                requestLog: next,
                 event,
                 assistant: assistantUpdate(next, event),
                 ...(patch.status === "completed" && next.reviewStatus === "review_pending" && !next.reviewed ? { schedule: { executionPhase: "review_pending" as const, nextPollAt: Date.now(), lastUpstreamStatus: "review_pending" } } : {}),
@@ -649,6 +654,15 @@ export async function updateAgentRunById(
         expectedExecutionId,
         expectedReview?.claim ? { reviewClaim: expectedReview.claim, ...(expectedReview.sources ? { reviewSources: expectedReview.sources } : {}) } : undefined,
     );
+}
+
+function applyAgentRunStatusTimings(current: AgentRun, next: AgentRun) {
+    if (next.status === current.status) return;
+    if ((next.status === "planning" || next.status === "running") && (current.status === "completed" || current.status === "failed" || current.status === "cancelled")) {
+        if (next.timings) next.timings = { ...next.timings, runCompletedAt: undefined };
+        return;
+    }
+    if (next.status === "completed" || next.status === "failed" || next.status === "cancelled") next.timings = { ...(next.timings || { requestAcceptedAt: current.createdAt }), runCompletedAt: next.timings?.runCompletedAt ?? Date.now() };
 }
 
 export async function updateAgentRunTaskById(id: string, taskId: string, patch: Partial<AgentRunTask>, eventType: string, expectedExecutionId: string, observed?: AgentImageProcessingObservation) {
@@ -677,21 +691,21 @@ function projectAgentImageProcessingFact(run: AgentRun, observed: AgentImageProc
 }
 
 function agentTaskMutation(current: AgentRun, taskId: string, patch: Partial<AgentRunTask>, eventType: string): RunMutation<AgentRun> | null {
+    const now = Date.now();
     const tasks = current.tasks.map((task) => (task.id === taskId ? mergeAgentTaskPatch(task, patch) : task));
     const taskIndex = tasks.findIndex((item) => item.id === taskId);
     const task = tasks[taskIndex];
     if (!task) return null;
     const assetIds = Array.from(new Set([...current.assetIds, ...(task.assetIds || [])]));
-    const now = Date.now();
     const completed = tasks.filter((item) => item.status === "completed");
     const timings: AgentRunTimings = {
         ...(current.timings || { requestAcceptedAt: current.createdAt }),
-        ...(eventType === "task.created" && !current.timings?.firstTaskSubmittedAt ? { firstTaskSubmittedAt: now } : {}),
-        ...((eventType === "task.completed" || eventType === "task.child.completed") && !current.timings?.firstResultReadyAt ? { firstResultReadyAt: now } : {}),
-        ...(eventType === "task.completed" && completed.length === tasks.length ? { allResultsReadyAt: now } : {}),
+        ...(eventType === "task.created" && current.timings?.firstTaskSubmittedAt === undefined ? { firstTaskSubmittedAt: now } : {}),
+        ...((eventType === "task.completed" || eventType === "task.child.completed") && current.timings?.firstResultReadyAt === undefined ? { firstResultReadyAt: now } : {}),
+        ...(eventType === "task.completed" && completed.length === tasks.length && current.timings?.allResultsReadyAt === undefined ? { allResultsReadyAt: now } : {}),
     };
     const run = { ...current, tasks, assetIds, timings };
-    return { run, event: agentTaskEvent(run, taskIndex, task, eventType, patch.childTasks?.[0]?.id) };
+    return { run, requestLog: run, event: agentTaskEvent(run, taskIndex, task, eventType, patch.childTasks?.[0]?.id) };
 }
 
 function agentTaskEvent(run: AgentRun, taskIndex: number, task: AgentRunTask, eventType: string, childId?: string) {
